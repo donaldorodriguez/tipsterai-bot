@@ -1,0 +1,7 @@
+.env
+node_modules/
+picks.json
+picks_history.json
+*.log
+.pm2/
+*.DS_Store

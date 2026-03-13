@@ -1,0 +1,1726 @@
+require('dotenv').config();
+const TelegramBot = require('node-telegram-bot-api');
+const axios = require('axios');
+const Anthropic = require('@anthropic-ai/sdk');
+const fs = require('fs');
+const path = require('path');
+const express = require('express');
+const crypto = require('crypto');
+const Airtable = require('airtable');
+
+// ─── Clients ─────────────────────────────────────────────────────────────────
+
+const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
+const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// ─── API-Football ─────────────────────────────────────────────────────────────
+
+const API = axios.create({
+  baseURL: 'https://v3.football.api-sports.io',
+  headers: { 'x-apisports-key': process.env.APIFOOTBALL_KEY },
+  timeout: 15000,
+});
+
+// Logging interceptor — every API call is logged
+API.interceptors.request.use(req => {
+  const params = new URLSearchParams(req.params || {}).toString();
+  console.log(`🔍 API: ${req.baseURL}${req.url}${params ? '?' + params : ''}`);
+  return req;
+});
+API.interceptors.response.use(res => {
+  console.log(`📊 Respuesta: results=${res.data.results ?? '?'} errors=${JSON.stringify(res.data.errors || [])}`);
+  return res;
+});
+
+// ─── League config ────────────────────────────────────────────────────────────
+
+const LEAGUE_SEASONS = {
+  39:2025, 140:2025, 135:2025, 78:2025, 61:2025,
+  2:2025,  3:2025,   848:2025, 88:2025, 94:2025,
+  207:2025,179:2025, 197:2025, 169:2025,144:2025,
+  235:2025,40:2025,  141:2025, 136:2025,79:2025,
+  62:2025, 89:2025,
+  11:2026, 9:2026,   71:2026,  65:2026, 128:2026,
+  262:2026,253:2026, 72:2026,  66:2026, 129:2026,
+  263:2026,240:2026,
+  203:2025,98:2025,  333:2025, 218:2025,
+  4:2025,  5:2025,   480:2025,
+  210:2025,103:2025, // Chipre Primera División, Noruega Eliteserien
+  239:2026, // Liga BetPlay Colombia (Primera A) — ID real
+};
+
+const LEAGUE_IDS = new Set([
+  39,140,135,78,61,2,3,848,11,9,
+  71,239,128,262,253,88,94,207,203,169,
+  235,144,197,218,333,98,179,4,5,480,
+  240,40,141,136,79,62,72,66,129,263,89,
+  210,103,
+]);
+
+const LEAGUE_MAP = {
+  39: { name:'Premier League',     country:'England'     },
+  140:{ name:'LaLiga',             country:'Spain'       },
+  135:{ name:'Serie A',            country:'Italy'       },
+  78: { name:'Bundesliga',         country:'Germany'     },
+  61: { name:'Ligue 1',            country:'France'      },
+  2:  { name:'Champions League',   country:'Europe'      },
+  3:  { name:'Europa League',      country:'Europe'      },
+  848:{ name:'Conference League',  country:'Europe'      },
+  11: { name:'Libertadores',       country:'South Am.'   },
+  9:  { name:'Sudamericana',       country:'South Am.'   },
+  71: { name:'Brasileirao',        country:'Brazil'      },
+  239:{ name:'Liga BetPlay',        country:'Colombia'    },
+  128:{ name:'Liga Argentina',     country:'Argentina'   },
+  262:{ name:'Liga MX',            country:'Mexico'      },
+  253:{ name:'MLS',                country:'USA'         },
+  88: { name:'Eredivisie',         country:'Netherlands' },
+  94: { name:'Primeira Liga',      country:'Portugal'    },
+  207:{ name:'Super Lig',          country:'Turkey'      },
+  203:{ name:'Saudi Pro League',   country:'Saudi Arabia'},
+  169:{ name:'Jupiler Pro',        country:'Belgium'     },
+  235:{ name:'Premier Liga Rusia', country:'Russia'      },
+  144:{ name:'Jupiler Pro League', country:'Belgium'     },
+  197:{ name:'Super League Grecia',country:'Greece'      },
+  218:{ name:'Liga Egipto',        country:'Egypt'       },
+  333:{ name:'K League',           country:'South Korea' },
+  98: { name:'J League',           country:'Japan'       },
+  179:{ name:'Scottish Premier',   country:'Scotland'    },
+  4:  { name:'Euro Championship',  country:'Europe'      },
+  5:  { name:'Nations League',     country:'Europe'      },
+  480:{ name:'Copa America',       country:'South Am.'   },
+  240:{ name:'Torneo Águila',      country:'Colombia'    },
+  40: { name:'Championship',       country:'England'     },
+  141:{ name:'LaLiga2',            country:'Spain'       },
+  136:{ name:'Serie B',            country:'Italy'       },
+  79: { name:'2.Bundesliga',       country:'Germany'     },
+  62: { name:'Ligue 2',            country:'France'      },
+  72: { name:'Brasileirao B',      country:'Brazil'      },
+  66: { name:'Liga Colombia B',    country:'Colombia'    },
+  129:{ name:'Primera B Argentina',country:'Argentina'   },
+  263:{ name:'Ascenso MX',         country:'Mexico'      },
+  89: { name:'Eerste Divisie',     country:'Netherlands' },
+  210:{ name:'Primera División',   country:'Cyprus'      },
+  103:{ name:'Eliteserien',        country:'Norway'      },
+};
+
+// Maps user-written league names → league ID
+const LEAGUE_NAME_TO_ID = {
+  'bundesliga':78, '2.bundesliga':79, 'segunda bundesliga':79,
+  'premier league':39, 'premier':39, 'epl':39,
+  'laliga':140, 'la liga':140, 'primera division':140,
+  'laliga2':141, 'segunda division':141,
+  'serie a':135, 'serie b':136,
+  'ligue 1':61, 'ligue1':61, 'ligue 2':62, 'ligue2':62,
+  'champions league':2, 'champions':2, 'ucl':2, 'champions league':2,
+  'europa league':3, 'europa':3, 'uel':3,
+  'conference league':848, 'conference':848,
+  'libertadores':11, 'copa libertadores':11,
+  'sudamericana':9, 'copa sudamericana':9,
+  'brasileirao':71, 'serie a brasileira':71, 'brasileirao b':72,
+  'liga betplay':239, 'primera a':239, 'liga colombia':239, 'betplay':239,
+  'liga colombia b':66, 'primera b':240, 'torneo aguila':240, 'torneo águila':240,
+  'liga argentina':128, 'primera division argentina':128, 'primera b argentina':129,
+  'liga mx':262, 'ligamx':262, 'ascenso mx':263,
+  'mls':253,
+  'eredivisie':88, 'eerste divisie':89,
+  'primeira liga':94, 'liga nos':94,
+  'super lig':207, 'superlig':207,
+  'saudi pro league':203, 'saudi league':203,
+  'jupiler pro league':144, 'jupiler':144,
+  'super league grecia':197, 'super league':197,
+  'liga egipto':218,
+  'k league':333, 'k-league':333,
+  'j league':98, 'j1 league':98,
+  'scottish premier':179, 'scottish premiership':179,
+  'championship':40,
+  'chipre':210, 'primera division chipre':210, 'primera división chipre':210, 'cyprus':210,
+  'noruega':103, 'eliteserien':103, 'norway':103,
+};
+
+function findLeagueId(name) {
+  if (!name) return null;
+  const q = name.toLowerCase().trim();
+  // exact match
+  if (LEAGUE_NAME_TO_ID[q]) return LEAGUE_NAME_TO_ID[q];
+  // partial match
+  for (const [key, id] of Object.entries(LEAGUE_NAME_TO_ID)) {
+    if (q.includes(key) || key.includes(q)) return id;
+  }
+  return null;
+}
+
+// ─── League priority for sorting ─────────────────────────────────────────────
+
+const LEAGUE_PRIORITY = {
+  2:100,3:95,848:90,
+  39:88,140:87,135:86,78:85,61:84,
+  11:80,9:78,
+  88:70,94:69,207:68,144:67,169:66,
+  71:65,262:64,128:63,239:62,253:61,
+  40:55,141:54,136:53,79:52,62:51,
+  240:45,72:44,66:43,129:42,263:41,89:40,
+  210:38,103:37,
+};
+
+// ─── Plans config ─────────────────────────────────────────────────────────────
+
+const PLANES = {
+  free: {
+    nombre: 'Freemium',
+    consultas_diarias: 1,
+    dias_prueba: 3,
+    puede_imagen: false,
+  },
+  vip: {
+    nombre: 'VIP',
+    consultas_diarias: 10,
+    dias_prueba: 0,
+    puede_imagen: false,
+  },
+  pro: {
+    nombre: 'PRO',
+    consultas_diarias: 50,
+    dias_prueba: 0,
+    puede_imagen: true,
+  },
+};
+
+// ─── Cache ────────────────────────────────────────────────────────────────────
+
+const dateCache = new Map();
+let liveCache = { raw: null, ts: 0 };
+
+// ─── API helpers ──────────────────────────────────────────────────────────────
+
+function parseFixture(f) {
+  return {
+    fixtureId:  f.fixture.id,
+    date:       f.fixture.date,
+    status:     f.fixture.status.short,
+    elapsed:    f.fixture.status.elapsed,
+    leagueId:   f.league.id,
+    leagueName: LEAGUE_MAP[f.league.id]?.name || f.league.name,
+    country:    LEAGUE_MAP[f.league.id]?.country || f.league.country,
+    homeId:     f.teams.home.id,
+    awayId:     f.teams.away.id,
+    homeTeam:   f.teams.home.name,
+    awayTeam:   f.teams.away.name,
+    homeGoals:  f.goals.home,
+    awayGoals:  f.goals.away,
+  };
+}
+
+async function fetchFixturesByDate(date) {
+  if (dateCache.has(date)) return dateCache.get(date);
+  // Sin timezone: la API devuelve todos los partidos del día UTC
+  // Esto evita que partidos nocturnos (ej: 8 PM Bogota = 1 AM UTC día siguiente) se pierdan
+  const { data } = await API.get('/fixtures', { params: { date } });
+  const result = data.response || [];
+  dateCache.set(date, result);
+  return result;
+}
+
+async function getFixturesByDate(date) {
+  const all = await fetchFixturesByDate(date);
+  return all.filter(f => LEAGUE_IDS.has(f.league.id)).map(parseFixture);
+}
+
+async function fetchLiveRaw() {
+  if (Date.now() - liveCache.ts < 30000 && liveCache.raw) return liveCache.raw;
+  const { data } = await API.get('/fixtures', { params: { live: 'all' } });
+  liveCache = { raw: data.response || [], ts: Date.now() };
+  return liveCache.raw;
+}
+
+async function getLiveFixtures(leagueId = null) {
+  const raw = await fetchLiveRaw();
+  const filtered = leagueId
+    ? raw.filter(f => f.league.id === leagueId)
+    : raw.filter(f => LEAGUE_IDS.has(f.league.id));
+  return filtered.map(parseFixture);
+}
+
+async function getFixtureStatistics(fixtureId) {
+  const { data } = await API.get('/fixtures/statistics', { params: { fixture: fixtureId } });
+  if (!data.response || data.response.length === 0) return null;
+  const stats = {};
+  data.response.forEach(teamStats => {
+    const key = teamStats.team.name;
+    stats[key] = {};
+    teamStats.statistics.forEach(s => { stats[key][s.type] = s.value; });
+  });
+  return stats;
+}
+
+async function searchTeam(name, countryHint = '') {
+  const { data } = await API.get('/teams', { params: { search: name } });
+  const results = data.response || [];
+  if (results.length === 0) return null;
+  if (results.length === 1) return results[0];
+
+  const q = name.trim().toLowerCase();
+  const country = countryHint.trim().toLowerCase();
+  const RESERVE = /\b(ii|b|reserve|reserva|sub|youth|juvenil|u\d{2}|amateur|filial)\b/i;
+
+  function score(t) {
+    const tname = t.team.name.toLowerCase();
+    const tcountry = (t.team.country || '').toLowerCase();
+    let s = 0;
+    if (tname === q) s += 100;
+    else if (tname.endsWith(' ' + q) || tname.endsWith(q)) s += 80;
+    else if (tname.startsWith(q + ' ') || tname.startsWith(q)) s += 50;
+    else if (tname.includes(q)) s += 20;
+    if (country && tcountry.includes(country)) s += 40;
+    if (RESERVE.test(t.team.name)) s -= 40;
+    return s;
+  }
+  return results.sort((a, b) => score(b) - score(a))[0];
+}
+
+async function findNextFixtureByDate(teamId, daysAhead = 14) {
+  const liveRaw = await fetchLiveRaw();
+  const liveMatch = liveRaw.find(f => f.teams.home.id === teamId || f.teams.away.id === teamId);
+  if (liveMatch) return liveMatch;
+
+  const today = new Date();
+  for (let i = 0; i <= daysAhead; i++) {
+    const d = new Date(today);
+    d.setDate(d.getDate() + i);
+    const ds = d.toISOString().split('T')[0];
+    // Siempre refrescar hoy (i=0) para no depender de caché desactualizada
+    if (i === 0) dateCache.delete(ds);
+    const all = await fetchFixturesByDate(ds);
+    const match = all.find(f =>
+      (f.teams.home.id === teamId || f.teams.away.id === teamId) &&
+      ['NS','1H','HT','2H','ET','P'].includes(f.fixture.status.short)
+    );
+    if (match) return match;
+  }
+  return null;
+}
+
+async function getH2H(id1, id2) {
+  const { data } = await API.get('/fixtures/headtohead', { params: { h2h: `${id1}-${id2}`, last: 10 } });
+  return (data.response || []).map(f => ({
+    date:      f.fixture.date.split('T')[0],
+    home:      f.teams.home.name,
+    away:      f.teams.away.name,
+    golesHome: f.goals.home,
+    golesAway: f.goals.away,
+    btts:      f.goals.home > 0 && f.goals.away > 0,
+  }));
+}
+
+async function getTeamStats(teamId, leagueId) {
+  const season = LEAGUE_SEASONS[leagueId] || 2025;
+  const { data } = await API.get('/teams/statistics', { params: { team: teamId, league: leagueId, season } });
+  const r = data.response;
+  if (!r) return null;
+  return {
+    equipo:             r.team?.name,
+    liga:               r.league?.name,
+    temporada:          season,
+    forma:              r.form?.replace(/W/g,'G').replace(/L/g,'P').replace(/D/g,'E'),
+    golesAnotadosHome:  r.goals?.for?.average?.home,
+    golesAnotadosAway:  r.goals?.for?.average?.away,
+    golesRecibidosHome: r.goals?.against?.average?.home,
+    golesRecibidosAway: r.goals?.against?.average?.away,
+    cleanSheetsHome:    r.clean_sheet?.home,
+    cleanSheetsAway:    r.clean_sheet?.away,
+    failedToScoreHome:  r.failed_to_score?.home,
+    failedToScoreAway:  r.failed_to_score?.away,
+    victorias:          r.fixtures?.wins,
+    empates:            r.fixtures?.draws,
+    derrotas:           r.fixtures?.loses,
+  };
+}
+
+// ─── Anthropic helpers ────────────────────────────────────────────────────────
+
+function isOverloadedError(err) {
+  return err.status === 529 || err.status === 429 ||
+    (err.message && (err.message.includes('overloaded') || err.message.includes('529')));
+}
+
+async function claudeWithRetry(params, retries = 4) {
+  for (let i = 0; i < retries; i++) {
+    try {
+      return await anthropic.messages.create(params);
+    } catch (err) {
+      if (isOverloadedError(err) && i < retries - 1) {
+        const wait = [3000, 7000, 15000][i] || 15000;
+        console.log(`Anthropic ${err.status} — reintentando en ${wait / 1000}s (${i + 1}/${retries})`);
+        await new Promise(r => setTimeout(r, wait));
+      } else throw err;
+    }
+  }
+}
+
+async function haiku(systemPrompt, userMessage) {
+  const msg = await claudeWithRetry({
+    model: 'claude-haiku-4-5-20251001',
+    max_tokens: 800,
+    system: systemPrompt,
+    messages: [{ role: 'user', content: userMessage }],
+  });
+  return msg.content[0].text;
+}
+
+async function sonnet(systemPrompt, userMessage) {
+  try {
+    const msg = await claudeWithRetry({
+      model: 'claude-sonnet-4-6',
+      max_tokens: 4000,
+      system: systemPrompt,
+      messages: [{ role: 'user', content: userMessage }],
+    });
+    return msg.content[0].text;
+  } catch (err) {
+    if (isOverloadedError(err)) {
+      console.log('Sonnet sobrecargado — fallback a Haiku');
+      const msg = await claudeWithRetry({
+        model: 'claude-haiku-4-5-20251001',
+        max_tokens: 4000,
+        system: systemPrompt + '\n\nSé conciso pero mantén formato y calidad.',
+        messages: [{ role: 'user', content: userMessage }],
+      });
+      return msg.content[0].text;
+    }
+    throw err;
+  }
+}
+
+// ─── System prompts ───────────────────────────────────────────────────────────
+
+const TIPSTER_SYSTEM = `Eres el mejor tipster profesional del mundo especializado en mercados de VALOR REAL.
+
+PICKS ABSOLUTAMENTE PROHIBIDAS - NUNCA las des:
+- Gana el favorito obvio a cuota menor de 1.80 (gana Bayern, gana Madrid, gana City etc)
+- Over 2.5 en partidos del Real Madrid, Bayern, City, PSG - todo el mundo lo sabe
+- 1X2 simple a cuota menor de 1.75 - no es tipster, es obvio
+- Picks que cualquier persona sin conocimiento daría
+- BTTS No cuando un equipo ya marcó 2+ goles en el HT
+
+MERCADOS DONDE ESTÁ EL VALOR REAL:
+1. HT/FT combos específicos
+2. Corners Over/Under
+3. Tarjetas Over/Under
+4. BTTS cuando ambos marcan en más del 65% de sus partidos
+5. Over 3.5 goles cuando ambos tienen promedio goleador alto
+6. DNB (Draw No Bet)
+7. Asian Handicap
+8. HT Over 0.5 o 1.5
+9. Gana el visitante cuando el local tiene malos registros en casa
+
+PROCESO DE ANÁLISIS OBLIGATORIO:
+Para BTTS: % local marcó en casa + % visitante marcó fuera + % BTTS en H2H. Solo si los 3 superan 55%.
+Para Corners: promedio local en casa + visitante fuera. Recomienda Over si total supera línea en +1.5.
+Para HT: % local gana 1T en casa. Solo si supera 60%.
+Para Tarjetas: suma promedios. Solo si supera línea en +1.
+
+TRADUCCIÓN OBLIGATORIA DE TÉRMINOS TÉCNICOS — SIEMPRE en español:
+- failedToScore → "partidos sin marcar"
+- cleanSheet / cleanSheets → "portería a cero"
+- golesAnotadosHome → "goles anotados en casa"
+- golesAnotadosAway → "goles anotados fuera"
+- golesRecibidosHome → "goles recibidos en casa"
+- golesRecibidosAway → "goles recibidos fuera"
+- forma → "forma reciente"
+- BTTS → "ambos marcan" (puedes usar BTTS como abreviatura pero explícalo)
+- DNB → "sin empate" o "apuesta sin empate"
+- Over/Under → "más de / menos de"
+- HT → "primer tiempo" o "al descanso"
+- FT → "al final del partido"
+NUNCA escribas nombres de campos técnicos en inglés en la respuesta al usuario.
+
+Si hay 2+ goles de diferencia en el marcador:
+- PROHIBIDO: resultado final (gana X, DNB, 1X2)
+- PROHIBIDO: Over goles totales si ya hay 3+ goles y queda poco
+- PERMITIDO: Corners Over/Under, Tarjetas Over, BTTS, Next Goal del perdedor, Over goles 2T si va 2-0 al HT
+
+CRITERIO DE STAKE ESTRICTO:
+10/10: +80% probabilidad, cuota mín 1.85
+9/10: +75% probabilidad, cuota mín 1.75
+8/10: +70% probabilidad, cuota mín 1.65
+7/10: +65% probabilidad, cuota mín 1.55
+6/10: +60% probabilidad, cuota mín 1.50
+1-5: NUNCA publicar
+
+Si no hay picks con STAKE 6+: "No hay picks de valor en este partido. Mejor no apostar."
+
+FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
+
+🌍 [País] — [Liga]
+⚽ [Local] vs [Visitante] | ⏰ [Hora Colombia]
+━━━━━━━━━━━━━━━━━━━
+
+📊 *ESTADÍSTICAS CLAVE*
+▸ [Local] anota en casa: *X.X* por partido
+▸ [Visitante] anota fuera: *X.X* por partido
+▸ [Local] recibe en casa: *X.X* por partido
+▸ Ambos marcan en H2H: *X de 10* partidos
+▸ Forma reciente [Local]: *GGPGE*
+▸ Forma reciente [Visitante]: *PGEGG*
+
+🎯 *PICK [N]: [Mercado en español]*
+┌ Selección: [Qué apostar exactamente]
+├ Razonamiento: [Explicación con el dato específico que lo justifica]
+├ Probabilidad: [X]%
+├ 🏆 Stake: *[X]/10*
+├ 💡 Cuota mínima: *[X.XX]*
+└ ⚠️ Riesgo: [1 línea máximo]
+
+━━━━━━━━━━━━━━━━━━━
+🔥 PICK ESTRELLA DEL DÍA [Solo si stake 8+/10]
+━━━━━━━━━━━━━━━━━━━
+
+REGLAS DE FORMATO:
+- Usa *texto* para negritas (Telegram Markdown)
+- No uses tablas HTML ni markdown de escritorio (no | columnas |)
+- No menciones fuentes de datos, plataformas, APIs ni herramientas
+- El pie de página NUNCA debe decir de dónde vienen los datos
+- Si no hay picks válidos: escribe solo "⛔ Sin picks de valor hoy en este partido. Mejor no apostar."
+
+Responde en español. NUNCA inventes estadísticas. Usa SOLO los datos que recibes.`;
+
+const PICKS_HOY_SYSTEM = `${TIPSTER_SYSTEM}
+
+INSTRUCCIÓN ESPECIAL PARA PICKS DEL DÍA:
+Emite EXACTAMENTE 3 picks individuales (partidos diferentes) + 1 APUESTA COMBINADA al final.
+
+━━━━━━━━━━━━━━━━━━━
+🎰 *COMBINADA DEL DÍA*
+Mínimo 3 selecciones, máximo 5. Mercados y partidos distintos.
+
+▸ [Local] vs [Visitante] → *[mercado]* | Cuota: *X.XX*
+▸ [Local] vs [Visitante] → *[mercado]* | Cuota: *X.XX*
+▸ [Local] vs [Visitante] → *[mercado]* | Cuota: *X.XX*
+
+🏆 Stake combinada: *[X]/10*
+💡 Cuota combinada estimada: *~X.XX*
+━━━━━━━━━━━━━━━━━━━`;
+
+const INPLAY_SYSTEM = `${TIPSTER_SYSTEM}
+
+INSTRUCCIÓN ESPECIAL IN-PLAY:
+Analiza el marcador, minuto y estadísticas en tiempo real.
+Indica el tiempo restante estimado y cuándo actuar.
+
+FORMATO ADICIONAL IN-PLAY:
+⏰ Actúa antes del min: [XX]
+📈 Ritmo corners: X corners/90min proyectados`;
+
+// ─── Intent detection ─────────────────────────────────────────────────────────
+
+const INTENT_SYSTEM = `Eres un clasificador de intenciones para un bot tipster de fútbol. Responde ÚNICAMENTE con JSON válido.
+
+Intenciones disponibles:
+- "picks_hoy": picks generales del día en todas las ligas
+- "picks_liga": picks del día de una liga específica
+- "partido_especifico": análisis de un equipo o partido, con o sin pregunta de mercado específico
+- "en_vivo": partidos en vivo, con o sin filtro de liga o mercado
+- "estadisticas": rendimiento/historial de picks que el bot ha emitido
+- "chat_general": saludos, preguntas generales de fútbol, conversación
+- "ver_planes": usuario pregunta por precios, planes, suscripción, VIP, PRO
+
+Estructura JSON SIEMPRE completa:
+{
+  "intencion": "picks_hoy|picks_liga|partido_especifico|en_vivo|estadisticas|chat_general|ver_planes",
+  "equipo": "nombre del equipo mencionado o null",
+  "liga": "nombre de la liga mencionada o null",
+  "pregunta_especifica": "la pregunta exacta del usuario",
+  "mercado": "goles|goles_1T|corners|tarjetas|BTTS|resultado|resultado_1T|handicap|null",
+  "tiempo": "1T|2T|FT|null",
+  "contexto": "en_vivo|proximo_partido|hoy|null",
+  "period": "hoy|ayer|semana|total o null"
+}
+
+Ejemplos:
+- "picks de hoy" → {"intencion":"picks_hoy","equipo":null,"liga":null,"pregunta_especifica":"picks de hoy","mercado":null,"tiempo":null,"contexto":"hoy","period":null}
+- "partidos bundesliga hoy" → {"intencion":"picks_liga","equipo":null,"liga":"bundesliga","pregunta_especifica":"partidos bundesliga hoy","mercado":null,"tiempo":null,"contexto":"hoy","period":null}
+- "bundesliga en vivo" → {"intencion":"en_vivo","equipo":null,"liga":"bundesliga","pregunta_especifica":"bundesliga en vivo","mercado":null,"tiempo":null,"contexto":"en_vivo","period":null}
+- "analiza el Real Madrid" → {"intencion":"partido_especifico","equipo":"Real Madrid","liga":null,"pregunta_especifica":"analiza el Real Madrid","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
+- "probabilidad que el Real Madrid gane el 1T hoy" → {"intencion":"partido_especifico","equipo":"Real Madrid","liga":null,"pregunta_especifica":"probabilidad que el Real Madrid gane el 1T hoy","mercado":"resultado_1T","tiempo":"1T","contexto":"hoy","period":null}
+- "cuantos corners suelen meter el PSG" → {"intencion":"partido_especifico","equipo":"PSG","liga":null,"pregunta_especifica":"cuantos corners suelen meter el PSG","mercado":"corners","tiempo":"FT","contexto":"proximo_partido","period":null}
+- "que hay en vivo" → {"intencion":"en_vivo","equipo":null,"liga":null,"pregunta_especifica":"que hay en vivo","mercado":null,"tiempo":null,"contexto":"en_vivo","period":null}
+- "en vivo hay partidos con muchos goles en el 1T" → {"intencion":"en_vivo","equipo":null,"liga":null,"pregunta_especifica":"hay partidos en vivo con muchos goles en el 1T","mercado":"goles_1T","tiempo":"1T","contexto":"en_vivo","period":null}
+- "cuantos picks acerté hoy" → {"intencion":"estadisticas","equipo":null,"liga":null,"pregunta_especifica":"cuantos picks acerté hoy","mercado":null,"tiempo":null,"contexto":null,"period":"hoy"}
+- "rendimiento de esta semana" → {"intencion":"estadisticas","equipo":null,"liga":null,"pregunta_especifica":"rendimiento de esta semana","mercado":null,"tiempo":null,"contexto":null,"period":"semana"}
+- "% de aciertos de ayer" → {"intencion":"estadisticas","equipo":null,"liga":null,"pregunta_especifica":"% de aciertos de ayer","mercado":null,"tiempo":null,"contexto":null,"period":"ayer"}
+- "historial total" → {"intencion":"estadisticas","equipo":null,"liga":null,"pregunta_especifica":"historial total","mercado":null,"tiempo":null,"contexto":null,"period":"total"}
+- "hola" → {"intencion":"chat_general","equipo":null,"liga":null,"pregunta_especifica":"hola","mercado":null,"tiempo":null,"contexto":null,"period":null}
+- "ver planes" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"ver planes","mercado":null,"tiempo":null,"contexto":null,"period":null}
+- "quiero PRO" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"quiero PRO","mercado":null,"tiempo":null,"contexto":null,"period":null}
+- "precios" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"precios","mercado":null,"tiempo":null,"contexto":null,"period":null}`;
+
+async function detectIntent(message) {
+  const raw = await haiku(INTENT_SYSTEM, message);
+  try {
+    const m = raw.match(/\{[\s\S]*?\}/);
+    return m ? JSON.parse(m[0]) : { intencion: 'chat_general', pregunta_especifica: message };
+  } catch {
+    return { intencion: 'chat_general', pregunta_especifica: message };
+  }
+}
+
+// ─── Pick Tracking ────────────────────────────────────────────────────────────
+
+const PICKS_FILE = path.join(__dirname, 'picks.json');
+
+function loadPicks() {
+  try { return JSON.parse(fs.readFileSync(PICKS_FILE, 'utf8')); }
+  catch { return []; }
+}
+
+function persistPicks(picks) {
+  fs.writeFileSync(PICKS_FILE, JSON.stringify(picks, null, 2));
+}
+
+const EXTRACT_PICKS_SYSTEM = `Eres un extractor de picks de apuestas deportivas. Dado un texto de análisis de tipster, extrae TODOS los picks concretos emitidos.
+Para cada pick devuelve un objeto JSON con estos campos:
+- local: nombre del equipo local (string)
+- visitante: nombre del equipo visitante (string)
+- mercado: tipo de mercado. Usa UNO de: BTTS_YES, BTTS_NO, OVER_GOALS, UNDER_GOALS, OVER_CORNERS, UNDER_CORNERS, OVER_CARDS, UNDER_CARDS, HOME_WIN, AWAY_WIN, DRAW, AH_HOME, AH_AWAY, HT_OVER, HT_RESULT, DNB_HOME, DNB_AWAY, OTHER
+- seleccion: descripción exacta del pick tal como aparece en el texto (ej: "Over 2.5 goles FT", "BTTS Yes", "Atlético Madrid -1 AH")
+- linea: número de la línea si aplica (ej: 2.5 para Over 2.5, 7.5 para corners Over 7.5, null si no aplica)
+- handicap: valor del handicap si es AH (ej: -1, +0.5, null si no es AH)
+- cuota: cuota estimada como número (null si no se menciona)
+- stake: stake como número del 1 al 10 (null si no se menciona)
+- esCombinada: true si es parte de una apuesta combinada, false si es individual
+
+Responde SOLO con un JSON array. Si no hay picks claros, responde [].`;
+
+async function extractPicksFromText(analysisText, matchesCtx) {
+  const contextStr = matchesCtx.map(m => `fixtureId=${m.fixtureId} | ${m.local} vs ${m.visitante} (${m.liga})`).join('\n');
+  const raw = await haiku(
+    EXTRACT_PICKS_SYSTEM,
+    `Contexto de partidos analizados:\n${contextStr}\n\nTexto del tipster:\n${analysisText}`
+  );
+  try {
+    const jsonMatch = raw.match(/\[[\s\S]*\]/);
+    return jsonMatch ? JSON.parse(jsonMatch[0]) : [];
+  } catch { return []; }
+}
+
+async function recordPicks(analysisText, matchesCtx) {
+  if (!analysisText || !matchesCtx.length) return;
+  try {
+    const extracted = await extractPicksFromText(analysisText, matchesCtx);
+    if (!extracted.length) { console.log('📝 No se extrajeron picks estructurados'); return; }
+
+    const existing = loadPicks();
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+
+    const newPicks = extracted.map(p => {
+      // Match pick to a fixture from context
+      const matched = matchesCtx.find(m =>
+        m.local.toLowerCase().includes((p.local || '').toLowerCase().split(' ')[0]) ||
+        m.visitante.toLowerCase().includes((p.visitante || '').toLowerCase().split(' ')[0]) ||
+        (p.local || '').toLowerCase().includes(m.local.toLowerCase().split(' ')[0])
+      );
+      return {
+        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        emitidoAt: new Date().toISOString(),
+        fecha: today,
+        fixtureId: matched?.fixtureId || null,
+        fechaPartido: matched?.fechaPartido || null,
+        liga: matched?.liga || p.liga || null,
+        local: p.local,
+        visitante: p.visitante,
+        mercado: p.mercado,
+        seleccion: p.seleccion,
+        linea: p.linea ?? null,
+        handicap: p.handicap ?? null,
+        cuota: p.cuota ?? null,
+        stake: p.stake ?? null,
+        esCombinada: p.esCombinada || false,
+        resultado: null,
+        scoresFinal: null,
+      };
+    });
+
+    persistPicks([...existing, ...newPicks]);
+    console.log(`📝 ${newPicks.length} picks guardados en picks.json`);
+  } catch (e) {
+    console.error('recordPicks error:', e.message);
+  }
+}
+
+async function evaluatePickResult(pick, fixture, stats) {
+  const goalsHome = fixture.goals?.home ?? 0;
+  const goalsAway = fixture.goals?.away ?? 0;
+  const htHome    = fixture.score?.halftime?.home ?? null;
+  const htAway    = fixture.score?.halftime?.away ?? null;
+  const total     = goalsHome + goalsAway;
+  const sel       = (pick.seleccion || '').toLowerCase();
+  const linea     = pick.linea;
+
+  // BTTS
+  if (pick.mercado === 'BTTS_YES') return (goalsHome > 0 && goalsAway > 0) ? 'W' : 'L';
+  if (pick.mercado === 'BTTS_NO')  return (goalsHome === 0 || goalsAway === 0) ? 'W' : 'L';
+
+  // Over/Under goals
+  if (pick.mercado === 'OVER_GOALS'  && linea != null) return total > linea ? 'W' : 'L';
+  if (pick.mercado === 'UNDER_GOALS' && linea != null) return total < linea ? 'W' : 'L';
+
+  // HT Over
+  if (pick.mercado === 'HT_OVER' && linea != null && htHome != null)
+    return (htHome + htAway) > linea ? 'W' : 'L';
+
+  // 1X2
+  if (pick.mercado === 'HOME_WIN') return goalsHome > goalsAway ? 'W' : 'L';
+  if (pick.mercado === 'AWAY_WIN') return goalsAway > goalsHome ? 'W' : 'L';
+  if (pick.mercado === 'DRAW')     return goalsHome === goalsAway ? 'W' : 'L';
+
+  // DNB
+  if (pick.mercado === 'DNB_HOME') {
+    if (goalsHome > goalsAway) return 'W';
+    if (goalsHome === goalsAway) return 'V';
+    return 'L';
+  }
+  if (pick.mercado === 'DNB_AWAY') {
+    if (goalsAway > goalsHome) return 'W';
+    if (goalsHome === goalsAway) return 'V';
+    return 'L';
+  }
+
+  // Asian Handicap
+  if ((pick.mercado === 'AH_HOME' || pick.mercado === 'AH_AWAY') && pick.handicap != null) {
+    const h = parseFloat(pick.handicap);
+    const adjHome = goalsHome + (pick.mercado === 'AH_HOME' ? h : -h);
+    const adjAway = goalsAway + (pick.mercado === 'AH_AWAY' ? h : -h);
+    if (adjHome === adjAway) return 'V';
+    if (pick.mercado === 'AH_HOME') return adjHome > adjAway ? 'W' : 'L';
+    return adjAway > adjHome ? 'W' : 'L';
+  }
+
+  // Corners / Cards — need stats
+  if (stats && (pick.mercado === 'OVER_CORNERS' || pick.mercado === 'UNDER_CORNERS') && linea != null) {
+    const cornersHome = Object.values(stats)[0]?.['Corner Kicks'] ?? null;
+    const cornersAway = Object.values(stats)[1]?.['Corner Kicks'] ?? null;
+    if (cornersHome != null && cornersAway != null) {
+      const totalCorners = cornersHome + cornersAway;
+      if (pick.mercado === 'OVER_CORNERS')  return totalCorners > linea ? 'W' : 'L';
+      if (pick.mercado === 'UNDER_CORNERS') return totalCorners < linea ? 'W' : 'L';
+    }
+  }
+  if (stats && (pick.mercado === 'OVER_CARDS' || pick.mercado === 'UNDER_CARDS') && linea != null) {
+    const cardsHome = (Object.values(stats)[0]?.['Yellow Cards'] ?? 0) + (Object.values(stats)[0]?.['Red Cards'] ?? 0);
+    const cardsAway = (Object.values(stats)[1]?.['Yellow Cards'] ?? 0) + (Object.values(stats)[1]?.['Red Cards'] ?? 0);
+    const totalCards = cardsHome + cardsAway;
+    if (pick.mercado === 'OVER_CARDS')  return totalCards > linea ? 'W' : 'L';
+    if (pick.mercado === 'UNDER_CARDS') return totalCards < linea ? 'W' : 'L';
+  }
+
+  return '?'; // can't determine automatically
+}
+
+async function evaluatePendingPicks() {
+  const picks = loadPicks();
+  const pending = picks.filter(p => p.resultado === null && p.fixtureId);
+  if (!pending.length) return picks;
+
+  const fixtureIds = [...new Set(pending.map(p => p.fixtureId))];
+  const fixtureMap = {};
+
+  await Promise.allSettled(fixtureIds.map(async (fid) => {
+    const { data } = await API.get('/fixtures', { params: { id: fid } });
+    const f = data.response?.[0];
+    if (f && ['FT', 'AET', 'PEN'].includes(f.fixture.status.short)) {
+      const stats = await getFixtureStatistics(fid).catch(() => null);
+      fixtureMap[fid] = { fixture: f, stats };
+    }
+  }));
+
+  for (const pick of picks) {
+    if (pick.resultado !== null || !pick.fixtureId) continue;
+    const entry = fixtureMap[pick.fixtureId];
+    if (!entry) continue;
+    pick.resultado = await evaluatePickResult(pick, entry.fixture, entry.stats);
+    pick.scoresFinal = { home: entry.fixture.goals?.home, away: entry.fixture.goals?.away };
+    console.log(`📊 Pick evaluado: ${pick.local} vs ${pick.visitante} — ${pick.seleccion} → ${pick.resultado}`);
+  }
+
+  persistPicks(picks);
+  return picks;
+}
+
+async function handleEstadisticas(chatId, period = 'hoy') {
+  await bot.sendMessage(chatId, '📊 Evaluando resultados de tus picks...');
+
+  const allPicks = await evaluatePendingPicks();
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+
+  const ayer = new Date();
+  ayer.setDate(ayer.getDate() - 1);
+  const ayerStr = ayer.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+
+  const filtered = period === 'semana'
+    ? allPicks.filter(p => {
+        const d = new Date(p.fecha);
+        const now = new Date();
+        return (now - d) <= 7 * 24 * 60 * 60 * 1000;
+      })
+    : period === 'total'
+      ? allPicks
+      : period === 'ayer'
+        ? allPicks.filter(p => p.fecha === ayerStr)
+        : allPicks.filter(p => p.fecha === today);
+
+  const label = period === 'semana' ? 'ESTA SEMANA' : period === 'total' ? 'HISTORIAL TOTAL' : period === 'ayer' ? `AYER (${ayerStr})` : `HOY (${today})`;
+
+  if (!filtered.length) {
+    const periodoLabel = period === 'hoy' ? 'de hoy' : period === 'ayer' ? 'de ayer' : 'en el período seleccionado';
+    return bot.sendMessage(chatId, `😔 No hay picks registrados ${periodoLabel}.`);
+  }
+
+  const individual  = filtered.filter(p => !p.esCombinada);
+  const evaluados   = filtered.filter(p => ['W', 'L'].includes(p.resultado));
+  const wins        = evaluados.filter(p => p.resultado === 'W').length;
+  const losses      = evaluados.filter(p => p.resultado === 'L').length;
+  const voids       = filtered.filter(p => p.resultado === 'V').length;
+  const pendientes  = filtered.filter(p => p.resultado === null || p.resultado === '?').length;
+  const pct         = evaluados.length ? Math.round((wins / evaluados.length) * 100) : null;
+
+  let text = `📊 *RENDIMIENTO — ${label}*\n`;
+  text += `━━━━━━━━━━━━━━━━━━━\n`;
+  text += `✅ Ganados:    ${wins}\n`;
+  text += `❌ Perdidos:   ${losses}\n`;
+  if (voids)      text += `↩️ Void/Nulos:  ${voids}\n`;
+  if (pendientes) text += `⏳ Pendientes: ${pendientes}\n`;
+  text += `━━━━━━━━━━━━━━━━━━━\n`;
+  if (pct !== null) {
+    const icon = pct >= 60 ? '🔥' : pct >= 40 ? '📈' : '📉';
+    text += `${icon} *Aciertos: ${pct}% (${wins}/${evaluados.length})*\n\n`;
+  }
+
+  text += `*Detalle de picks:*\n`;
+  for (const p of filtered) {
+    const icon = p.resultado === 'W' ? '✅' : p.resultado === 'L' ? '❌' : p.resultado === 'V' ? '↩️' : '⏳';
+    const score = p.scoresFinal ? ` *(${p.scoresFinal.home}-${p.scoresFinal.away})*` : '';
+    const combo = p.esCombinada ? ' 🔗' : '';
+    text += `${icon}${combo} ${p.local} vs ${p.visitante}${score}\n`;
+    text += `   └ ${p.seleccion}`;
+    if (p.cuota) text += ` @ ${p.cuota}`;
+    if (p.stake) text += ` | STAKE ${p.stake}/10`;
+    text += '\n';
+  }
+
+  await sendLong(chatId, text, { parse_mode: 'Markdown' });
+}
+
+// ─── Format helpers ───────────────────────────────────────────────────────────
+
+function formatHour(isoDate) {
+  if (!isoDate) return '??:??';
+  return new Date(isoDate).toLocaleTimeString('es-CO', {
+    hour: '2-digit', minute: '2-digit', timeZone: 'America/Bogota',
+  });
+}
+
+function todayDate() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+}
+
+// ─── Telegram send helper ─────────────────────────────────────────────────────
+
+const TG_LIMIT = 4000;
+
+async function sendLong(chatId, text, options = {}) {
+  if (text.length <= TG_LIMIT) return bot.sendMessage(chatId, text, options);
+  const paragraphs = text.split(/\n\n+/);
+  let chunk = '';
+  for (const para of paragraphs) {
+    const addition = (chunk ? '\n\n' : '') + para;
+    if (chunk.length + addition.length > TG_LIMIT) {
+      await bot.sendMessage(chatId, chunk, options);
+      chunk = para;
+    } else {
+      chunk += addition;
+    }
+  }
+  if (chunk) await bot.sendMessage(chatId, chunk, options);
+}
+
+// ─── Business flows ───────────────────────────────────────────────────────────
+
+async function handlePicksHoy(chatId) {
+  await bot.sendMessage(chatId, '🔍 Consultando nuestra base de datos estadística...');
+  const today = todayDate();
+  const fixtures = await getFixturesByDate(today);
+
+  if (fixtures.length === 0) {
+    return bot.sendMessage(chatId, `😔 No hay partidos en las ligas monitoreadas hoy (${today}).`);
+  }
+
+  const selected = [...fixtures]
+    .sort((a, b) => (LEAGUE_PRIORITY[b.leagueId] || 0) - (LEAGUE_PRIORITY[a.leagueId] || 0))
+    .slice(0, 8);
+
+  console.log(`✅ Seleccionados ${selected.length} partidos para análisis`);
+  await bot.sendMessage(chatId, `📊 ${fixtures.length} partidos identificados. Recopilando estadísticas de equipos...`);
+
+  // Fetch team stats in batches of 4 to avoid rate limit
+  const statsPairs = selected.flatMap(f => [
+    getTeamStats(f.homeId, f.leagueId),
+    getTeamStats(f.awayId, f.leagueId),
+  ]);
+  const statsResults = [];
+  for (let i = 0; i < statsPairs.length; i += 4) {
+    const batch = await Promise.allSettled(statsPairs.slice(i, i + 4));
+    statsResults.push(...batch);
+    if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 6000));
+  }
+
+  const enriched = selected.map((f, i) => ({
+    fixtureId:      f.fixtureId,
+    liga:           f.leagueName,
+    local:          f.homeTeam,
+    visitante:      f.awayTeam,
+    hora:           formatHour(f.date),
+    fechaPartido:   f.date,
+    statsLocal:     statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null,
+    statsVisitante: statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null,
+  }));
+
+  await bot.sendMessage(chatId, `🧠 Calculando picks de valor...`);
+
+  const picksText = await sonnet(
+    PICKS_HOY_SYSTEM,
+    `Partidos del día ${today} (hora Colombia). DATOS REALES DE API-FOOTBALL:\n\n${JSON.stringify(enriched, null, 2)}\n\nEmite EXACTAMENTE 3 picks individuales + 1 combinada basadas SOLO en estos datos reales.`
+  );
+  await sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
+  recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
+}
+
+async function handlePicksLiga(chatId, leagueName) {
+  const leagueId = findLeagueId(leagueName);
+  const leagueInfo = leagueId ? LEAGUE_MAP[leagueId] : null;
+  const displayName = leagueInfo?.name || leagueName;
+
+  await bot.sendMessage(chatId, `🔍 Consultando nuestra base de datos — ${displayName}...`);
+
+  const today = todayDate();
+  const all = await fetchFixturesByDate(today);
+
+  let fixtures = leagueId
+    ? all.filter(f => f.league.id === leagueId).map(parseFixture)
+    : all.filter(f => {
+        const n = (f.league.name || '').toLowerCase();
+        return n.includes(leagueName.toLowerCase());
+      }).map(parseFixture);
+
+  console.log(`📊 Partidos encontrados para ${displayName}: ${fixtures.length}`);
+
+  if (fixtures.length === 0) {
+    return bot.sendMessage(chatId, `😔 No hay partidos de *${displayName}* programados para hoy.`, { parse_mode: 'Markdown' });
+  }
+
+  await bot.sendMessage(chatId, `📊 ${fixtures.length} partido(s) de *${displayName}* encontrados. Recopilando estadísticas de equipos...`, { parse_mode: 'Markdown' });
+
+  // Fetch team stats in batches of 4 to avoid rate limit
+  const statsPairs = fixtures.flatMap(f => [
+    getTeamStats(f.homeId, f.leagueId),
+    getTeamStats(f.awayId, f.leagueId),
+  ]);
+  const statsResults = [];
+  for (let i = 0; i < statsPairs.length; i += 4) {
+    const batch = await Promise.allSettled(statsPairs.slice(i, i + 4));
+    statsResults.push(...batch);
+    if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 6000));
+  }
+
+  const enriched = fixtures.map((f, i) => ({
+    fixtureId:      f.fixtureId,
+    liga:           f.leagueName,
+    local:          f.homeTeam,
+    visitante:      f.awayTeam,
+    hora:           formatHour(f.date),
+    fechaPartido:   f.date,
+    statsLocal:     statsResults[i * 2]?.status === 'fulfilled' ? statsResults[i * 2].value : null,
+    statsVisitante: statsResults[i * 2 + 1]?.status === 'fulfilled' ? statsResults[i * 2 + 1].value : null,
+  }));
+
+  await bot.sendMessage(chatId, `🧠 Calculando picks de valor...`);
+
+  const picksText = await sonnet(
+    PICKS_HOY_SYSTEM,
+    `Partidos de ${displayName} del día ${today}. DATOS REALES DE API:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y emite picks de valor basadas SOLO en estos datos reales.`
+  );
+  await sendLong(chatId, `📅 *${displayName} — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
+  recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
+}
+
+async function handlePartido(chatId, teamName, countryHint = '') {
+  await bot.sendMessage(chatId, `🔍 Buscando *${teamName}* en nuestra base de datos...`, { parse_mode: 'Markdown' });
+
+  const teamData = await searchTeam(teamName, countryHint);
+  if (!teamData) {
+    return bot.sendMessage(chatId, `❌ No encontré el equipo "${teamName}" en nuestra base de datos.`);
+  }
+
+  const teamId   = teamData.team.id;
+  const teamFull = teamData.team.name;
+  await bot.sendMessage(chatId, `✅ *${teamFull}* encontrado. Analizando próximo partido...`, { parse_mode: 'Markdown' });
+
+  const nextRaw = await findNextFixtureByDate(teamId, 14);
+  if (!nextRaw) {
+    return bot.sendMessage(chatId, `😔 No encontré próximos partidos para *${teamFull}* en los próximos 14 días.`, { parse_mode: 'Markdown' });
+  }
+
+  const homeId   = nextRaw.teams.home.id;
+  const awayId   = nextRaw.teams.away.id;
+  const leagueId = nextRaw.league.id;
+  const homeTeam = nextRaw.teams.home.name;
+  const awayTeam = nextRaw.teams.away.name;
+  const isLive   = ['1H','HT','2H','ET','P'].includes(nextRaw.fixture?.status?.short);
+
+  await bot.sendMessage(
+    chatId,
+    `⚽ ${isLive ? '🔴 EN VIVO: ' : 'Próximo: '}*${homeTeam} vs ${awayTeam}*\n🏆 ${nextRaw.league.name} | ⏰ ${formatHour(nextRaw.fixture.date)}\n\n📊 Consultando historial y estadísticas${isLive ? ' en tiempo real' : ''}...`,
+    { parse_mode: 'Markdown' }
+  );
+
+  const requests = [
+    getH2H(homeId, awayId),
+    getTeamStats(homeId, leagueId),
+    getTeamStats(awayId, leagueId),
+  ];
+  if (isLive) requests.push(getFixtureStatistics(nextRaw.fixture.id));
+
+  const [h2hRes, homeStatsRes, awayStatsRes, liveStatsRes] = await Promise.allSettled(requests);
+
+  const analysisData = {
+    partido: {
+      liga:      nextRaw.league.name,
+      pais:      nextRaw.league.country,
+      fecha:     nextRaw.fixture.date.split('T')[0],
+      hora:      formatHour(nextRaw.fixture.date),
+      local:     homeTeam,
+      visitante: awayTeam,
+      enVivo:    isLive,
+      minuto:    nextRaw.fixture?.status?.elapsed || null,
+      marcador:  isLive ? `${nextRaw.goals?.home ?? 0}-${nextRaw.goals?.away ?? 0}` : null,
+    },
+    h2h:            h2hRes.status === 'fulfilled'      ? h2hRes.value      : [],
+    bttsEnH2H:      h2hRes.status === 'fulfilled'      ? h2hRes.value.filter(m => m.btts).length : 0,
+    statsLocal:     homeStatsRes.status === 'fulfilled' ? homeStatsRes.value : null,
+    statsVisitante: awayStatsRes.status === 'fulfilled' ? awayStatsRes.value : null,
+    estadisticasVivo: (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null,
+  };
+
+  await bot.sendMessage(chatId, '⚡ Procesando análisis profesional...');
+  const system = isLive ? INPLAY_SYSTEM : TIPSTER_SYSTEM;
+  const season = LEAGUE_SEASONS[leagueId] || 2025;
+  const analysis = await sonnet(
+    system,
+    `Analiza este partido con DATOS REALES de API-Football (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}`
+  );
+  await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
+  recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]).catch(e => console.error('recordPicks:', e.message));
+}
+
+async function handleVivo(chatId, leagueId = null, leagueName = null) {
+  const displayName = leagueName || 'todas las ligas';
+  await bot.sendMessage(chatId, `📡 Obteniendo datos en tiempo real (${displayName})...`);
+
+  const liveFixtures = await getLiveFixtures(leagueId);
+  console.log(`📊 Partidos en vivo encontrados: ${liveFixtures.length}`);
+
+  if (liveFixtures.length === 0) {
+    const msg = leagueName
+      ? `😔 No hay partidos de *${leagueName}* en vivo ahora mismo.`
+      : '😔 No hay partidos en curso en las ligas monitoreadas ahora mismo.';
+    return bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+  }
+
+  await bot.sendMessage(chatId, `⏳ *${liveFixtures.length}* partido(s) en vivo detectados. Recopilando estadísticas...`, { parse_mode: 'Markdown' });
+
+  // Get live stats for up to 4 matches (API call limit)
+  const toAnalyze = liveFixtures.slice(0, 4);
+  const statsResults = await Promise.allSettled(
+    toAnalyze.map(f => getFixtureStatistics(f.fixtureId))
+  );
+
+  const enriched = toAnalyze.map((f, i) => ({
+    ...f,
+    marcador: `${f.homeGoals ?? 0}-${f.awayGoals ?? 0}`,
+    estadisticasVivo: statsResults[i].status === 'fulfilled' ? statsResults[i].value : null,
+  }));
+
+  await bot.sendMessage(chatId, '🎯 Identificando picks de valor...');
+  const analysis = await sonnet(
+    INPLAY_SYSTEM,
+    `DATOS REALES EN VIVO de API-Football:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y da picks de valor in-play para los mejores partidos.`
+  );
+  await sendLong(chatId, `🔴 *PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}*\n\n${analysis}`, { parse_mode: 'Markdown' });
+  recordPicks(analysis, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.homeTeam, visitante: f.awayTeam, liga: f.leagueName, fechaPartido: f.date }))).catch(e => console.error('recordPicks:', e.message));
+}
+
+async function handleEspecifica(chatId, intent) {
+  const { equipo, pregunta_especifica, mercado, tiempo, contexto } = intent;
+
+  if (!equipo) {
+    return bot.sendMessage(chatId, '¿De qué equipo te interesa la estadística o análisis?');
+  }
+
+  await bot.sendMessage(chatId, `🔍 Analizando tu pregunta...`);
+
+  const teamData = await searchTeam(equipo, intent.liga || '');
+  if (!teamData) {
+    return bot.sendMessage(chatId, `❌ No encontré el equipo "${equipo}" en nuestra base de datos.`);
+  }
+
+  const teamId   = teamData.team.id;
+  const teamFull = teamData.team.name;
+
+  const nextRaw = await findNextFixtureByDate(teamId, 14);
+  if (!nextRaw) {
+    return bot.sendMessage(chatId, `😔 No encontré próximos partidos para *${teamFull}* en los próximos 14 días.`, { parse_mode: 'Markdown' });
+  }
+
+  const homeId   = nextRaw.teams.home.id;
+  const awayId   = nextRaw.teams.away.id;
+  const leagueId = nextRaw.league.id;
+  const homeTeam = nextRaw.teams.home.name;
+  const awayTeam = nextRaw.teams.away.name;
+  const isHome   = homeId === teamId;
+
+  await bot.sendMessage(chatId, `📊 Recopilando datos históricos...`);
+
+  const [h2hRes, homeStatsRes, awayStatsRes] = await Promise.allSettled([
+    getH2H(homeId, awayId),
+    getTeamStats(homeId, leagueId),
+    getTeamStats(awayId, leagueId),
+  ]);
+
+  const analysisData = {
+    partido: {
+      liga:      nextRaw.league.name,
+      fecha:     nextRaw.fixture.date.split('T')[0],
+      hora:      formatHour(nextRaw.fixture.date),
+      local:     homeTeam,
+      visitante: awayTeam,
+    },
+    equipoConsultado: teamFull,
+    rolEnPartido: isHome ? 'LOCAL' : 'VISITANTE',
+    h2h:          h2hRes.status === 'fulfilled' ? h2hRes.value : [],
+    bttsEnH2H:    h2hRes.status === 'fulfilled' ? h2hRes.value.filter(m => m.btts).length : 0,
+    statsLocal:   homeStatsRes.status === 'fulfilled' ? homeStatsRes.value : null,
+    statsVisitante: awayStatsRes.status === 'fulfilled' ? awayStatsRes.value : null,
+  };
+
+  await bot.sendMessage(chatId, '⚡ Calculando probabilidad específica...');
+
+  const specificPrompt = `El usuario pregunta ESPECÍFICAMENTE: "${pregunta_especifica}"
+Mercado de interés: ${mercado || 'general'}
+Tiempo: ${tiempo || 'FT'}
+Contexto: ${contexto || 'proximo_partido'}
+Equipo consultado: ${teamFull} (juega como ${isHome ? 'LOCAL' : 'VISITANTE'})
+
+DATOS REALES:
+${JSON.stringify(analysisData, null, 2)}
+
+INSTRUCCIONES ESTRICTAS:
+- Responde EXACTAMENTE lo que pregunta el usuario. NO hagas análisis completo si no lo pidió.
+- Calcula la probabilidad específica del mercado usando los datos históricos disponibles.
+- Si pregunta por 1T: usa H2H y calcula % de veces que el equipo ganó/marcó en 1T.
+- Si pregunta por corners: usa promedios de corners del equipo.
+- Si pregunta por tarjetas: usa promedios de tarjetas.
+- Si pregunta por BTTS: calcula % de H2H donde ambos marcaron.
+- Muestra los datos históricos relevantes para ESA pregunta concreta.
+- Sé directo. Máximo 200 palabras.`;
+
+  const analysis = await sonnet(TIPSTER_SYSTEM, specificPrompt);
+  await sendLong(chatId, `🎯 *${teamFull}* — Consulta específica\n\n${analysis}`, { parse_mode: 'Markdown' });
+  recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]).catch(() => {});
+}
+
+async function handleChatGeneral(chatId, pregunta) {
+  const CHAT_SYSTEM = `Eres TipsterAI Master PRO, el mejor asistente de apuestas deportivas.
+Responde en español. Sé amigable, conciso y profesional.
+No menciones tecnologías, APIs ni plataformas.
+Si el usuario saluda, saluda de vuelta y menciona brevemente qué puedes hacer.
+Si hace una pregunta general de fútbol o apuestas, responde con conocimiento experto.
+Recuérdales que pueden pedir: picks del día, analizar un equipo, partidos en vivo, enviar imagen de un partido, o ver planes.`;
+
+  const response = await haiku(CHAT_SYSTEM, pregunta);
+  await bot.sendMessage(chatId, response);
+}
+
+async function handleVerPlanes(chatId) {
+  await bot.sendMessage(chatId,
+    `🏆 *PLANES TIPSTERAI MASTER PRO*\n\n` +
+    `━━━━━━━━━━━━━━━━━━━\n` +
+    `🆓 *FREEMIUM* — Prueba gratuita\n` +
+    `▸ 1 consulta gratis al día\n` +
+    `▸ Válido por 3 días\n\n` +
+    `⚡ *VIP*\n` +
+    `▸ 10 consultas diarias\n` +
+    `▸ Análisis completo de partidos y picks\n\n` +
+    `🏆 *PRO*\n` +
+    `▸ 50 consultas diarias\n` +
+    `▸ Análisis de imágenes en vivo\n` +
+    `▸ Acceso completo a todas las funciones\n` +
+    `━━━━━━━━━━━━━━━━━━━\n\n` +
+    `Para suscribirte visita nuestro canal o escríbenos directamente.`,
+    { parse_mode: 'Markdown' }
+  );
+}
+
+// ─── Vision (image analysis) ──────────────────────────────────────────────────
+
+const VISION_EXTRACT_PROMPT = `Eres un experto en estadísticas de fútbol. Analiza esta imagen de un partido en vivo y extrae TODOS los datos visibles en formato JSON:
+{"home_team":"string","away_team":"string","score_home":number,"score_away":number,"minute":number,"half":"1T o 2T o HT o ET","stats":{"possession_home":number o null,"possession_away":number o null,"shots_home":number o null,"shots_away":number o null,"shots_on_target_home":number o null,"shots_on_target_away":number o null,"corners_home":number o null,"corners_away":number o null,"fouls_home":number o null,"fouls_away":number o null,"yellow_cards_home":number o null,"yellow_cards_away":number o null,"red_cards_home":number o null,"red_cards_away":number o null,"dangerous_attacks_home":number o null,"dangerous_attacks_away":number o null,"xg_home":number o null,"xg_away":number o null}}
+Si algún dato no es visible usa null. Responde SOLO el JSON.`;
+
+async function handleImage(msg) {
+  const chatId = msg.chat.id;
+  try {
+    await bot.sendMessage(chatId, '📸 Imagen recibida. Procesando estadísticas del partido...');
+
+    const photos  = msg.photo;
+    const fileId  = photos[photos.length - 1].file_id;
+    const fileObj = await bot.getFile(fileId);
+    const fileUrl = `https://api.telegram.org/file/bot${process.env.TELEGRAM_TOKEN}/${fileObj.file_path}`;
+
+    const imgResp = await axios.get(fileUrl, { responseType: 'arraybuffer', timeout: 20000 });
+    const base64  = Buffer.from(imgResp.data).toString('base64');
+    const rawMime = imgResp.headers['content-type'] || '';
+    let mime = 'image/jpeg';
+    if (rawMime.includes('png')) mime = 'image/png';
+    else if (rawMime.includes('gif')) mime = 'image/gif';
+    else if (rawMime.includes('webp')) mime = 'image/webp';
+
+    console.log(`🔍 Claude Vision: analizando imagen (${mime})`);
+    const visionMsg = await claudeWithRetry({
+      model: 'claude-opus-4-6',
+      max_tokens: 1000,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image', source: { type: 'base64', media_type: mime, data: base64 } },
+          { type: 'text',  text: VISION_EXTRACT_PROMPT },
+        ],
+      }],
+    });
+
+    let matchData = null;
+    try {
+      const jsonMatch = visionMsg.content[0].text.match(/\{[\s\S]*\}/);
+      matchData = jsonMatch ? JSON.parse(jsonMatch[0]) : null;
+    } catch { matchData = null; }
+
+    if (!matchData?.home_team) {
+      return sendLong(chatId, '❌ No pude leer estadísticas de fútbol en la imagen. Envía una captura de Flashscore, Sofascore u otra app de estadísticas.');
+    }
+
+    console.log(`📊 Vision extrajo: ${matchData.home_team} ${matchData.score_home}-${matchData.score_away} ${matchData.away_team} min${matchData.minute}`);
+    await bot.sendMessage(chatId,
+      `✅ Partido identificado: *${matchData.home_team}* ${matchData.score_home}-${matchData.score_away} *${matchData.away_team}* | Min ${matchData.minute ?? '?'}\n\n📊 Consultando historial de enfrentamientos...`,
+      { parse_mode: 'Markdown' }
+    );
+
+    // Search API for H2H + stats
+    let apiContext = null;
+    try {
+      const [homeRes, awayRes] = await Promise.allSettled([
+        searchTeam(matchData.home_team),
+        searchTeam(matchData.away_team),
+      ]);
+      const homeTeam = homeRes.status === 'fulfilled' ? homeRes.value : null;
+      const awayTeam = awayRes.status === 'fulfilled' ? awayRes.value : null;
+
+      if (homeTeam && awayTeam) {
+        const homeId = homeTeam.team.id;
+        const awayId = awayTeam.team.id;
+        const [h2hRes, h2hRawRes] = await Promise.allSettled([
+          getH2H(homeId, awayId),
+          API.get('/fixtures/headtohead', { params: { h2h: `${homeId}-${awayId}`, last: 1 } }),
+        ]);
+        const h2h = h2hRes.status === 'fulfilled' ? h2hRes.value : [];
+        let statsHome = null, statsAway = null;
+        if (h2hRawRes.status === 'fulfilled') {
+          const lastMatch = h2hRawRes.value.data.response?.[0];
+          if (lastMatch) {
+            const lid = lastMatch.league.id;
+            const [sh, sa] = await Promise.allSettled([getTeamStats(homeId, lid), getTeamStats(awayId, lid)]);
+            statsHome = sh.status === 'fulfilled' ? sh.value : null;
+            statsAway = sa.status === 'fulfilled' ? sa.value : null;
+          }
+        }
+        apiContext = { h2h, bttsEnH2H: h2h.filter(m => m.btts).length, statsLocal: statsHome, statsVisitante: statsAway };
+        console.log(`📊 API encontró H2H: ${h2h.length} partidos`);
+      }
+    } catch (e) { console.log('API lookup falló:', e.message); }
+
+    const contextNote = apiContext
+      ? 'Datos históricos de API-Football disponibles.'
+      : 'No se encontraron en API-Football. Analiza SOLO con datos de la imagen. Indica "Análisis basado solo en estadísticas visibles".';
+
+    await bot.sendMessage(chatId, '⚡ Generando análisis in-play...');
+    const analysis = await sonnet(
+      INPLAY_SYSTEM,
+      `DATOS DE LA IMAGEN (fuente principal):\n${JSON.stringify(matchData, null, 2)}\n\nDATOS HISTÓRICOS API:\n${apiContext ? JSON.stringify(apiContext, null, 2) : 'No disponibles'}\n\nNOTA: ${contextNote}`
+    );
+    await sendLong(chatId, analysis, { parse_mode: 'Markdown' });
+    recordPicks(analysis, [{ fixtureId: null, local: matchData.home_team, visitante: matchData.away_team, liga: 'En vivo (imagen)', fechaPartido: new Date().toISOString() }]).catch(e => console.error('recordPicks:', e.message));
+
+  } catch (err) {
+    console.error('handleImage error:', err.message);
+    await bot.sendMessage(chatId, `❌ Error al analizar imagen: ${err.message}`);
+  }
+}
+
+// ─── Access control ───────────────────────────────────────────────────────────
+
+function todayBogota() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+}
+
+async function getAirtableUser(telegramId) {
+  try {
+    const base = getAirtableBase();
+    const records = await base(AIRTABLE_TABLE)
+      .select({ filterByFormula: `{telegram_id} = "${telegramId}"`, maxRecords: 1 })
+      .firstPage();
+    return records[0] || null;
+  } catch (e) {
+    console.error('getAirtableUser error:', e.message);
+    return null;
+  }
+}
+
+async function registerUser(telegramId, username) {
+  const today = todayBogota();
+  const trialExpira = new Date();
+  trialExpira.setDate(trialExpira.getDate() + 3);
+  const trialStr = trialExpira.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+  try {
+    await upsertAirtableUser(telegramId, {
+      plan:           'free',
+      consultas_hoy:  0,
+      fecha_registro: today,
+      trial_expira:   trialStr,
+      ultimo_reset:   today,
+    });
+    console.log(`👤 Usuario registrado: telegram_id=${telegramId} plan=free trial_expira=${trialStr}`);
+  } catch (e) {
+    console.error('registerUser error:', e.message);
+  }
+}
+
+async function checkAndResetIfNeeded(record) {
+  const today = todayBogota();
+  if (record.fields.ultimo_reset !== today) {
+    try {
+      const base = getAirtableBase();
+      await base(AIRTABLE_TABLE).update(record.id, { consultas_hoy: 0, ultimo_reset: today });
+      record.fields.consultas_hoy = 0;
+      record.fields.ultimo_reset  = today;
+    } catch (e) {
+      console.error('resetDaily error:', e.message);
+    }
+  }
+  return record;
+}
+
+async function checkAccess(chatId, telegramId, isImage = false) {
+  let record = await getAirtableUser(telegramId);
+  if (!record) {
+    // No registrado — dejar pasar (se registran en /start)
+    return { allowed: true, unregistered: true };
+  }
+
+  record = await checkAndResetIfNeeded(record);
+
+  const plan       = record.fields.plan || 'free';
+  const planConfig = PLANES[plan] || PLANES.free;
+  const consultasHoy = Number(record.fields.consultas_hoy) || 0;
+  const today      = todayBogota();
+
+  // Imagen: solo PRO
+  if (isImage && !planConfig.puede_imagen) {
+    await bot.sendMessage(chatId,
+      `📸 El análisis de imágenes en vivo está disponible solo en el plan *PRO*.\n\nEscribe *"ver planes"* para más información.`,
+      { parse_mode: 'Markdown' }
+    );
+    return { allowed: false };
+  }
+
+  // Free: verificar período de prueba
+  if (plan === 'free' && record.fields.trial_expira) {
+    if (today > record.fields.trial_expira) {
+      await bot.sendMessage(chatId,
+        `Tu período de prueba gratuito ha terminado 🏁\n\n` +
+        `Esperamos que hayas disfrutado TipsterAI.\n` +
+        `Para continuar con análisis profesionales:\n\n` +
+        `⚡ *VIP*: 10 consultas/día\n` +
+        `🏆 *PRO*: 50 consultas/día + análisis de imágenes en vivo\n\n` +
+        `Escribe *"ver planes"* para conocer los precios.`,
+        { parse_mode: 'Markdown' }
+      );
+      return { allowed: false };
+    }
+  }
+
+  // VIP / PRO: verificar que la suscripción de 30 días no haya expirado
+  if ((plan === 'vip' || plan === 'pro') && record.fields.expires_at) {
+    if (today > record.fields.expires_at) {
+      // Degradar a free automáticamente
+      try {
+        const base = getAirtableBase();
+        await base(AIRTABLE_TABLE).update(record.id, { plan: 'free' });
+      } catch (e) { console.error('downgrade error:', e.message); }
+      await bot.sendMessage(chatId,
+        `⚠️ *Tu suscripción ${plan.toUpperCase()} ha expirado.*\n\n` +
+        `Tu acceso ha cambiado al plan gratuito.\n\n` +
+        `Para renovar:\n` +
+        `⚡ *VIP*: 10 consultas/día\n` +
+        `🏆 *PRO*: 50 consultas/día + análisis de imágenes\n\n` +
+        `Escribe *"ver planes"* para más información.`,
+        { parse_mode: 'Markdown' }
+      );
+      return { allowed: false };
+    }
+  }
+
+  // Verificar límite diario
+  if (consultasHoy >= planConfig.consultas_diarias) {
+    let msg;
+    if (plan === 'free') {
+      msg =
+        `Has usado tu consulta gratuita de hoy 🎯\n\n` +
+        `Vuelve mañana por tu consulta diaria gratis, o accede a más análisis:\n\n` +
+        `⚡ *VIP*: 10 consultas/día\n` +
+        `🏆 *PRO*: 50 consultas/día + análisis de imágenes\n\n` +
+        `Escribe *"ver planes"* para más información.`;
+    } else if (plan === 'vip') {
+      msg =
+        `Has alcanzado tus 10 consultas de hoy ⚡\n\n` +
+        `Tus consultas se renuevan a medianoche.\n` +
+        `¿Quieres más? Upgrade a PRO:\n\n` +
+        `🏆 *PRO*: 50 consultas/día + análisis de imágenes en vivo\n\n` +
+        `Escribe *"quiero PRO"* para más información.`;
+    } else {
+      msg = `Has alcanzado tus 50 consultas de hoy.\nTus consultas se renuevan a medianoche. ⏰`;
+    }
+    await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
+    return { allowed: false };
+  }
+
+  return { allowed: true, plan, recordId: record.id };
+}
+
+async function incrementConsultas(telegramId) {
+  try {
+    const record = await getAirtableUser(telegramId);
+    if (!record) return;
+    const base = getAirtableBase();
+    const current = Number(record.fields.consultas_hoy) || 0;
+    await base(AIRTABLE_TABLE).update(record.id, { consultas_hoy: current + 1 });
+  } catch (e) {
+    console.error('incrementConsultas error:', e.message);
+  }
+}
+
+// ─── Command: /start ──────────────────────────────────────────────────────────
+
+bot.onText(/\/start/, async (msg) => {
+  const chatId = msg.chat.id;
+  const telegramId = String(msg.from.id);
+  const username = msg.from.username || msg.from.first_name || '';
+
+  // Register user if not already registered
+  const existing = await getAirtableUser(telegramId).catch(() => null);
+  if (!existing) {
+    registerUser(telegramId, username).catch(e => console.error('register on start:', e.message));
+  }
+
+  bot.sendMessage(chatId, `⚽ *TipsterAi Master PRO — Servicio Exclusivo de Apuestas*
+
+Bienvenido. Tengo acceso a estadísticas en tiempo real, historial de enfrentamientos y datos exclusivos de las principales ligas del mundo.
+
+Dime lo que necesitas en lenguaje natural:
+
+• *"picks de hoy"* → mis mejores picks del día con análisis completo
+• *"bundesliga en vivo"* → partidos en curso con picks in-play
+• *"analiza al Real Madrid"* → análisis táctico con historial y estadísticas
+• *"que hay en vivo"* → todos los partidos en curso ahora mismo
+• 📸 Envía una captura de un partido → análisis in-play inmediato
+
+━━━━━━━━━━━━━━━━━━━
+⚠️ Solo emito picks con STAKE 6+/10 y cuota mínima 1.50
+🎯 Apuesta siempre con responsabilidad.`, { parse_mode: 'Markdown' });
+});
+
+// ─── Main message handler ─────────────────────────────────────────────────────
+
+bot.on('message', async (msg) => {
+  const chatId    = msg.chat.id;
+  const telegramId = String(msg.from?.id || chatId);
+
+  // Handle images
+  if (msg.photo) {
+    const access = await checkAccess(chatId, telegramId, true).catch(() => ({ allowed: true }));
+    if (!access.allowed) return;
+    await handleImage(msg);
+    incrementConsultas(telegramId).catch(() => {});
+    return;
+  }
+
+  if (!msg.text || msg.text.startsWith('/')) return;
+
+  const text = msg.text.trim();
+
+  try {
+    const intent = await detectIntent(text);
+    const intencion = intent.intencion || intent.intent || 'chat_general';
+    console.log(`[${new Date().toISOString()}] "${text}" → ${JSON.stringify(intent)}`);
+
+    // ver_planes and chat_general don't consume quota
+    if (intencion === 'ver_planes') {
+      return handleVerPlanes(chatId);
+    }
+    if (intencion === 'chat_general') {
+      return handleChatGeneral(chatId, intent.pregunta_especifica || text);
+    }
+
+    // All other intents: check access quota
+    const access = await checkAccess(chatId, telegramId, false).catch(() => ({ allowed: true }));
+    if (!access.allowed) return;
+
+    switch (intencion) {
+      case 'picks_hoy':
+        await handlePicksHoy(chatId);
+        break;
+      case 'picks_liga':
+        await handlePicksLiga(chatId, intent.liga || text);
+        break;
+      case 'partido_especifico':
+        if (!intent.equipo) {
+          await bot.sendMessage(chatId, '¿De qué equipo quieres el análisis?');
+        } else if (intent.mercado || intent.tiempo) {
+          // Specific market question
+          await handleEspecifica(chatId, intent);
+        } else {
+          // Full match analysis
+          await handlePartido(chatId, intent.equipo, intent.liga || '');
+        }
+        break;
+      // Legacy compatibility
+      case 'partido':
+        if (!intent.team && !intent.equipo) {
+          await bot.sendMessage(chatId, '¿De qué equipo quieres el análisis?');
+        } else {
+          await handlePartido(chatId, intent.team || intent.equipo, intent.country || intent.liga || '');
+        }
+        break;
+      case 'en_vivo': {
+        const lid = intent.liga ? findLeagueId(intent.liga) : null;
+        const lname = lid ? (LEAGUE_MAP[lid]?.name || intent.liga) : intent.liga || null;
+        await handleVivo(chatId, lid, lname);
+        break;
+      }
+      // Legacy
+      case 'vivo':
+        await handleVivo(chatId);
+        break;
+      case 'vivo_liga': {
+        const lid = findLeagueId(intent.league || '');
+        const lname = lid ? (LEAGUE_MAP[lid]?.name || intent.league) : intent.league;
+        await handleVivo(chatId, lid, lname);
+        break;
+      }
+      case 'estadisticas':
+        await handleEstadisticas(chatId, intent.period || 'hoy');
+        break;
+      default:
+        await handleChatGeneral(chatId, intent.pregunta_especifica || text);
+        return; // don't count chat as quota
+    }
+
+    // Increment quota after successful handling
+    incrementConsultas(telegramId).catch(() => {});
+
+  } catch (err) {
+    console.error('Handler error:', err.message);
+    const userMsg = isOverloadedError(err)
+      ? '⏳ La IA está saturada. Intenta de nuevo en unos segundos.'
+      : `❌ Error: ${err.message}`;
+    await bot.sendMessage(chatId, userMsg);
+  }
+});
+
+// ─── Startup ──────────────────────────────────────────────────────────────────
+
+bot.getMe().then(me => {
+  console.log(`✅ @${me.username} conectado`);
+}).catch(err => {
+  console.error('❌ Error de conexión:', err.message);
+  process.exit(1);
+});
+
+// Salida limpia — PM2 reinicia automáticamente
+function exitBot(reason) {
+  console.error(`💥 Reiniciando proceso: ${reason}`);
+  process.exit(1);
+}
+
+// Cualquier error de polling → reinicio inmediato
+bot.on('polling_error', err => exitBot(`polling_error: ${err.message}`));
+
+// Errores no capturados → reinicio
+process.on('uncaughtException',  err => exitBot(`uncaughtException: ${err.message}`));
+process.on('unhandledRejection', err => exitBot(`unhandledRejection: ${err}`));
+
+// Watchdog: cada 90 segundos verifica que el polling siga vivo
+// Lógica: si getMe() falla UNA vez → reinicio inmediato (no esperar 3)
+// Si getMe() funciona pero el polling lleva mucho tiempo sin recibir nada → reinicio
+let lastUpdateReceived = Date.now();
+bot.on('message',        () => { lastUpdateReceived = Date.now(); });
+bot.on('callback_query', () => { lastUpdateReceived = Date.now(); });
+
+setInterval(async () => {
+  try {
+    await bot.getMe();
+    const minutesSilent = (Date.now() - lastUpdateReceived) / 60000;
+    // Si llevamos más de 20 min sin ningún update Y getMe empieza a tener
+    // fallos intermitentes, algo está mal. Pero getMe OK = polling OK aquí
+    // solo logueamos para diagnóstico.
+    console.log(`💓 OK ${new Date().toISOString()} | silencio: ${minutesSilent.toFixed(1)}min`);
+  } catch (err) {
+    // getMe falló → red rota → reinicio inmediato sin esperar contador
+    exitBot(`keepalive getMe falló: ${err.message}`);
+  }
+}, 90 * 1000);
+
+
+// ─── Whop Webhook Server ───────────────────────────────────────────────────────
+
+const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE || 'Users';
+const WHOP_SECRET   = process.env.WHOP_WEBHOOK_SECRET;
+const WEBHOOK_PORT  = 3000;
+
+function getAirtableBase() {
+  if (!process.env.AIRTABLE_API_KEY || !process.env.AIRTABLE_BASE_ID) {
+    throw new Error('AIRTABLE_API_KEY y AIRTABLE_BASE_ID requeridos en .env');
+  }
+  return new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
+}
+
+function verifyWhopSignature(rawBody, signatureHeader) {
+  if (!WHOP_SECRET || !signatureHeader) return false;
+  // Whop sends: "t=<timestamp>,v1=<hmac>"
+  const parts = Object.fromEntries(signatureHeader.split(',').map(p => p.split('=')));
+  const timestamp = parts.t;
+  const signature = parts.v1;
+  if (!timestamp || !signature) return false;
+  const expected = crypto
+    .createHmac('sha256', WHOP_SECRET)
+    .update(`${timestamp}.${rawBody}`)
+    .digest('hex');
+  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected));
+}
+
+async function findAirtableUser(telegramId) {
+  const base = getAirtableBase();
+  const records = await base(AIRTABLE_TABLE)
+    .select({ filterByFormula: `{telegram_id} = "${telegramId}"`, maxRecords: 1 })
+    .firstPage();
+  return records[0] || null;
+}
+
+async function upsertAirtableUser(telegramId, fields) {
+  const base = getAirtableBase();
+  const existing = await findAirtableUser(telegramId);
+  if (existing) {
+    await base(AIRTABLE_TABLE).update(existing.id, fields);
+    console.log(`📋 Airtable actualizado: telegram_id=${telegramId}`, fields);
+  } else {
+    await base(AIRTABLE_TABLE).create({ telegram_id: String(telegramId), ...fields });
+    console.log(`📋 Airtable creado: telegram_id=${telegramId}`, fields);
+  }
+}
+
+function expiresAt30Days() {
+  const d = new Date();
+  d.setDate(d.getDate() + 30);
+  return d.toISOString().split('T')[0];
+}
+
+const app = express();
+
+// Parse raw body for signature verification before JSON parsing
+app.use('/webhook/whop', express.raw({ type: 'application/json' }));
+app.use(express.json());
+
+app.post('/webhook/whop', async (req, res) => {
+  const rawBody  = req.body.toString('utf8');
+  const sigHeader = req.headers['whop-signature'];
+
+  if (WHOP_SECRET && !verifyWhopSignature(rawBody, sigHeader)) {
+    console.warn('⚠️  Whop webhook: firma inválida');
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  let payload;
+  try { payload = JSON.parse(rawBody); }
+  catch { return res.status(400).json({ error: 'Invalid JSON' }); }
+
+  const event      = payload.event || payload.type;
+  const data       = payload.data || payload;
+  const telegramId = data?.user?.telegram_id || data?.metadata?.telegram_id || data?.telegram_id;
+
+  console.log(`📨 Whop event: ${event} | telegram_id=${telegramId}`);
+
+  try {
+    if (event === 'membership.created' || event === 'membership.renewed') {
+      const expires = expiresAt30Days();
+
+      if (telegramId) {
+        await upsertAirtableUser(telegramId, { plan: 'pro', expires_at: expires });
+
+        await bot.sendMessage(telegramId,
+          `🎉 *¡Bienvenido a TIPSTER PRO!*\n\n` +
+          `Tu suscripción está activa hasta el *${expires}*.\n\n` +
+          `Ahora tienes acceso completo a:\n` +
+          `• 🎯 Picks del día con análisis estadístico real\n` +
+          `• 📡 Picks en vivo con estadísticas en tiempo real\n` +
+          `• 🔍 Análisis de cualquier equipo o partido\n` +
+          `• 📊 Historial de aciertos y rendimiento\n` +
+          `• 📸 Análisis de imágenes de partidos\n\n` +
+          `Escríbeme cualquier cosa para empezar. ¡Buena suerte! ⚽`,
+          { parse_mode: 'Markdown' }
+        );
+        console.log(`✅ Bienvenida PRO enviada a telegram_id=${telegramId}`);
+      }
+    }
+
+    if (event === 'membership.deleted' || event === 'membership.expired') {
+      if (telegramId) {
+        await upsertAirtableUser(telegramId, { plan: 'free', expires_at: '' });
+
+        await bot.sendMessage(telegramId,
+          `⚠️ *Tu suscripción PRO ha finalizado.*\n\n` +
+          `Tu acceso ha cambiado al plan gratuito.\n\n` +
+          `Para renovar y seguir recibiendo picks profesionales, visita nuestro canal.`,
+          { parse_mode: 'Markdown' }
+        );
+        console.log(`📤 Notificación expiración enviada a telegram_id=${telegramId}`);
+      }
+    }
+
+    res.status(200).json({ received: true });
+  } catch (err) {
+    console.error('Webhook handler error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
+
+app.listen(WEBHOOK_PORT, () => {
+  console.log(`🌐 Webhook server escuchando en puerto ${WEBHOOK_PORT}`);
+  console.log(`   POST http://localhost:${WEBHOOK_PORT}/webhook/whop`);
+});
