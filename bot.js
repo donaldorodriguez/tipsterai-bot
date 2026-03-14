@@ -1326,9 +1326,12 @@ async function checkAndResetIfNeeded(record) {
 }
 
 async function checkAccess(chatId, telegramId, isImage = false) {
+  console.log('CHECK ACCESS - telegramId:', telegramId);
+
   let record = await getAirtableUser(telegramId);
   if (!record) {
     // No registrado — dejar pasar (se registran en /start)
+    console.log('CHECK ACCESS - resultado: unregistered (allowed)');
     return { allowed: true, unregistered: true };
   }
 
@@ -1338,6 +1341,10 @@ async function checkAccess(chatId, telegramId, isImage = false) {
   const planConfig = PLANES[plan] || PLANES.free;
   const consultasHoy = Number(record.fields.consultas_hoy) || 0;
   const today      = todayBogota();
+
+  console.log('CHECK ACCESS - plan:', plan);
+  console.log('CHECK ACCESS - consultas_hoy:', consultasHoy, '/ limite:', planConfig.consultas_diarias);
+  console.log('CHECK ACCESS - trial_expira:', record.fields.trial_expira, '| hoy:', today);
 
   // Imagen: solo PRO
   if (isImage && !planConfig.puede_imagen) {
@@ -1409,6 +1416,7 @@ async function checkAccess(chatId, telegramId, isImage = false) {
     return { allowed: false };
   }
 
+  console.log('CHECK ACCESS - resultado: allowed');
   return { allowed: true, plan, recordId: record.id };
 }
 
@@ -1462,7 +1470,7 @@ bot.on('message', async (msg) => {
 
   // Handle images
   if (msg.photo) {
-    const access = await checkAccess(chatId, telegramId, true).catch(() => ({ allowed: true }));
+    const access = await checkAccess(chatId, telegramId, true);
     if (!access.allowed) return;
     await handleImage(msg);
     incrementConsultas(telegramId).catch(() => {});
@@ -1478,17 +1486,20 @@ bot.on('message', async (msg) => {
     const intencion = intent.intencion || intent.intent || 'chat_general';
     console.log(`[${new Date().toISOString()}] "${text}" → ${JSON.stringify(intent)}`);
 
-    // ver_planes and chat_general don't consume quota
+    // ver_planes nunca consume cuota ni requiere acceso
     if (intencion === 'ver_planes') {
       return handleVerPlanes(chatId);
     }
+
+    // Verificar acceso para TODOS los demás intents (incluyendo chat_general)
+    // chat_general pasa el check pero NO consume cuota
+    const access = await checkAccess(chatId, telegramId, false);
+    if (!access.allowed) return;
+
+    // chat_general: acceso verificado pero sin consumir cuota
     if (intencion === 'chat_general') {
       return handleChatGeneral(chatId, intent.pregunta_especifica || text);
     }
-
-    // All other intents: check access quota
-    const access = await checkAccess(chatId, telegramId, false).catch(() => ({ allowed: true }));
-    if (!access.allowed) return;
 
     switch (intencion) {
       case 'picks_hoy':
