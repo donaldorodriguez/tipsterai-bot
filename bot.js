@@ -1330,9 +1330,15 @@ async function checkAccess(chatId, telegramId, isImage = false) {
 
   let record = await getAirtableUser(telegramId);
   if (!record) {
-    // No registrado — dejar pasar (se registran en /start)
-    console.log('CHECK ACCESS - resultado: unregistered (allowed)');
-    return { allowed: true, unregistered: true };
+    // No registrado — registrar como free y aplicar límites normalmente
+    console.log('CHECK ACCESS - usuario no existe, registrando como free...');
+    await registerUser(telegramId, String(telegramId));
+    record = await getAirtableUser(telegramId);
+    if (!record) {
+      // Si Airtable falla al crear, bloquear por seguridad
+      console.error('CHECK ACCESS - no se pudo registrar usuario, bloqueando');
+      return { allowed: false };
+    }
   }
 
   record = await checkAndResetIfNeeded(record);
@@ -1412,6 +1418,7 @@ async function checkAccess(chatId, telegramId, isImage = false) {
     } else {
       msg = `Has alcanzado tus 50 consultas de hoy.\nTus consultas se renuevan a medianoche. ⏰`;
     }
+    console.log('CHECK ACCESS - resultado: bloqueado por límite diario');
     await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
     return { allowed: false };
   }
