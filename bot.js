@@ -1163,7 +1163,7 @@ async function handleVerPlanes(chatId) {
     `▸ Análisis de imágenes en vivo\n` +
     `▸ Acceso completo a todas las funciones\n` +
     `━━━━━━━━━━━━━━━━━━━\n\n` +
-    `Para suscribirte visita nuestro canal o escríbenos directamente.`,
+    `🔗 [Suscríbete aquí](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
     { parse_mode: 'Markdown' }
   );
 }
@@ -1342,7 +1342,7 @@ async function checkAccess(chatId, telegramId, isImage = false) {
   // Imagen: solo PRO
   if (isImage && !planConfig.puede_imagen) {
     await bot.sendMessage(chatId,
-      `📸 El análisis de imágenes en vivo está disponible solo en el plan *PRO*.\n\nEscribe *"ver planes"* para más información.`,
+      `📸 El análisis de imágenes en vivo está disponible solo en el plan *PRO*.\n\n🔗 [Ver planes y suscribirte](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
       { parse_mode: 'Markdown' }
     );
     return { allowed: false };
@@ -1357,7 +1357,7 @@ async function checkAccess(chatId, telegramId, isImage = false) {
         `Para continuar con análisis profesionales:\n\n` +
         `⚡ *VIP*: 10 consultas/día\n` +
         `🏆 *PRO*: 50 consultas/día + análisis de imágenes en vivo\n\n` +
-        `Escribe *"ver planes"* para conocer los precios.`,
+        `🔗 [Ver planes y suscribirte](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
         { parse_mode: 'Markdown' }
       );
       return { allowed: false };
@@ -1394,14 +1394,14 @@ async function checkAccess(chatId, telegramId, isImage = false) {
         `Vuelve mañana por tu consulta diaria gratis, o accede a más análisis:\n\n` +
         `⚡ *VIP*: 10 consultas/día\n` +
         `🏆 *PRO*: 50 consultas/día + análisis de imágenes\n\n` +
-        `Escribe *"ver planes"* para más información.`;
+        `🔗 [Ver planes y suscribirte](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`;
     } else if (plan === 'vip') {
       msg =
         `Has alcanzado tus 10 consultas de hoy ⚡\n\n` +
         `Tus consultas se renuevan a medianoche.\n` +
         `¿Quieres más? Upgrade a PRO:\n\n` +
         `🏆 *PRO*: 50 consultas/día + análisis de imágenes en vivo\n\n` +
-        `Escribe *"quiero PRO"* para más información.`;
+        `🔗 [Upgrade a PRO aquí](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`;
     } else {
       msg = `Has alcanzado tus 50 consultas de hoy.\nTus consultas se renuevan a medianoche. ⏰`;
     }
