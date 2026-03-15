@@ -116,7 +116,10 @@ const LEAGUE_NAME_TO_ID = {
   'conference league':848, 'conference':848,
   'libertadores':11, 'copa libertadores':11,
   'sudamericana':9, 'copa sudamericana':9,
-  'brasileirao':71, 'serie a brasileira':71, 'brasileirao b':72,
+  'brasileirao':71, 'serie a brasileira':71, 'seriea brasileira':71,
+  'brasil':71, 'brazil':71, 'liga brasil':71, 'liga brazil':71,
+  'serie a brasil':71, 'seriea brasil':71, 'série a brasil':71,
+  'brasileirao b':72, 'serie b brasil':72, 'serieb brasil':72,
   'liga betplay':239, 'primera a':239, 'liga colombia':239, 'betplay':239,
   'liga colombia b':66, 'primera b':240, 'torneo aguila':240, 'torneo águila':240,
   'liga argentina':128, 'primera division argentina':128, 'primera b argentina':129,
@@ -139,14 +142,21 @@ const LEAGUE_NAME_TO_ID = {
 
 function findLeagueId(name) {
   if (!name) return null;
-  const q = name.toLowerCase().trim();
+  const q = name.toLowerCase().trim().replace(/\s+/g, ' ');
   // exact match
   if (LEAGUE_NAME_TO_ID[q]) return LEAGUE_NAME_TO_ID[q];
-  // partial match
+  // partial match — prioriza la clave más larga para evitar falsos positivos
+  // (ej: "serie a brasil" no debe matchear "serie a" → Italia)
+  let bestKey = null, bestId = null;
   for (const [key, id] of Object.entries(LEAGUE_NAME_TO_ID)) {
-    if (q.includes(key) || key.includes(q)) return id;
+    if (q.includes(key) || key.includes(q)) {
+      if (!bestKey || key.length > bestKey.length) {
+        bestKey = key;
+        bestId = id;
+      }
+    }
   }
-  return null;
+  return bestId;
 }
 
 // ─── League priority for sorting ─────────────────────────────────────────────
