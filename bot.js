@@ -1325,8 +1325,16 @@ async function checkAndResetIfNeeded(record) {
   return record;
 }
 
+const ADMIN_IDS = new Set(['1079416271']);
+
 async function checkAccess(chatId, telegramId, isImage = false) {
   console.log('CHECK ACCESS - telegramId:', telegramId);
+
+  // Superadmin: acceso ilimitado siempre
+  if (ADMIN_IDS.has(String(telegramId))) {
+    console.log('CHECK ACCESS - superadmin, acceso ilimitado');
+    return { allowed: true, plan: 'pro' };
+  }
 
   let record = await getAirtableUser(telegramId);
   if (!record) {
