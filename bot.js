@@ -836,7 +836,13 @@ function todayDate() {
 
 const TG_LIMIT = 4000;
 
+function normalizeMd(text) {
+  // Telegram legacy Markdown uses *bold*, not **bold**
+  return text.replace(/\*\*(.+?)\*\*/g, '*$1*');
+}
+
 async function sendLong(chatId, text, options = {}) {
+  if (options.parse_mode === 'Markdown') text = normalizeMd(text);
   if (text.length <= TG_LIMIT) return bot.sendMessage(chatId, text, options);
   const paragraphs = text.split(/\n\n+/);
   let chunk = '';
@@ -1152,10 +1158,11 @@ Responde en español. Sé amigable, conciso y profesional.
 No menciones tecnologías, APIs ni plataformas.
 Si el usuario saluda, saluda de vuelta y menciona brevemente qué puedes hacer.
 Si hace una pregunta general de fútbol o apuestas, responde con conocimiento experto.
-Recuérdales que pueden pedir: picks del día, analizar un equipo, partidos en vivo, enviar imagen de un partido, o ver planes.`;
+Recuérdales que pueden pedir: picks del día, analizar un equipo, partidos en vivo, enviar imagen de un partido, o ver planes.
+FORMATO: usa *texto* para negritas (un solo asterisco, estilo Telegram). Nunca uses **doble asterisco**.`;
 
   const response = await haiku(CHAT_SYSTEM, pregunta);
-  await bot.sendMessage(chatId, response);
+  await bot.sendMessage(chatId, normalizeMd(response), { parse_mode: 'Markdown' });
 }
 
 async function handleVerPlanes(chatId) {
