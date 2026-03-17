@@ -127,7 +127,7 @@ const LEAGUE_NAME_TO_ID = {
   'mls':253,
   'eredivisie':88, 'eerste divisie':89,
   'primeira liga':94, 'liga nos':94,
-  'super lig':207, 'superlig':207,
+  'super lig':207, 'superlig':207, 'turquia':207, 'turkey':207, 'liga turca':207, 'tff':207, 'turkiye':207,
   'saudi pro league':203, 'saudi league':203,
   'jupiler pro league':144, 'jupiler':144,
   'super league grecia':197, 'super league':197,
@@ -262,18 +262,27 @@ async function getFixtureStatistics(fixtureId) {
   return stats;
 }
 
+function normalizeTeamName(str) {
+  return str
+    .toLowerCase()
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // quita tildes y diacríticos (ç→c, ü→u, ö→o, etc.)
+    .replace(/[/\-_.&']/g, ' ')                       // normaliza separadores (Bodo/Glimt → bodo glimt)
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 async function searchTeam(name, countryHint = '') {
   const { data } = await API.get('/teams', { params: { search: name } });
   const results = data.response || [];
   if (results.length === 0) return null;
   if (results.length === 1) return results[0];
 
-  const q = name.trim().toLowerCase();
+  const q = normalizeTeamName(name);
   const country = countryHint.trim().toLowerCase();
   const RESERVE = /\b(ii|b|reserve|reserva|sub|youth|juvenil|u\d{2}|amateur|filial)\b/i;
 
   function score(t) {
-    const tname = t.team.name.toLowerCase();
+    const tname = normalizeTeamName(t.team.name);
     const tcountry = (t.team.country || '').toLowerCase();
     let s = 0;
     if (tname === q) s += 100;
