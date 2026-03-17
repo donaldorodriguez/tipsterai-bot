@@ -309,6 +309,38 @@ async function findNextFixtureByDate(teamId, daysAhead = 14) {
   return null;
 }
 
+async function getTeamLastFixtures(teamId, last = 15, venue = null) {
+  const params = { team: teamId, last };
+  if (venue === 'home') params.venue = 'home';
+  else if (venue === 'away') params.venue = 'away';
+  const { data } = await API.get('/fixtures', { params });
+  return (data.response || [])
+    .filter(f => f.fixture.status.short === 'FT')
+    .map(f => ({
+      fixtureId:  f.fixture.id,
+      date:       f.fixture.date.split('T')[0],
+      homeTeam:   f.teams.home.name,
+      awayTeam:   f.teams.away.name,
+      homeId:     f.teams.home.id,
+      awayId:     f.teams.away.id,
+      leagueName: f.league.name,
+      leagueId:   f.league.id,
+      goalsHome:  f.goals.home ?? 0,
+      goalsAway:  f.goals.away ?? 0,
+      htHome:     f.score?.halftime?.home ?? null,
+      htAway:     f.score?.halftime?.away ?? null,
+    }));
+}
+
+async function getLeagueStandings(leagueId) {
+  const season = LEAGUE_SEASONS[leagueId] || 2025;
+  const { data } = await API.get('/standings', { params: { league: leagueId, season } });
+  const standings = data.response?.[0]?.league?.standings;
+  if (!standings) return [];
+  const group = Array.isArray(standings[0]) ? standings[0] : standings;
+  return group.map(s => ({ teamId: s.team.id, teamName: s.team.name, rank: s.rank }));
+}
+
 async function getH2H(id1, id2) {
   const { data } = await API.get('/fixtures/headtohead', { params: { h2h: `${id1}-${id2}`, last: 10 } });
   return (data.response || []).map(f => ({
@@ -532,17 +564,19 @@ Intenciones disponibles:
 - "estadisticas": rendimiento/historial de picks que el bot ha emitido
 - "chat_general": saludos, preguntas generales de fútbol, conversación
 - "ver_planes": usuario pregunta por precios, planes, suscripción, VIP, PRO
+- "rachas": buscar equipos con rachas activas (5+ partidos consecutivos con una estadística). Se activa con palabras como "rachas", "racha", "racha de", "equipos que llevan", "equipos con racha"
 
 Estructura JSON SIEMPRE completa:
 {
-  "intencion": "picks_hoy|picks_liga|partido_especifico|en_vivo|estadisticas|chat_general|ver_planes",
+  "intencion": "picks_hoy|picks_liga|partido_especifico|en_vivo|estadisticas|chat_general|ver_planes|rachas",
   "equipo": "nombre del equipo mencionado o null",
   "liga": "nombre de la liga mencionada o null",
   "pregunta_especifica": "la pregunta exacta del usuario",
   "mercado": "goles|goles_1T|corners|tarjetas|BTTS|resultado|resultado_1T|handicap|null",
   "tiempo": "1T|2T|FT|null",
   "contexto": "en_vivo|proximo_partido|hoy|null",
-  "period": "hoy|ayer|semana|total o null"
+  "period": "hoy|ayer|semana|total o null",
+  "venue": "home|away|all"
 }
 
 Ejemplos:
@@ -561,7 +595,12 @@ Ejemplos:
 - "hola" → {"intencion":"chat_general","equipo":null,"liga":null,"pregunta_especifica":"hola","mercado":null,"tiempo":null,"contexto":null,"period":null}
 - "ver planes" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"ver planes","mercado":null,"tiempo":null,"contexto":null,"period":null}
 - "quiero PRO" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"quiero PRO","mercado":null,"tiempo":null,"contexto":null,"period":null}
-- "precios" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"precios","mercado":null,"tiempo":null,"contexto":null,"period":null}`;
+- "precios" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"precios","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"all"}
+- "rachas Premier League" → {"intencion":"rachas","equipo":null,"liga":"Premier League","pregunta_especifica":"rachas Premier League","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"all"}
+- "rachas Real Madrid" → {"intencion":"rachas","equipo":"Real Madrid","liga":null,"pregunta_especifica":"rachas Real Madrid","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"all"}
+- "rachas en casa Serie A" → {"intencion":"rachas","equipo":null,"liga":"Serie A","pregunta_especifica":"rachas en casa Serie A","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"home"}
+- "rachas de visita Atletico Madrid" → {"intencion":"rachas","equipo":"Atletico Madrid","liga":null,"pregunta_especifica":"rachas de visita Atletico Madrid","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"away"}
+- "equipos con racha de goles Bundesliga" → {"intencion":"rachas","equipo":null,"liga":"Bundesliga","pregunta_especifica":"equipos con racha de goles Bundesliga","mercado":"goles","tiempo":null,"contexto":null,"period":null,"venue":"all"}`;
 
 async function detectIntent(message) {
   const raw = await haiku(INTENT_SYSTEM, message);
@@ -1152,6 +1191,199 @@ INSTRUCCIONES ESTRICTAS:
   recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]).catch(() => {});
 }
 
+// ─── Rachas ───────────────────────────────────────────────────────────────────
+
+function calcTeamStreaks(fixtures, teamId) {
+  const sorted = [...fixtures].sort((a, b) => new Date(a.date) - new Date(b.date));
+  const matchStats = sorted.map(f => {
+    const isHome   = f.homeId === teamId;
+    const scored   = isHome ? f.goalsHome : f.goalsAway;
+    const conceded = isHome ? f.goalsAway : f.goalsHome;
+    const htScored   = isHome ? f.htHome : f.htAway;
+    const htConceded = isHome ? f.htAway : f.htHome;
+    return { scored, conceded, total: scored + conceded, htScored, htConceded };
+  });
+
+  const categories = [
+    { key: 'marcó',      label: 'Marcó al menos 1 gol',       fn: m => m.scored > 0 },
+    { key: 'no_marcó',   label: 'Sin marcar',                  fn: m => m.scored === 0 },
+    { key: 'portería0',  label: 'Portería a cero',             fn: m => m.conceded === 0 },
+    { key: 'ganó',       label: 'Victoria',                    fn: m => m.scored > m.conceded },
+    { key: 'empató',     label: 'Empate',                      fn: m => m.scored === m.conceded },
+    { key: 'perdió',     label: 'Derrota',                     fn: m => m.scored < m.conceded },
+    { key: 'btts',       label: 'Ambos marcan (BTTS)',         fn: m => m.scored > 0 && m.conceded > 0 },
+    { key: 'over15',     label: 'Over 1.5 goles totales',      fn: m => m.total >= 2 },
+    { key: 'over25',     label: 'Over 2.5 goles totales',      fn: m => m.total >= 3 },
+    { key: 'over35',     label: 'Over 3.5 goles totales',      fn: m => m.total >= 4 },
+    { key: 'marcó1T',    label: 'Marcó en el 1er tiempo',      fn: m => m.htScored != null && m.htScored > 0 },
+    { key: 'marcó2T',    label: 'Marcó en el 2do tiempo',      fn: m => m.htScored != null && (m.scored - m.htScored) > 0 },
+    { key: 'recibió1T',  label: 'Recibió gol en el 1er tiempo',fn: m => m.htConceded != null && m.htConceded > 0 },
+    { key: 'sinRecibir1T',label: 'Sin recibir en el 1er tiempo',fn: m => m.htConceded != null && m.htConceded === 0 },
+  ];
+
+  const streaks = {};
+  for (const cat of categories) {
+    let current = 0;
+    for (const m of matchStats) {
+      if (cat.fn(m)) current++;
+      else current = 0;
+    }
+    streaks[cat.key] = { current, label: cat.label };
+  }
+  return streaks;
+}
+
+function calcCornerCardStreaks(fixtures, statsMap) {
+  const sorted = [...fixtures].sort((a, b) => new Date(a.date) - new Date(b.date));
+  const thresholds = [
+    { key: 'corners8',  label: 'Partido con 8+ córners totales',   type: 'corners', min: 8 },
+    { key: 'corners9',  label: 'Partido con 9+ córners totales',   type: 'corners', min: 9 },
+    { key: 'corners10', label: 'Partido con 10+ córners totales',  type: 'corners', min: 10 },
+    { key: 'corners11', label: 'Partido con 11+ córners totales',  type: 'corners', min: 11 },
+    { key: 'cards3',    label: 'Partido con 3+ tarjetas totales',  type: 'cards',   min: 3 },
+    { key: 'cards4',    label: 'Partido con 4+ tarjetas totales',  type: 'cards',   min: 4 },
+  ];
+
+  const streaks = {};
+  for (const t of thresholds) {
+    let current = 0;
+    for (const f of sorted) {
+      const stats = statsMap[f.fixtureId];
+      if (!stats) { current = 0; continue; }
+      let value = 0;
+      for (const ts of Object.values(stats)) {
+        if (t.type === 'corners') value += ts['Corner Kicks'] || 0;
+        else value += (ts['Yellow Cards'] || 0) + (ts['Red Cards'] || 0);
+      }
+      if (value >= t.min) current++;
+      else current = 0;
+    }
+    streaks[t.key] = { current, label: t.label };
+  }
+  return streaks;
+}
+
+async function handleRachas(chatId, intent) {
+  const venueRaw = intent.venue || 'all';
+  const venueParam = venueRaw === 'home' ? 'home' : venueRaw === 'away' ? 'away' : null;
+  const venueLabel = { home: 'en casa', away: 'de visita', all: 'en total' }[venueRaw] || 'en total';
+  const MIN_STREAK = 5;
+
+  // ── Modo equipo específico ──────────────────────────────────────────────────
+  if (intent.equipo) {
+    await bot.sendMessage(chatId, `🔍 Buscando rachas de *${intent.equipo}*...`, { parse_mode: 'Markdown' });
+
+    const teamData = await searchTeam(intent.equipo, intent.liga || '');
+    if (!teamData) return bot.sendMessage(chatId, `😔 No encontré el equipo *${intent.equipo}*.`, { parse_mode: 'Markdown' });
+
+    const teamId   = teamData.team.id;
+    const teamName = teamData.team.name;
+
+    const fixtures = await getTeamLastFixtures(teamId, 20, venueParam);
+    if (fixtures.length < 3) return bot.sendMessage(chatId, `😔 No hay suficientes partidos recientes para *${teamName}*.`, { parse_mode: 'Markdown' });
+
+    const baseStreaks = calcTeamStreaks(fixtures, teamId);
+
+    // Corners/tarjetas — últimos 10 partidos con estadísticas
+    const last10 = fixtures.slice(-10);
+    await bot.sendMessage(chatId, `📊 Consultando estadísticas de córners y tarjetas...`);
+    const statsMap = {};
+    for (const f of last10) {
+      const s = await getFixtureStatistics(f.fixtureId);
+      if (s) statsMap[f.fixtureId] = s;
+    }
+    const extraStreaks = calcCornerCardStreaks(last10, statsMap);
+
+    const allStreaks = { ...baseStreaks, ...extraStreaks };
+    const active = Object.entries(allStreaks)
+      .filter(([, v]) => v.current >= MIN_STREAK)
+      .sort(([, a], [, b]) => b.current - a.current);
+
+    if (active.length === 0) {
+      const top3 = Object.entries(allStreaks)
+        .sort(([, a], [, b]) => b.current - a.current)
+        .slice(0, 3)
+        .map(([, v]) => `${v.label}: ${v.current}`).join(', ');
+      return bot.sendMessage(chatId,
+        `📊 *${teamName}* no tiene rachas activas de ${MIN_STREAK}+ partidos ${venueLabel}.\n\nMejores rachas actuales: ${top3}`,
+        { parse_mode: 'Markdown' }
+      );
+    }
+
+    let text = `🔥 *RACHAS ACTIVAS — ${teamName}*\n`;
+    text += `📍 ${venueLabel.charAt(0).toUpperCase() + venueLabel.slice(1)} | Últimos ${fixtures.length} partidos\n`;
+    text += `━━━━━━━━━━━━━━━━━━━\n\n`;
+    for (const [, val] of active) {
+      text += `✅ *${val.label}*\n   ↳ ${val.current} partidos consecutivos\n\n`;
+    }
+    text += `━━━━━━━━━━━━━━━━━━━\n`;
+    text += `⚠️ Solo muestra rachas de ${MIN_STREAK}+ partidos`;
+    return sendLong(chatId, text, { parse_mode: 'Markdown' });
+  }
+
+  // ── Modo liga ──────────────────────────────────────────────────────────────
+  const leagueId = intent.liga ? findLeagueId(intent.liga) : null;
+  if (!leagueId) {
+    return bot.sendMessage(chatId,
+      '¿De qué equipo o liga quieres ver las rachas?\n\nEjemplos:\n• *rachas Real Madrid*\n• *rachas Premier League*\n• *rachas en casa Serie A*\n• *rachas de visita Bundesliga*',
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  const leagueName = LEAGUE_MAP[leagueId]?.name || intent.liga;
+  await bot.sendMessage(chatId, `🔍 Analizando rachas en *${leagueName}* ${venueLabel}...`, { parse_mode: 'Markdown' });
+
+  const teams = await getLeagueStandings(leagueId);
+  if (teams.length === 0) return bot.sendMessage(chatId, `😔 No encontré la tabla de *${leagueName}*.`, { parse_mode: 'Markdown' });
+
+  const topTeams = teams.slice(0, 16);
+  await bot.sendMessage(chatId, `📊 Procesando ${topTeams.length} equipos...`);
+
+  const teamsWithStreaks = [];
+  for (let i = 0; i < topTeams.length; i += 4) {
+    const batch = topTeams.slice(i, i + 4);
+    const results = await Promise.all(batch.map(async t => {
+      const fixtures = await getTeamLastFixtures(t.teamId, 12, venueParam);
+      const streaks  = calcTeamStreaks(fixtures, t.teamId);
+      return { ...t, streaks };
+    }));
+    teamsWithStreaks.push(...results);
+  }
+
+  // Agrupar por categoría
+  const categoryMap = {};
+  for (const team of teamsWithStreaks) {
+    for (const [key, val] of Object.entries(team.streaks)) {
+      if (val.current >= MIN_STREAK) {
+        if (!categoryMap[key]) categoryMap[key] = { label: val.label, teams: [] };
+        categoryMap[key].teams.push({ name: team.teamName, streak: val.current });
+      }
+    }
+  }
+
+  const sorted = Object.entries(categoryMap).sort(([, a], [, b]) => b.teams.length - a.teams.length);
+
+  if (sorted.length === 0) {
+    return bot.sendMessage(chatId,
+      `📊 No hay equipos con rachas de ${MIN_STREAK}+ partidos en *${leagueName}* ${venueLabel}.`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  let text = `🔥 *RACHAS ${leagueName.toUpperCase()}*\n`;
+  text += `📍 ${venueLabel.charAt(0).toUpperCase() + venueLabel.slice(1)} | Mín. ${MIN_STREAK} partidos consecutivos\n`;
+  text += `━━━━━━━━━━━━━━━━━━━\n\n`;
+  for (const [, cat] of sorted) {
+    cat.teams.sort((a, b) => b.streak - a.streak);
+    text += `📌 *${cat.label}*\n`;
+    for (const t of cat.teams) text += `   ▸ ${t.name}: *${t.streak}* partidos\n`;
+    text += '\n';
+  }
+  text += `━━━━━━━━━━━━━━━━━━━\n`;
+  text += `📊 Basado en últimos 12 partidos ${venueLabel} por equipo`;
+  return sendLong(chatId, text, { parse_mode: 'Markdown' });
+}
+
 async function handleChatGeneral(chatId, pregunta) {
   const CHAT_SYSTEM = `Eres TipsterAI Master PRO, el mejor asistente de apuestas deportivas.
 Responde en español. Sé amigable, conciso y profesional.
@@ -1577,6 +1809,9 @@ bot.on('message', async (msg) => {
       }
       case 'estadisticas':
         await handleEstadisticas(chatId, intent.period || 'hoy');
+        break;
+      case 'rachas':
+        await handleRachas(chatId, intent);
         break;
       default:
         await handleChatGeneral(chatId, intent.pregunta_especifica || text);
