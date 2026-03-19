@@ -297,6 +297,16 @@ async function searchTeam(name, countryHint = '') {
 }
 
 async function findNextFixtureByDate(teamId, daysAhead = 14) {
+  // 1. Consulta directa live para este equipo (bypass de cache global)
+  try {
+    const { data: liveData } = await API.get('/fixtures', { params: { team: teamId, live: 'all' } });
+    const directLive = (liveData.response || []).find(f =>
+      f.teams.home.id === teamId || f.teams.away.id === teamId
+    );
+    if (directLive) return directLive;
+  } catch { /* si falla el live, continúa con el método por fecha */ }
+
+  // 2. Fallback: cache global de live
   const liveRaw = await fetchLiveRaw();
   const liveMatch = liveRaw.find(f => f.teams.home.id === teamId || f.teams.away.id === teamId);
   if (liveMatch) return liveMatch;
@@ -311,7 +321,7 @@ async function findNextFixtureByDate(teamId, daysAhead = 14) {
     const all = await fetchFixturesByDate(ds);
     const match = all.find(f =>
       (f.teams.home.id === teamId || f.teams.away.id === teamId) &&
-      ['NS','1H','HT','2H','ET','P'].includes(f.fixture.status.short)
+      ['NS','1H','HT','2H','ET','P','BT','LIVE'].includes(f.fixture.status.short)
     );
     if (match) return match;
   }
