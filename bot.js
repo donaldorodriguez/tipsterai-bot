@@ -297,31 +297,41 @@ async function searchTeam(name, countryHint = '') {
 }
 
 async function findNextFixtureByDate(teamId, daysAhead = 14) {
-  // 1. Consulta directa live para este equipo (bypass de cache global)
+  const LIVE_STATUSES = ['1H','HT','2H','ET','P','BT','LIVE'];
+  const UPCOMING_STATUSES = ['NS', ...LIVE_STATUSES];
+
+  // 1. Partido en vivo ahora mismo para este equipo (consulta fresca, sin cache)
   try {
-    const { data: liveData } = await API.get('/fixtures', { params: { team: teamId, live: 'all' } });
-    const directLive = (liveData.response || []).find(f =>
+    const { data } = await API.get('/fixtures', { params: { team: teamId, live: 'all' } });
+    const live = (data.response || []).find(f =>
       f.teams.home.id === teamId || f.teams.away.id === teamId
     );
-    if (directLive) return directLive;
-  } catch { /* si falla el live, continúa con el método por fecha */ }
+    if (live) return live;
+  } catch {}
 
-  // 2. Fallback: cache global de live
-  const liveRaw = await fetchLiveRaw();
-  const liveMatch = liveRaw.find(f => f.teams.home.id === teamId || f.teams.away.id === teamId);
-  if (liveMatch) return liveMatch;
+  // 2. Próximos partidos del equipo (1 sola llamada directa, más fiable que buscar por fecha)
+  const cutoff = new Date();
+  cutoff.setDate(cutoff.getDate() + daysAhead);
+  try {
+    const { data } = await API.get('/fixtures', { params: { team: teamId, next: 10 } });
+    const next = (data.response || []).find(f =>
+      UPCOMING_STATUSES.includes(f.fixture.status.short) &&
+      new Date(f.fixture.date) <= cutoff
+    );
+    if (next) return next;
+  } catch {}
 
+  // 3. Fallback: loop por fecha (por si next no devuelve el partido de hoy en edge cases)
   const today = new Date();
-  for (let i = 0; i <= daysAhead; i++) {
+  for (let i = 0; i <= Math.min(daysAhead, 3); i++) {
     const d = new Date(today);
     d.setDate(d.getDate() + i);
     const ds = d.toISOString().split('T')[0];
-    // Siempre refrescar hoy (i=0) para no depender de caché desactualizada
     if (i === 0) dateCache.delete(ds);
     const all = await fetchFixturesByDate(ds);
     const match = all.find(f =>
       (f.teams.home.id === teamId || f.teams.away.id === teamId) &&
-      ['NS','1H','HT','2H','ET','P','BT','LIVE'].includes(f.fixture.status.short)
+      UPCOMING_STATUSES.includes(f.fixture.status.short)
     );
     if (match) return match;
   }
