@@ -406,6 +406,245 @@ async function getTeamStats(teamId, leagueId) {
   };
 }
 
+// ─── Probability & Analytics Engine ──────────────────────────────────────────
+
+// Factorial helper para Poisson (limitado a n<=20 para evitar overflow)
+function factorial(n) {
+  if (n <= 1) return 1;
+  let r = 1;
+  for (let i = 2; i <= Math.min(n, 20); i++) r *= i;
+  return r;
+}
+
+// Distribución de Poisson: P(X = k) dado lambda
+function poissonPMF(lambda, k) {
+  if (lambda <= 0) return k === 0 ? 1 : 0;
+  return (Math.pow(lambda, k) * Math.exp(-lambda)) / factorial(k);
+}
+
+// P(X >= threshold) = 1 - P(X < threshold)
+function poissonCDF_above(lambda, threshold) {
+  let cumulative = 0;
+  for (let k = 0; k < threshold; k++) cumulative += poissonPMF(lambda, k);
+  return 1 - cumulative;
+}
+
+/**
+ * Calcula probabilidades usando modelo de Poisson Dixon-Coles simplificado.
+ * Requiere promedios de goles por partido de ambos equipos.
+ *
+ * @param {number} homeFor    - Promedio goles anotados por local en casa
+ * @param {number} homeAgainst - Promedio goles recibidos por local en casa
+ * @param {number} awayFor    - Promedio goles anotados por visitante fuera
+ * @param {number} awayAgainst - Promedio goles recibidos por visitante fuera
+ * @returns {object} probabilidades de mercados clave
+ */
+function calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
+  // Goles esperados (xG implícito)
+  const homeLambda = ((homeFor || 1.2) + (awayAgainst || 1.2)) / 2;
+  const awayLambda = ((awayFor || 1.0) + (homeAgainst || 1.0)) / 2;
+
+  // Construir matriz de score hasta 6-6
+  const MAX = 7;
+  let pHomeWin = 0, pDraw = 0, pAwayWin = 0;
+  let pBtts = 0, pOver15 = 0, pOver25 = 0, pOver35 = 0, pUnder25 = 0;
+
+  for (let h = 0; h < MAX; h++) {
+    for (let a = 0; a < MAX; a++) {
+      const p = poissonPMF(homeLambda, h) * poissonPMF(awayLambda, a);
+      const total = h + a;
+      if (h > a) pHomeWin += p;
+      else if (h === a) pDraw += p;
+      else pAwayWin += p;
+      if (h > 0 && a > 0) pBtts += p;
+      if (total >= 2) pOver15 += p;
+      if (total >= 3) pOver25 += p;
+      if (total >= 4) pOver35 += p;
+      if (total <= 2) pUnder25 += p; // Bajo 2.5 = 0, 1, o 2 goles
+    }
+  }
+
+  // DNB: excluye el empate y redistribuye
+  const pDnbHome = pHomeWin / (pHomeWin + pAwayWin);
+  const pDnbAway = pAwayWin / (pHomeWin + pAwayWin);
+
+  return {
+    homeLambda: +homeLambda.toFixed(2),
+    awayLambda: +awayLambda.toFixed(2),
+    homeWin:  +(pHomeWin * 100).toFixed(1),
+    draw:     +(pDraw    * 100).toFixed(1),
+    awayWin:  +(pAwayWin * 100).toFixed(1),
+    btts:     +(pBtts    * 100).toFixed(1),
+    over15:   +(pOver15  * 100).toFixed(1),
+    over25:   +(pOver25  * 100).toFixed(1),
+    over35:   +(pOver35  * 100).toFixed(1),
+    under25:  +(pUnder25 * 100).toFixed(1),
+    dnbHome:  +(pDnbHome * 100).toFixed(1),
+    dnbAway:  +(pDnbAway * 100).toFixed(1),
+  };
+}
+
+/**
+ * Calcula el Expected Value de una apuesta.
+ * EV > 0 = apuesta con valor real; EV > 0.05 = buen valor (>5%)
+ *
+ * @param {number} estimatedProb - Probabilidad estimada (0-1)
+ * @param {number} decimalOdds   - Cuota decimal (ej: 1.85)
+ * @returns {number} EV como porcentaje (ej: 14.2 = +14.2%)
+ */
+function calcEV(estimatedProb, decimalOdds) {
+  if (!estimatedProb || !decimalOdds || decimalOdds <= 1) return null;
+  const ev = (estimatedProb * (decimalOdds - 1)) - (1 - estimatedProb);
+  return +(ev * 100).toFixed(1);
+}
+
+/**
+ * Calcula el momentum en vivo basado en las estadísticas del partido.
+ * Score positivo = domina el local; negativo = domina el visitante.
+ *
+ * @param {object} stats - Estadísticas del partido de getFixtureStatistics()
+ * @param {string} homeName - Nombre del equipo local
+ * @param {string} awayName - Nombre del equipo visitante
+ * @returns {object} momentum con dominador, score e intensidad
+ */
+function calcLiveMomentum(stats, homeName, awayName) {
+  if (!stats) return null;
+  const teams = Object.keys(stats);
+  if (teams.length < 2) return null;
+
+  const homeKey = teams.find(k => normalizeTeamName(k).includes(normalizeTeamName(homeName).split(' ')[0])) || teams[0];
+  const awayKey = teams.find(k => k !== homeKey) || teams[1];
+
+  const h = stats[homeKey] || {};
+  const a = stats[awayKey] || {};
+
+  const parseVal = v => parseInt(v) || 0;
+  const parsePct = v => parseFloat((v || '0%').replace('%', '')) || 0;
+
+  const shotsDiff       = parseVal(h['Shots on Goal']) - parseVal(a['Shots on Goal']);
+  const possessionDiff  = parsePct(h['Ball Possession']) - 50; // Positivo si domina local
+  const cornersDiff     = parseVal(h['Corner Kicks']) - parseVal(a['Corner Kicks']);
+  const attacksDiff     = parseVal(h['Total Shots']) - parseVal(a['Total Shots']);
+  const dangerousAttacks= parseVal(h['Shots insidebox']) - parseVal(a['Shots insidebox']);
+
+  // Score ponderado: más peso a tiros a puerta y ataques peligrosos
+  const score = (shotsDiff * 12) + (possessionDiff * 0.4) + (cornersDiff * 4) + (attacksDiff * 3) + (dangerousAttacks * 8);
+  const intensity = Math.abs(score);
+
+  let dominates, label;
+  if (score > 15)       { dominates = 'home'; label = `Domina ${homeName}`; }
+  else if (score < -15) { dominates = 'away'; label = `Domina ${awayName}`; }
+  else                  { dominates = 'equal'; label = 'Partido equilibrado'; }
+
+  return {
+    dominates,
+    label,
+    score: +score.toFixed(1),
+    intensity: +intensity.toFixed(1),
+    homeStats: {
+      shotsOnTarget: parseVal(h['Shots on Goal']),
+      possession:    parsePct(h['Ball Possession']),
+      corners:       parseVal(h['Corner Kicks']),
+      totalShots:    parseVal(h['Total Shots']),
+    },
+    awayStats: {
+      shotsOnTarget: parseVal(a['Shots on Goal']),
+      possession:    parsePct(a['Ball Possession']),
+      corners:       parseVal(a['Corner Kicks']),
+      totalShots:    parseVal(a['Total Shots']),
+    },
+  };
+}
+
+/**
+ * Proyecta estadísticas en vivo al ritmo actual.
+ * Útil para corners y tarjetas.
+ *
+ * @param {number} current  - Valor actual (ej: 6 corners al min 55)
+ * @param {number} elapsed  - Minutos transcurridos
+ * @param {number} total    - Minutos totales del partido (90 o 120)
+ * @returns {object} proyección con valor estimado y confianza
+ */
+function calcLiveProjection(current, elapsed, total = 90) {
+  if (!elapsed || elapsed <= 0) return null;
+  const pace = current / elapsed;
+  const projected = pace * total;
+  const remaining = (total - elapsed) * pace;
+  const confidence = elapsed >= 30 ? 'alta' : elapsed >= 15 ? 'media' : 'baja';
+  return {
+    projected:  +projected.toFixed(1),
+    remaining:  +remaining.toFixed(1),
+    pace:       +(pace * 90).toFixed(1), // corners/90 equivalentes
+    confidence,
+  };
+}
+
+/**
+ * Enriquece los datos de un partido con probabilidades calculadas.
+ * Se añade el bloque `probabilidades` al objeto de análisis.
+ *
+ * @param {object} homeStats - Stats del equipo local (de getTeamStats)
+ * @param {object} awayStats - Stats del equipo visitante (de getTeamStats)
+ * @param {Array}  h2h       - Array de H2H (de getH2H)
+ * @param {boolean} isHome   - true si homeStats es el equipo local
+ * @returns {object} bloque de probabilidades para incluir en el prompt
+ */
+function buildProbBlock(homeStats, awayStats, h2h = []) {
+  if (!homeStats || !awayStats) return null;
+
+  const hFor  = parseFloat(homeStats.golesAnotadosHome) || 0;
+  const hAgt  = parseFloat(homeStats.golesRecibidosHome) || 0;
+  const aFor  = parseFloat(awayStats.golesAnotadosAway) || 0;
+  const aAgt  = parseFloat(awayStats.golesRecibidosAway) || 0;
+
+  const probs = calcPoissonProbs(hFor, hAgt, aFor, aAgt);
+
+  // BTTS empírico desde H2H
+  const h2hBttsRate = h2h.length > 0
+    ? +((h2h.filter(m => m.btts).length / h2h.length) * 100).toFixed(1)
+    : null;
+
+  // Probabilidad de BTTS combinada: Poisson + empírico H2H (si disponible)
+  const bttsBlended = h2hBttsRate !== null
+    ? +((probs.btts * 0.6 + h2hBttsRate * 0.4)).toFixed(1)
+    : probs.btts;
+
+  // EV de mercados comunes (con cuotas de referencia de mercado)
+  const refOdds = { over25: 1.85, btts: 1.80, homeWin: 1.70, awayWin: 3.50, draw: 3.20, over35: 2.60, dnbHome: 1.50 };
+  const ev = {};
+  for (const [k, odds] of Object.entries(refOdds)) {
+    const prob = k === 'btts' ? bttsBlended / 100 : (probs[k] || 0) / 100;
+    ev[k] = calcEV(prob, odds);
+  }
+
+  return {
+    modeloPoisson: {
+      xGLocal: probs.homeLambda,
+      xGVisitante: probs.awayLambda,
+      probLocalGana: `${probs.homeWin}%`,
+      probEmpate:    `${probs.draw}%`,
+      probVisitanteGana: `${probs.awayWin}%`,
+      probBTTS_Poisson:  `${probs.btts}%`,
+      probBTTS_H2H:      h2hBttsRate !== null ? `${h2hBttsRate}%` : 'N/D',
+      probBTTS_Combinada: `${bttsBlended}%`,
+      probOver15: `${probs.over15}%`,
+      probOver25: `${probs.over25}%`,
+      probOver35: `${probs.over35}%`,
+      probUnder25: `${probs.under25}%`,
+      probDNB_Local: `${probs.dnbHome}%`,
+      probDNB_Visitante: `${probs.dnbAway}%`,
+    },
+    expectedValue_vs_CuotasReferencia: {
+      'Over 2.5 @ 1.85': ev.over25 !== null ? `${ev.over25 > 0 ? '+' : ''}${ev.over25}%` : 'N/D',
+      'BTTS @ 1.80':     ev.btts   !== null ? `${ev.btts   > 0 ? '+' : ''}${ev.btts}%`   : 'N/D',
+      'Local Gana @ 1.70': ev.homeWin !== null ? `${ev.homeWin > 0 ? '+' : ''}${ev.homeWin}%` : 'N/D',
+      'Over 3.5 @ 2.60': ev.over35 !== null ? `${ev.over35 > 0 ? '+' : ''}${ev.over35}%` : 'N/D',
+      'DNB Local @ 1.50': ev.dnbHome !== null ? `${ev.dnbHome > 0 ? '+' : ''}${ev.dnbHome}%` : 'N/D',
+    },
+    nota: 'EV positivo = apuesta con valor real vs cuota de mercado. Usa estos datos para calibrar el stake.',
+  };
+}
+
 // ─── Anthropic helpers ────────────────────────────────────────────────────────
 
 function isOverloadedError(err) {
@@ -484,10 +723,26 @@ MERCADOS DONDE ESTÁ EL VALOR REAL:
 9. Gana el visitante cuando el local tiene malos registros en casa
 
 PROCESO DE ANÁLISIS OBLIGATORIO:
-Para BTTS: % local marcó en casa + % visitante marcó fuera + % BTTS en H2H. Solo si los 3 superan 55%.
+Para BTTS: % local marcó en casa + % visitante marcó fuera + % BTTS en H2H. Solo si los 3 superan 55%. Usa también probBTTS_Combinada del modelo Poisson: si supera 62% es señal fuerte.
 Para Corners: promedio local en casa + visitante fuera. Recomienda Over si total supera línea en +1.5.
 Para HT: % local gana 1T en casa. Solo si supera 60%.
 Para Tarjetas: suma promedios. Solo si supera línea en +1.
+Para Over/Under goles: usa probOver25 y probOver35 del modelo. Si probOver25 > 65% con EV positivo, considera pick.
+Para DNB: usa probDNB_Local o probDNB_Visitante. Solo si supera 72% para stake 7+.
+
+INSTRUCCIONES PARA USAR LAS PROBABILIDADES CALCULADAS:
+Si el JSON de datos incluye el campo "probabilidadesCalculadas", DEBES usarlo como base:
+- xGLocal / xGVisitante: goles esperados. Si xG local > 1.8 y away < 0.9, el local domina claramente.
+- probBTTS_Combinada: combinación de Poisson + H2H. Más fiable que solo H2H.
+- expectedValue_vs_CuotasReferencia: si el EV de un mercado es negativo, NO lo recomiendes aunque el porcentaje parezca bueno. Busca mercados con EV > +3%.
+- Las probabilidades son calculadas matemáticamente — úsalas para CALIBRAR el stake: si la prob calculada dice 71% pero el análisis cualitativo sugiere 65%, usa 67% como consenso.
+
+INSTRUCCIONES PARA MOMENTUM EN VIVO:
+Si el JSON incluye "momentumEnVivo", úsalo para detectar oportunidades en tiempo real:
+- Si domina un equipo (score > 15) pero el marcador no lo refleja aún, considera apuesta al próximo gol de ese equipo.
+- Si está equilibrado, prioriza mercados de corners o tarjetas sobre resultado.
+- proyeccionCorners.projected > 10: considera Over 9.5 corners si confidence es "alta".
+- proyeccionTarjetas.projected > 4: considera Over 3.5 tarjetas si confidence es "alta".
 
 TRADUCCIÓN OBLIGATORIA DE TÉRMINOS TÉCNICOS — SIEMPRE en español:
 - failedToScore → "partidos sin marcar"
@@ -577,9 +832,22 @@ INSTRUCCIÓN ESPECIAL IN-PLAY:
 Analiza el marcador, minuto y estadísticas en tiempo real.
 Indica el tiempo restante estimado y cuándo actuar.
 
+ANÁLISIS DE MOMENTUM (campo "momentumEnVivo"):
+- score > 15: el local domina → favorece apuestas al local (siguiente gol, AH)
+- score < -15: el visitante domina → favorece apuestas al visitante
+- score entre -15 y 15: partido equilibrado → enfócate en corners y tarjetas
+- intensity > 30: dominio muy claro → stake más alto permitido
+
+PROYECCIONES EN TIEMPO REAL:
+- proyeccionCorners.projected: si > 10.5 con confidence "alta" → considera Over 9.5/10.5
+- proyeccionCorners.remaining: cuántos corners faltan (para saber si vale apostar ahora)
+- proyeccionTarjetas.projected: si > 4.5 con confidence "alta" → considera Over 3.5/4.5
+- Solo usa proyecciones con confidence "alta" (min 30 minutos jugados) para picks de stake 7+
+
 FORMATO ADICIONAL IN-PLAY:
 ⏰ Actúa antes del min: [XX]
-📈 Ritmo corners: X corners/90min proyectados`;
+📈 Ritmo corners: [proyeccionCorners.pace] corners/90min → proyectados [proyeccionCorners.projected] al final
+📊 Momentum: [momentumEnVivo.label] (score: [momentumEnVivo.score])`;
 
 // ─── Intent detection ─────────────────────────────────────────────────────────
 
@@ -956,22 +1224,28 @@ async function handlePicksHoy(chatId) {
     if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 6000));
   }
 
-  const enriched = selected.map((f, i) => ({
-    fixtureId:      f.fixtureId,
-    liga:           f.leagueName,
-    local:          f.homeTeam,
-    visitante:      f.awayTeam,
-    hora:           formatHour(f.date),
-    fechaPartido:   f.date,
-    statsLocal:     statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null,
-    statsVisitante: statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null,
-  }));
+  const enriched = selected.map((f, i) => {
+    const homeStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
+    const awayStats = statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
+    const probBlock = buildProbBlock(homeStats, awayStats, []);
+    return {
+      fixtureId:      f.fixtureId,
+      liga:           f.leagueName,
+      local:          f.homeTeam,
+      visitante:      f.awayTeam,
+      hora:           formatHour(f.date),
+      fechaPartido:   f.date,
+      statsLocal:     homeStats,
+      statsVisitante: awayStats,
+      ...(probBlock && { probabilidadesCalculadas: probBlock }),
+    };
+  });
 
   await bot.sendMessage(chatId, `🧠 Calculando picks de valor...`);
 
   const picksText = await sonnet(
     PICKS_HOY_SYSTEM,
-    `Partidos del día ${today} (hora Colombia). DATOS REALES DE API-FOOTBALL:\n\n${JSON.stringify(enriched, null, 2)}\n\nEmite EXACTAMENTE 3 picks individuales + 1 combinada basadas SOLO en estos datos reales.`
+    `Partidos del día ${today} (hora Colombia). DATOS REALES DE API-FOOTBALL:\n\n${JSON.stringify(enriched, null, 2)}\n\nEmite EXACTAMENTE 3 picks individuales + 1 combinada basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
   );
   await sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
   recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
@@ -1014,22 +1288,28 @@ async function handlePicksLiga(chatId, leagueName) {
     if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 6000));
   }
 
-  const enriched = fixtures.map((f, i) => ({
-    fixtureId:      f.fixtureId,
-    liga:           f.leagueName,
-    local:          f.homeTeam,
-    visitante:      f.awayTeam,
-    hora:           formatHour(f.date),
-    fechaPartido:   f.date,
-    statsLocal:     statsResults[i * 2]?.status === 'fulfilled' ? statsResults[i * 2].value : null,
-    statsVisitante: statsResults[i * 2 + 1]?.status === 'fulfilled' ? statsResults[i * 2 + 1].value : null,
-  }));
+  const enriched = fixtures.map((f, i) => {
+    const homeStats = statsResults[i * 2]?.status === 'fulfilled' ? statsResults[i * 2].value : null;
+    const awayStats = statsResults[i * 2 + 1]?.status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
+    const probBlock = buildProbBlock(homeStats, awayStats, []);
+    return {
+      fixtureId:      f.fixtureId,
+      liga:           f.leagueName,
+      local:          f.homeTeam,
+      visitante:      f.awayTeam,
+      hora:           formatHour(f.date),
+      fechaPartido:   f.date,
+      statsLocal:     homeStats,
+      statsVisitante: awayStats,
+      ...(probBlock && { probabilidadesCalculadas: probBlock }),
+    };
+  });
 
   await bot.sendMessage(chatId, `🧠 Calculando picks de valor...`);
 
   const picksText = await sonnet(
     PICKS_HOY_SYSTEM,
-    `Partidos de ${displayName} del día ${today}. DATOS REALES DE API:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y emite picks de valor basadas SOLO en estos datos reales.`
+    `Partidos de ${displayName} del día ${today}. DATOS REALES DE API:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y emite picks de valor basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
   );
   await sendLong(chatId, `📅 *${displayName} — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
   recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
@@ -1074,6 +1354,32 @@ async function handlePartido(chatId, teamName, countryHint = '') {
 
   const [h2hRes, homeStatsRes, awayStatsRes, liveStatsRes] = await Promise.allSettled(requests);
 
+  const h2hData      = h2hRes.status === 'fulfilled'      ? h2hRes.value      : [];
+  const homeStatsData= homeStatsRes.status === 'fulfilled' ? homeStatsRes.value : null;
+  const awayStatsData= awayStatsRes.status === 'fulfilled' ? awayStatsRes.value : null;
+  const liveStatsData= (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
+
+  // Calcular probabilidades con modelo de Poisson
+  const probBlock = buildProbBlock(homeStatsData, awayStatsData, h2hData);
+
+  // Momentum y proyecciones en vivo
+  const momentum   = isLive ? calcLiveMomentum(liveStatsData, homeTeam, awayTeam) : null;
+  const elapsed    = nextRaw.fixture?.status?.elapsed || 0;
+  const homeCorners= liveStatsData ? (Object.values(liveStatsData)[0]?.['Corner Kicks'] ?? 0) : 0;
+  const awayCorners= liveStatsData ? (Object.values(liveStatsData)[1]?.['Corner Kicks'] ?? 0) : 0;
+  const cornersProj= isLive && elapsed > 0
+    ? calcLiveProjection(homeCorners + awayCorners, elapsed)
+    : null;
+  const homeCards  = liveStatsData
+    ? ((Object.values(liveStatsData)[0]?.['Yellow Cards'] ?? 0) + (Object.values(liveStatsData)[0]?.['Red Cards'] ?? 0))
+    : 0;
+  const awayCards  = liveStatsData
+    ? ((Object.values(liveStatsData)[1]?.['Yellow Cards'] ?? 0) + (Object.values(liveStatsData)[1]?.['Red Cards'] ?? 0))
+    : 0;
+  const cardsProj  = isLive && elapsed > 0
+    ? calcLiveProjection(homeCards + awayCards, elapsed)
+    : null;
+
   const analysisData = {
     partido: {
       liga:      nextRaw.league.name,
@@ -1083,14 +1389,18 @@ async function handlePartido(chatId, teamName, countryHint = '') {
       local:     homeTeam,
       visitante: awayTeam,
       enVivo:    isLive,
-      minuto:    nextRaw.fixture?.status?.elapsed || null,
+      minuto:    elapsed || null,
       marcador:  isLive ? `${nextRaw.goals?.home ?? 0}-${nextRaw.goals?.away ?? 0}` : null,
     },
-    h2h:            h2hRes.status === 'fulfilled'      ? h2hRes.value      : [],
-    bttsEnH2H:      h2hRes.status === 'fulfilled'      ? h2hRes.value.filter(m => m.btts).length : 0,
-    statsLocal:     homeStatsRes.status === 'fulfilled' ? homeStatsRes.value : null,
-    statsVisitante: awayStatsRes.status === 'fulfilled' ? awayStatsRes.value : null,
-    estadisticasVivo: (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null,
+    h2h:            h2hData,
+    bttsEnH2H:      h2hData.filter(m => m.btts).length,
+    statsLocal:     homeStatsData,
+    statsVisitante: awayStatsData,
+    estadisticasVivo: liveStatsData,
+    ...(probBlock   && { probabilidadesCalculadas: probBlock }),
+    ...(momentum    && { momentumEnVivo: momentum }),
+    ...(cornersProj && { proyeccionCorners: cornersProj }),
+    ...(cardsProj   && { proyeccionTarjetas: cardsProj }),
   };
 
   await bot.sendMessage(chatId, '⚡ Procesando análisis profesional...');
@@ -1126,11 +1436,40 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
     toAnalyze.map(f => getFixtureStatistics(f.fixtureId))
   );
 
-  const enriched = toAnalyze.map((f, i) => ({
-    ...f,
-    marcador: `${f.homeGoals ?? 0}-${f.awayGoals ?? 0}`,
-    estadisticasVivo: statsResults[i].status === 'fulfilled' ? statsResults[i].value : null,
-  }));
+  const enriched = toAnalyze.map((f, i) => {
+    const liveStats = statsResults[i].status === 'fulfilled' ? statsResults[i].value : null;
+    const elapsed   = f.elapsed || 0;
+
+    // Momentum en vivo
+    const momentum = calcLiveMomentum(liveStats, f.homeTeam, f.awayTeam);
+
+    // Proyección de corners al ritmo actual
+    const homeCorners = liveStats ? (Object.values(liveStats)[0]?.['Corner Kicks'] ?? 0) : 0;
+    const awayCorners = liveStats ? (Object.values(liveStats)[1]?.['Corner Kicks'] ?? 0) : 0;
+    const cornersProj = elapsed > 0
+      ? calcLiveProjection(homeCorners + awayCorners, elapsed)
+      : null;
+
+    // Proyección de tarjetas
+    const homeCards = liveStats
+      ? ((Object.values(liveStats)[0]?.['Yellow Cards'] ?? 0) + (Object.values(liveStats)[0]?.['Red Cards'] ?? 0))
+      : 0;
+    const awayCards = liveStats
+      ? ((Object.values(liveStats)[1]?.['Yellow Cards'] ?? 0) + (Object.values(liveStats)[1]?.['Red Cards'] ?? 0))
+      : 0;
+    const cardsProj = elapsed > 0
+      ? calcLiveProjection(homeCards + awayCards, elapsed)
+      : null;
+
+    return {
+      ...f,
+      marcador: `${f.homeGoals ?? 0}-${f.awayGoals ?? 0}`,
+      estadisticasVivo: liveStats,
+      ...(momentum    && { momentumEnVivo: momentum }),
+      ...(cornersProj && { proyeccionCorners: cornersProj }),
+      ...(cardsProj   && { proyeccionTarjetas: cardsProj }),
+    };
+  });
 
   await bot.sendMessage(chatId, '🎯 Identificando picks de valor...');
   const analysis = await sonnet(
@@ -1178,6 +1517,11 @@ async function handleEspecifica(chatId, intent) {
     getTeamStats(awayId, leagueId),
   ]);
 
+  const h2hData2       = h2hRes.status === 'fulfilled' ? h2hRes.value : [];
+  const homeStatsData2 = homeStatsRes.status === 'fulfilled' ? homeStatsRes.value : null;
+  const awayStatsData2 = awayStatsRes.status === 'fulfilled' ? awayStatsRes.value : null;
+  const probBlock2     = buildProbBlock(homeStatsData2, awayStatsData2, h2hData2);
+
   const analysisData = {
     partido: {
       liga:      nextRaw.league.name,
@@ -1188,10 +1532,11 @@ async function handleEspecifica(chatId, intent) {
     },
     equipoConsultado: teamFull,
     rolEnPartido: isHome ? 'LOCAL' : 'VISITANTE',
-    h2h:          h2hRes.status === 'fulfilled' ? h2hRes.value : [],
-    bttsEnH2H:    h2hRes.status === 'fulfilled' ? h2hRes.value.filter(m => m.btts).length : 0,
-    statsLocal:   homeStatsRes.status === 'fulfilled' ? homeStatsRes.value : null,
-    statsVisitante: awayStatsRes.status === 'fulfilled' ? awayStatsRes.value : null,
+    h2h:          h2hData2,
+    bttsEnH2H:    h2hData2.filter(m => m.btts).length,
+    statsLocal:   homeStatsData2,
+    statsVisitante: awayStatsData2,
+    ...(probBlock2 && { probabilidadesCalculadas: probBlock2 }),
   };
 
   await bot.sendMessage(chatId, '⚡ Calculando probabilidad específica...');
@@ -1207,13 +1552,14 @@ ${JSON.stringify(analysisData, null, 2)}
 
 INSTRUCCIONES ESTRICTAS:
 - Responde EXACTAMENTE lo que pregunta el usuario. NO hagas análisis completo si no lo pidió.
-- Calcula la probabilidad específica del mercado usando los datos históricos disponibles.
-- Si pregunta por 1T: usa H2H y calcula % de veces que el equipo ganó/marcó en 1T.
-- Si pregunta por corners: usa promedios de corners del equipo.
-- Si pregunta por tarjetas: usa promedios de tarjetas.
-- Si pregunta por BTTS: calcula % de H2H donde ambos marcaron.
+- Usa las probabilidadesCalculadas como base principal. El modelo Poisson ya calculó las probs matemáticamente.
+- Si pregunta por BTTS: usa probBTTS_Combinada (Poisson + H2H). Muestra la fuente.
+- Si pregunta por Over/Under goles: usa probOver25, probOver35, xGLocal, xGVisitante.
+- Si pregunta por resultado: usa probLocalGana, probEmpate, probVisitanteGana, probDNB_Local/Visitante.
+- Si pregunta por corners o tarjetas: usa promedios de stats históricos disponibles.
+- Si el EV es negativo en el mercado preguntado, menciónalo ("la cuota de mercado no ofrece valor").
 - Muestra los datos históricos relevantes para ESA pregunta concreta.
-- Sé directo. Máximo 200 palabras.`;
+- Sé directo. Máximo 250 palabras.`;
 
   const analysis = await sonnet(TIPSTER_SYSTEM, specificPrompt);
   await sendLong(chatId, `🎯 *${teamFull}* — Consulta específica\n\n${analysis}`, { parse_mode: 'Markdown' });
