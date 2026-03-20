@@ -686,6 +686,198 @@ function buildProbBlock(homeStats, awayStats, h2h = []) {
   };
 }
 
+// ─── Goal Alert Engine ────────────────────────────────────────────────────────
+
+/**
+ * Determina los minutos restantes y el semiperíodo activo del partido.
+ */
+function matchTimeInfo(status, elapsed) {
+  const e = elapsed || 1;
+  if (status === '1H') return { period: '1T', remaining: Math.max(45 - e, 1), total: 45 };
+  if (status === '2H') return { period: '2T', remaining: Math.max(90 - e, 1), total: 90 };
+  if (status === 'ET') return { period: 'ET', remaining: Math.max(120 - e, 1), total: 120 };
+  return null; // HT, FT, etc. — no aplica
+}
+
+/**
+ * Selecciona el mercado más apropiado y calcula odds estimadas
+ * basado en la situación actual del partido.
+ */
+function selectGoalMarket(homeGoals, awayGoals, pGoal, elapsed, period) {
+  const total = homeGoals + awayGoals;
+  const diff  = homeGoals - awayGoals;
+
+  // Over de la siguiente línea entera
+  const overLine = total + 0.5;
+
+  // BTTS: útil si un equipo aún no marcó y p > 40%
+  const bttsViable = (homeGoals === 0 || awayGoals === 0) && pGoal > 0.42;
+
+  // Empate productivo → Over X.5 tiene valor si es 0-0 y tiempo avanzado
+  const drawLate = total === 0 && elapsed >= 60;
+
+  let market, impliedOdds;
+
+  if (drawLate) {
+    // 0-0 pasado el min 60 → cuota Over 0.5 sube naturalmente (buena ventana)
+    market = `Over ${overLine} goles (partido terminará en goles)`;
+    impliedOdds = +(1 / pGoal).toFixed(2);
+  } else if (bttsViable && elapsed < 75) {
+    // Un equipo sin marcar + tiempo suficiente → BTTS
+    const noScorer = homeGoals === 0 ? 'visitante' : 'local';
+    market = `Ambos marcan — ${noScorer} todavía sin gol`;
+    // BTTS odds suelen ser mayores
+    impliedOdds = +(1 / (pGoal * 0.85)).toFixed(2);
+  } else if (Math.abs(diff) === 1 && elapsed >= 55) {
+    // Partido igualado 1 gol de diferencia → equipo perdedor presiona
+    const trailing = diff > 0 ? awayGoals : homeGoals;
+    market = `Over ${overLine} goles (equipo perdedor presiona)`;
+    impliedOdds = +(1 / pGoal).toFixed(2);
+  } else {
+    market = `Over ${overLine} goles`;
+    impliedOdds = +(1 / pGoal).toFixed(2);
+  }
+
+  return { market, impliedOdds, overLine };
+}
+
+/**
+ * Calcula la probabilidad de que haya al menos 1 gol más en el tiempo restante.
+ * Combina xG histórico (team stats) con el ritmo real del partido (live pace).
+ *
+ * @returns {object|null} datos de alerta o null si el partido no está activo
+ */
+function calcGoalAlert(fixture, liveStats, homeStats, awayStats) {
+  const timeInfo = matchTimeInfo(fixture.status, fixture.elapsed);
+  if (!timeInfo) return null;
+
+  const { period, remaining, total } = timeInfo;
+  const elapsed     = fixture.elapsed || 1;
+  const homeGoals   = fixture.homeGoals ?? 0;
+  const awayGoals   = fixture.awayGoals ?? 0;
+  const totalGoals  = homeGoals + awayGoals;
+  const timeFrac    = remaining / 90; // fracción de 90 min restante
+
+  // ── xG histórico ajustado a tiempo restante ──────────────────────────────
+  const hFor  = parseFloat(homeStats?.golesAnotadosHome) || 1.2;
+  const hAgt  = parseFloat(homeStats?.golesRecibidosHome) || 1.1;
+  const aFor  = parseFloat(awayStats?.golesAnotadosAway) || 1.0;
+  const aAgt  = parseFloat(awayStats?.golesRecibidosAway) || 1.0;
+
+  const homeLambdaFull = ((hFor + aAgt) / 2);
+  const awayLambdaFull = ((aFor + hAgt) / 2);
+  const lambdaHistorical = (homeLambdaFull + awayLambdaFull) * timeFrac;
+
+  // ── Ritmo real del partido (pace) ─────────────────────────────────────────
+  const goalPaceFull = totalGoals > 0 ? (totalGoals / elapsed) * 90 : 0;
+  const lambdaLivePace = goalPaceFull * timeFrac;
+
+  // ── Lambda combinada: 60% histórico + 40% pace real ───────────────────────
+  // Si no hay goles aún, confiamos más en el histórico
+  const liveWeight = totalGoals > 0 ? 0.40 : 0.15;
+  const lambdaCombined = lambdaHistorical * (1 - liveWeight) + lambdaLivePace * liveWeight;
+
+  // ── Bonuses contextuales ──────────────────────────────────────────────────
+  let bonus = 0;
+
+  // Presión de tiros: muchos tiros con pocos goles → presión acumulada
+  if (liveStats) {
+    const teams = Object.values(liveStats);
+    if (teams.length >= 2) {
+      const shotsOnH = parseInt(teams[0]?.['Shots on Goal'] || 0);
+      const shotsOnA = parseInt(teams[1]?.['Shots on Goal'] || 0);
+      const shotsTotal = parseInt(teams[0]?.['Total Shots'] || 0) + parseInt(teams[1]?.['Total Shots'] || 0);
+      const shotsOnTarget = shotsOnH + shotsOnA;
+      // Si hay ≥8 tiros a puerta y pocos goles → +5% probabilidad
+      if (shotsOnTarget >= 8 && shotsOnTarget / (totalGoals + 1) > 4) bonus += 0.05;
+      // Si hay ≥14 tiros totales → más presión ofensiva
+      if (shotsTotal >= 14) bonus += 0.03;
+    }
+  }
+
+  // Equipo perdedor por 1 gol → empuja más (desesperación)
+  if (Math.abs(homeGoals - awayGoals) === 1 && elapsed >= 55) bonus += 0.04;
+
+  // Último cuarto 0-0 → urgencia máxima
+  if (totalGoals === 0 && elapsed >= 67) bonus += 0.06;
+
+  // P(al menos 1 gol más) = 1 - P(0 goles) = 1 - e^(-lambda)
+  const pRaw     = 1 - Math.exp(-lambdaCombined);
+  const pGoal    = Math.min(pRaw + bonus, 0.94);
+  const impliedOdds = pGoal > 0 ? +(1 / pGoal).toFixed(2) : 99;
+
+  // Solo alertamos si las odds estimadas superan 1.45 (P < 69%)
+  if (impliedOdds < 1.45) return null;
+
+  const { market, impliedOdds: mktOdds, overLine } = selectGoalMarket(
+    homeGoals, awayGoals, pGoal, elapsed, period
+  );
+
+  // Score de oportunidad (0-100): combina prob + odds + tiempo restante
+  // Ponderamos más los partidos con odds entre 1.50-2.20 (zona de valor real)
+  const oddsBonus = (mktOdds >= 1.50 && mktOdds <= 2.50) ? 15 : (mktOdds > 2.50 ? 5 : -10);
+  const alertScore = Math.min(pGoal * 70 + (remaining / 45) * 15 + oddsBonus, 100);
+
+  // Describe por qué es una oportunidad
+  const reasons = [];
+  if (totalGoals === 0 && elapsed >= 60)  reasons.push(`0-0 en min ${elapsed}, tiempo aprieta`);
+  if (Math.abs(homeGoals - awayGoals) === 1 && elapsed >= 55) reasons.push('equipo perdedor presiona');
+  if (bonus > 0.07) reasons.push('alta presión ofensiva (tiros a puerta)');
+  if (lambdaCombined > 0.8) reasons.push(`xG restante alto (${lambdaCombined.toFixed(2)} goles esperados)`);
+  if (reasons.length === 0) reasons.push(`${(pGoal*100).toFixed(0)}% prob de gol en ${remaining} min restantes`);
+
+  return {
+    fixtureId:   fixture.fixtureId,
+    local:       fixture.homeTeam,
+    visitante:   fixture.awayTeam,
+    liga:        fixture.leagueName,
+    country:     fixture.country,
+    marcador:    `${homeGoals}-${awayGoals}`,
+    minuto:      elapsed,
+    period,
+    remaining,
+    pGoal:       +(pGoal * 100).toFixed(1),
+    impliedOdds: mktOdds,
+    market,
+    overLine,
+    xGRestante:  +lambdaCombined.toFixed(2),
+    alertScore:  +alertScore.toFixed(1),
+    razon:       reasons.join(' + '),
+  };
+}
+
+const ALERTA_GOL_SYSTEM = `Eres un tipster especializado en apuestas en vivo (in-play). Te llegan datos calculados matemáticamente de partidos en curso con probabilidades de gol reales.
+
+FORMATO OBLIGATORIO para cada alerta:
+⚡ *ALERTA DE GOL #[N]*
+⚽ [Local] [marcador] [Visitante] | 🕐 Min [XX] ([período])
+🏆 [Liga] — [País]
+━━━━━━━━━━━━━━━━━━━
+🎯 Mercado: *[mercado recomendado]*
+📊 Prob. de gol: *[X]%* | xG restante: *[X.X]*
+💰 Cuota estimada: *~[X.XX]*
+⏱️ Actúa antes del min: *[min_límite]*
+📈 Por qué: [razón en 1 línea]
+🏆 Stake: *[X]/10*
+━━━━━━━━━━━━━━━━━━━
+
+CRITERIO DE STAKE PARA ALERTA EN VIVO:
+- Stake 8: prob > 72% + cuota > 1.55
+- Stake 7: prob 62-72% + cuota > 1.50
+- Stake 6: prob 55-62% + cuota > 1.48
+- No publicar si cuota estimada < 1.45
+
+CRITERIO DEL MINUTO LÍMITE:
+- Siempre da un minuto concreto antes del que vale apostar
+- En 1T: si es min 25, actúa antes del min 35
+- En 2T: si es min 65, actúa antes del min 75
+- Nunca más allá del min 85
+
+Al final de todas las alertas, añade:
+⚠️ _Las cuotas en vivo cambian rápidamente. Verifica la cuota real antes de apostar._
+
+Responde en español. No menciones APIs ni fuentes de datos.`;
+
 // ─── Anthropic helpers ────────────────────────────────────────────────────────
 
 function isOverloadedError(err) {
@@ -899,6 +1091,7 @@ Intenciones disponibles:
 - "picks_liga": picks del día de una liga específica
 - "partido_especifico": análisis de un equipo o partido, con o sin pregunta de mercado específico
 - "en_vivo": partidos en vivo, con o sin filtro de liga o mercado
+- "alerta_gol": alerta de probabilidad de gol en vivo — detecta partidos con mayor prob de gol próximo y buena cuota. Se activa con palabras como "alerta gol", "alerta de gol", "probabilidad gol", "donde puede haber gol", "gol en vivo", "partido con gol", "cuota gol"
 - "estadisticas": rendimiento/historial de picks que el bot ha emitido
 - "chat_general": saludos, preguntas generales de fútbol, conversación
 - "ver_planes": usuario pregunta por precios, planes, suscripción, VIP, PRO
@@ -906,7 +1099,7 @@ Intenciones disponibles:
 
 Estructura JSON SIEMPRE completa:
 {
-  "intencion": "picks_hoy|picks_liga|partido_especifico|en_vivo|estadisticas|chat_general|ver_planes|rachas",
+  "intencion": "picks_hoy|picks_liga|partido_especifico|en_vivo|alerta_gol|estadisticas|chat_general|ver_planes|rachas",
   "equipo": "nombre del equipo mencionado o null",
   "liga": "nombre de la liga mencionada o null",
   "pregunta_especifica": "la pregunta exacta del usuario",
@@ -934,6 +1127,9 @@ Ejemplos:
 - "ver planes" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"ver planes","mercado":null,"tiempo":null,"contexto":null,"period":null}
 - "quiero PRO" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"quiero PRO","mercado":null,"tiempo":null,"contexto":null,"period":null}
 - "precios" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"precios","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"all"}
+- "alerta gol" → {"intencion":"alerta_gol","equipo":null,"liga":null,"pregunta_especifica":"alerta gol","mercado":"goles","tiempo":null,"contexto":"en_vivo","period":null,"venue":"all"}
+- "donde puede haber gol en vivo" → {"intencion":"alerta_gol","equipo":null,"liga":null,"pregunta_especifica":"donde puede haber gol en vivo","mercado":"goles","tiempo":null,"contexto":"en_vivo","period":null,"venue":"all"}
+- "probabilidad de gol" → {"intencion":"alerta_gol","equipo":null,"liga":null,"pregunta_especifica":"probabilidad de gol","mercado":"goles","tiempo":null,"contexto":"en_vivo","period":null,"venue":"all"}
 - "rachas Premier League" → {"intencion":"rachas","equipo":null,"liga":"Premier League","pregunta_especifica":"rachas Premier League","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"all"}
 - "rachas Real Madrid" → {"intencion":"rachas","equipo":"Real Madrid","liga":null,"pregunta_especifica":"rachas Real Madrid","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"all"}
 - "rachas en casa Serie A" → {"intencion":"rachas","equipo":null,"liga":"Serie A","pregunta_especifica":"rachas en casa Serie A","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"home"}
@@ -1557,6 +1753,68 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
   );
   await sendLong(chatId, `🔴 *PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}*\n\n${analysis}`, { parse_mode: 'Markdown' });
   recordPicks(analysis, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.homeTeam, visitante: f.awayTeam, liga: f.leagueName, fechaPartido: f.date }))).catch(e => console.error('recordPicks:', e.message));
+}
+
+// ─── Alerta de Gol ────────────────────────────────────────────────────────────
+
+async function handleAlertaGol(chatId) {
+  await bot.sendMessage(chatId, '⚡ Escaneando partidos en vivo en busca de oportunidades de gol...');
+
+  // 1. Obtener todos los partidos en vivo
+  const liveRaw = await fetchLiveRaw();
+  const liveActive = liveRaw.filter(f =>
+    ['1H', '2H', 'ET'].includes(f.fixture.status.short) &&
+    LEAGUE_IDS.has(f.league.id)
+  );
+
+  if (liveActive.length === 0) {
+    return bot.sendMessage(chatId, '😔 No hay partidos activos ahora mismo en las ligas monitoreadas.');
+  }
+
+  await bot.sendMessage(chatId, `🔍 *${liveActive.length}* partido(s) activo(s). Calculando probabilidades de gol...`, { parse_mode: 'Markdown' });
+
+  // 2. Obtener stats en vivo + históricas en paralelo (máx 6 partidos)
+  const candidates = liveActive.slice(0, 6);
+  const [liveStatsResults, homeStatsResults, awayStatsResults] = await Promise.all([
+    Promise.allSettled(candidates.map(f => getFixtureStatistics(f.fixture.id))),
+    Promise.allSettled(candidates.map(f => getTeamStats(f.teams.home.id, f.league.id))),
+    Promise.allSettled(candidates.map(f => getTeamStats(f.teams.away.id, f.league.id))),
+  ]);
+
+  // 3. Calcular alerta de gol para cada partido
+  const alerts = [];
+  for (let i = 0; i < candidates.length; i++) {
+    const f = candidates[i];
+    const parsed = parseFixture(f);
+    const liveStats  = liveStatsResults[i].status  === 'fulfilled' ? liveStatsResults[i].value  : null;
+    const homeStats  = homeStatsResults[i].status  === 'fulfilled' ? homeStatsResults[i].value  : null;
+    const awayStats  = awayStatsResults[i].status  === 'fulfilled' ? awayStatsResults[i].value  : null;
+
+    const alert = calcGoalAlert(parsed, liveStats, homeStats, awayStats);
+    if (alert && alert.impliedOdds >= 1.45) alerts.push(alert);
+  }
+
+  if (alerts.length === 0) {
+    return bot.sendMessage(
+      chatId,
+      '⛔ No hay partidos en vivo con probabilidad de gol suficiente para recomendar (cuota < 1.45 o partidos finalizando).\n\nInténtalo más tarde.'
+    );
+  }
+
+  // 4. Ordenar por alertScore desc y tomar top 3
+  const top = alerts
+    .sort((a, b) => b.alertScore - a.alertScore)
+    .slice(0, 3);
+
+  console.log(`⚡ ${top.length} alertas de gol generadas:`, top.map(a => `${a.local} vs ${a.visitante} (${a.pGoal}% @ ~${a.impliedOdds})`).join(', '));
+
+  // 5. Claude formatea las alertas (Haiku = rápido y barato para tiempo real)
+  const analysis = await haiku(
+    ALERTA_GOL_SYSTEM,
+    `Alertas de gol calculadas matemáticamente:\n\n${JSON.stringify(top, null, 2)}\n\nFormatea las ${top.length} alerta(s) usando el formato obligatorio. Ordénalas de mayor a menor alertScore.`
+  );
+
+  await sendLong(chatId, `⚡ *ALERTAS DE GOL EN VIVO*\n\n${analysis}`, { parse_mode: 'Markdown' });
 }
 
 async function handleEspecifica(chatId, intent) {
@@ -2228,6 +2486,9 @@ bot.on('message', async (msg) => {
         break;
       case 'picks_liga':
         await handlePicksLiga(chatId, intent.liga || text, forceRefresh);
+        break;
+      case 'alerta_gol':
+        await handleAlertaGol(chatId);
         break;
       case 'partido_especifico':
         if (!intent.equipo) {
