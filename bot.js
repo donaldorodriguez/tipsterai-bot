@@ -200,6 +200,47 @@ const PLANES = {
 const dateCache = new Map();
 let liveCache = { raw: null, ts: 0 };
 
+// Caché de picks del día: evita análisis duplicados y picks contradictorios
+// Clave: `${fecha}_${scope}` donde scope = 'all' | leagueId
+// Expira automáticamente a medianoche hora Colombia
+const PICKS_CACHE_FILE = path.join(__dirname, 'picks_hoy_cache.json');
+
+function loadPicksCache() {
+  try { return JSON.parse(fs.readFileSync(PICKS_CACHE_FILE, 'utf8')); }
+  catch { return {}; }
+}
+
+function savePicksCache(cache) {
+  try { fs.writeFileSync(PICKS_CACHE_FILE, JSON.stringify(cache, null, 2)); }
+  catch (e) { console.error('savePicksCache error:', e.message); }
+}
+
+function getPicksCache(scope) {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+  const cache = loadPicksCache();
+  const entry = cache[`${today}_${scope}`];
+  if (!entry) return null;
+  // Verificar que es del mismo día Colombia (seguridad extra)
+  if (entry.fecha !== today) return null;
+  return entry;
+}
+
+function setPicksCache(scope, picksText, fixtureIds) {
+  const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+  const cache = loadPicksCache();
+  // Limpiar entradas de días anteriores
+  for (const key of Object.keys(cache)) {
+    if (!key.startsWith(today)) delete cache[key];
+  }
+  cache[`${today}_${scope}`] = {
+    fecha:      today,
+    generadoAt: new Date().toISOString(),
+    picksText,
+    fixtureIds: fixtureIds || [],
+  };
+  savePicksCache(cache);
+}
+
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
 function parseFixture(f) {
@@ -1196,9 +1237,24 @@ async function sendLong(chatId, text, options = {}) {
 
 // ─── Business flows ───────────────────────────────────────────────────────────
 
-async function handlePicksHoy(chatId) {
-  await bot.sendMessage(chatId, '🔍 Consultando nuestra base de datos estadística...');
+async function handlePicksHoy(chatId, forceRefresh = false) {
   const today = todayDate();
+
+  // ── Caché: devuelve picks ya generados hoy sin volver a consultar ─────────
+  if (!forceRefresh) {
+    const cached = getPicksCache('all');
+    if (cached) {
+      console.log(`📦 Cache hit — picks del día ya generados a las ${cached.generadoAt}`);
+      await bot.sendMessage(
+        chatId,
+        `📦 _Picks ya generados hoy (${cached.generadoAt.slice(11, 16)} hora UTC). Mostrando análisis guardado:_`,
+        { parse_mode: 'Markdown' }
+      );
+      return sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${cached.picksText}`, { parse_mode: 'Markdown' });
+    }
+  }
+
+  await bot.sendMessage(chatId, '🔍 Consultando nuestra base de datos estadística...');
   const fixtures = await getFixturesByDate(today);
 
   if (fixtures.length === 0) {
@@ -1247,14 +1303,33 @@ async function handlePicksHoy(chatId) {
     PICKS_HOY_SYSTEM,
     `Partidos del día ${today} (hora Colombia). DATOS REALES DE API-FOOTBALL:\n\n${JSON.stringify(enriched, null, 2)}\n\nEmite EXACTAMENTE 3 picks individuales + 1 combinada basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
   );
+
+  // Guardar en caché para evitar re-análisis y picks contradictorios
+  setPicksCache('all', picksText, enriched.map(f => f.fixtureId));
+
   await sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
   recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
 }
 
-async function handlePicksLiga(chatId, leagueName) {
+async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
   const leagueId = findLeagueId(leagueName);
   const leagueInfo = leagueId ? LEAGUE_MAP[leagueId] : null;
   const displayName = leagueInfo?.name || leagueName;
+  const cacheScope  = `liga_${leagueId || leagueName}`;
+
+  // ── Caché por liga ────────────────────────────────────────────────────────
+  if (!forceRefresh) {
+    const cached = getPicksCache(cacheScope);
+    if (cached) {
+      console.log(`📦 Cache hit — picks ${displayName} ya generados a las ${cached.generadoAt}`);
+      await bot.sendMessage(
+        chatId,
+        `📦 _Picks de ${displayName} ya generados hoy (${cached.generadoAt.slice(11, 16)} UTC). Mostrando análisis guardado:_`,
+        { parse_mode: 'Markdown' }
+      );
+      return sendLong(chatId, `📅 *${displayName} — ${todayDate()}*\n\n${cached.picksText}`, { parse_mode: 'Markdown' });
+    }
+  }
 
   await bot.sendMessage(chatId, `🔍 Consultando nuestra base de datos — ${displayName}...`);
 
@@ -1311,6 +1386,10 @@ async function handlePicksLiga(chatId, leagueName) {
     PICKS_HOY_SYSTEM,
     `Partidos de ${displayName} del día ${today}. DATOS REALES DE API:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y emite picks de valor basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
   );
+
+  // Guardar en caché para evitar re-análisis y picks contradictorios
+  setPicksCache(cacheScope, picksText, enriched.map(f => f.fixtureId));
+
   await sendLong(chatId, `📅 *${displayName} — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
   recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
 }
@@ -2140,12 +2219,15 @@ bot.on('message', async (msg) => {
       return handleChatGeneral(chatId, intent.pregunta_especifica || text);
     }
 
+    // Detectar si el usuario quiere forzar un nuevo análisis
+    const forceRefresh = /\b(actualizar|refresh|forzar|nuevo|recalcul|regenera)\b/i.test(text);
+
     switch (intencion) {
       case 'picks_hoy':
-        await handlePicksHoy(chatId);
+        await handlePicksHoy(chatId, forceRefresh);
         break;
       case 'picks_liga':
-        await handlePicksLiga(chatId, intent.liga || text);
+        await handlePicksLiga(chatId, intent.liga || text, forceRefresh);
         break;
       case 'partido_especifico':
         if (!intent.equipo) {
