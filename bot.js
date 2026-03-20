@@ -1128,8 +1128,11 @@ Ejemplos:
 - "quiero PRO" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"quiero PRO","mercado":null,"tiempo":null,"contexto":null,"period":null}
 - "precios" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"precios","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"all"}
 - "alerta gol" → {"intencion":"alerta_gol","equipo":null,"liga":null,"pregunta_especifica":"alerta gol","mercado":"goles","tiempo":null,"contexto":"en_vivo","period":null,"venue":"all"}
-- "donde puede haber gol en vivo" → {"intencion":"alerta_gol","equipo":null,"liga":null,"pregunta_especifica":"donde puede haber gol en vivo","mercado":"goles","tiempo":null,"contexto":"en_vivo","period":null,"venue":"all"}
+- "gol en vivo" → {"intencion":"alerta_gol","equipo":null,"liga":null,"pregunta_especifica":"gol en vivo","mercado":"goles","tiempo":null,"contexto":"en_vivo","period":null,"venue":"all"}
+- "donde puede haber gol" → {"intencion":"alerta_gol","equipo":null,"liga":null,"pregunta_especifica":"donde puede haber gol","mercado":"goles","tiempo":null,"contexto":"en_vivo","period":null,"venue":"all"}
 - "probabilidad de gol" → {"intencion":"alerta_gol","equipo":null,"liga":null,"pregunta_especifica":"probabilidad de gol","mercado":"goles","tiempo":null,"contexto":"en_vivo","period":null,"venue":"all"}
+- "partido con gol ahora" → {"intencion":"alerta_gol","equipo":null,"liga":null,"pregunta_especifica":"partido con gol ahora","mercado":"goles","tiempo":null,"contexto":"en_vivo","period":null,"venue":"all"}
+- "IMPORTANTE: si el usuario menciona 'gol' junto con contexto en vivo o inmediato, usar alerta_gol, NO en_vivo"
 - "rachas Premier League" → {"intencion":"rachas","equipo":null,"liga":"Premier League","pregunta_especifica":"rachas Premier League","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"all"}
 - "rachas Real Madrid" → {"intencion":"rachas","equipo":"Real Madrid","liga":null,"pregunta_especifica":"rachas Real Madrid","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"all"}
 - "rachas en casa Serie A" → {"intencion":"rachas","equipo":null,"liga":"Serie A","pregunta_especifica":"rachas en casa Serie A","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"home"}
@@ -2458,7 +2461,34 @@ bot.on('message', async (msg) => {
   const text = msg.text.trim();
 
   try {
-    const intent = await detectIntent(text);
+    // ── Pre-detección por keywords (más rápida y fiable que el LLM) ──────────
+    // Corre ANTES de detectIntent para comandos específicos que el LLM confunde
+    function preDetectIntent(t) {
+      const q = t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+      // Alerta de gol — debe ir ANTES de en_vivo para capturar "gol en vivo"
+      if (/alerta.{0,6}gol|gol.{0,10}(en\s*vivo|vivo|live|ahora|ahora mismo)|probabilidad.{0,6}gol|donde.{0,10}gol|partido.{0,10}gol|next.{0,4}goal/.test(q)) {
+        return { intencion: 'alerta_gol', pregunta_especifica: t };
+      }
+
+      // Picks del día general
+      if (/^(picks?|apuestas?)\s*(de\s*)?(hoy|del\s*dia|para\s*hoy)/.test(q) || q === 'picks' || q === 'picks hoy') {
+        return { intencion: 'picks_hoy', pregunta_especifica: t };
+      }
+
+      // Rachas
+      if (/\brachas?\b/.test(q)) return null; // dejar al LLM (tiene contexto de liga/equipo)
+
+      // En vivo general (sin "gol")
+      if (/\ben\s*vivo\b|\blive\b|\bque\s*hay\s*(en\s*vivo|ahora)\b/.test(q) && !/gol/.test(q)) {
+        return null; // dejar al LLM para capturar filtro de liga
+      }
+
+      return null; // sin pre-detección → usar detectIntent normalmente
+    }
+
+    const preDetected = preDetectIntent(text);
+    const intent = preDetected || await detectIntent(text);
     const intencion = intent.intencion || intent.intent || 'chat_general';
     console.log(`[${new Date().toISOString()}] "${text}" → ${JSON.stringify(intent)}`);
 
