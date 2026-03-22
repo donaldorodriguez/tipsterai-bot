@@ -813,7 +813,7 @@ function selectGoalMarket(homeGoals, awayGoals, pGoal, elapsed, period) {
     impliedOdds = +(1 / pGoal).toFixed(2);
   } else if (bttsViable && elapsed < 75) {
     // Un equipo sin marcar + tiempo suficiente → BTTS
-    const noScorer = homeGoals === 0 ? 'visitante' : 'local';
+    const noScorer = homeGoals === 0 ? 'local' : 'visitante';
     market = `Ambos marcan — ${noScorer} todavía sin gol`;
     // BTTS odds suelen ser mayores
     impliedOdds = +(1 / (pGoal * 0.85)).toFixed(2);
@@ -943,7 +943,7 @@ FORMATO OBLIGATORIO para cada alerta:
 🏆 [Liga] — [País]
 ━━━━━━━━━━━━━━━━━━━
 🎯 Mercado: *[mercado recomendado]*
-📊 Prob. de gol: *[X]%* | xG restante: *[X.X]*
+📊 Prob. de gol: *[X]%*
 💰 Cuota estimada: *~[X.XX]*
 ⏱️ Actúa antes del min: *[min_límite]*
 📈 Por qué: [razón en 1 línea]
@@ -954,6 +954,7 @@ CRITERIO DE STAKE PARA ALERTA EN VIVO:
 - Stake 8: prob > 72% + cuota > 1.55
 - Stake 7: prob 62-72% + cuota > 1.50
 - Stake 6: prob 55-62% + cuota > 1.48
+- Stake 1-5: NUNCA publicar — si la prob no llega a 55%, omite la alerta completamente
 - No publicar si cuota estimada < 1.45
 
 CRITERIO DEL MINUTO LÍMITE:
