@@ -295,12 +295,27 @@ async function getFixtureStatistics(fixtureId) {
   const { data } = await API.get('/fixtures/statistics', { params: { fixture: fixtureId } });
   if (!data.response || data.response.length === 0) return null;
   const stats = {};
-  data.response.forEach(teamStats => {
+  // La API siempre devuelve [local, visitante] en ese orden — marcamos explícitamente
+  data.response.forEach((teamStats, idx) => {
     const key = teamStats.team.name;
     stats[key] = {};
     teamStats.statistics.forEach(s => { stats[key][s.type] = s.value; });
+    if (idx === 0) stats._homeTeam = key;
+    if (idx === 1) stats._awayTeam = key;
   });
   return stats;
+}
+
+// Helper: accede a las stats del local de forma segura
+function homeStats(stats) {
+  if (!stats) return {};
+  return stats[stats._homeTeam] || Object.values(stats).find(v => typeof v === 'object') || {};
+}
+
+// Helper: accede a las stats del visitante de forma segura
+function awayStats(stats) {
+  if (!stats) return {};
+  return stats[stats._awayTeam] || Object.values(stats).filter(v => typeof v === 'object')[1] || {};
 }
 
 function normalizeTeamName(str) {
@@ -639,11 +654,10 @@ function calcEV(estimatedProb, decimalOdds) {
  */
 function calcLiveMomentum(stats, homeName, awayName) {
   if (!stats) return null;
-  const teams = Object.keys(stats);
-  if (teams.length < 2) return null;
-
-  const homeKey = teams.find(k => normalizeTeamName(k).includes(normalizeTeamName(homeName).split(' ')[0])) || teams[0];
-  const awayKey = teams.find(k => k !== homeKey) || teams[1];
+  // Usar marcadores explícitos de local/visitante fijados en getFixtureStatistics
+  const homeKey = stats._homeTeam || Object.keys(stats).filter(k => !k.startsWith('_'))[0];
+  const awayKey = stats._awayTeam || Object.keys(stats).filter(k => !k.startsWith('_'))[1];
+  if (!homeKey || !awayKey) return null;
 
   const h = stats[homeKey] || {};
   const a = stats[awayKey] || {};
@@ -873,9 +887,11 @@ function calcGoalAlert(fixture, liveStats, homeStats, awayStats) {
   if (liveStats) {
     const teams = Object.values(liveStats);
     if (teams.length >= 2) {
-      const shotsOnH = parseInt(teams[0]?.['Shots on Goal'] || 0);
-      const shotsOnA = parseInt(teams[1]?.['Shots on Goal'] || 0);
-      const shotsTotal = parseInt(teams[0]?.['Total Shots'] || 0) + parseInt(teams[1]?.['Total Shots'] || 0);
+      const hStats = homeStats(liveStats);
+      const aStats = awayStats(liveStats);
+      const shotsOnH = parseInt(hStats['Shots on Goal'] || 0);
+      const shotsOnA = parseInt(aStats['Shots on Goal'] || 0);
+      const shotsTotal = parseInt(hStats['Total Shots'] || 0) + parseInt(aStats['Total Shots'] || 0);
       const shotsOnTarget = shotsOnH + shotsOnA;
       // Si hay ≥8 tiros a puerta y pocos goles → +5% probabilidad
       if (shotsOnTarget >= 8 && shotsOnTarget / (totalGoals + 1) > 4) bonus += 0.05;
@@ -1387,8 +1403,8 @@ async function evaluatePickResult(pick, fixture, stats) {
 
   // Corners / Cards — need stats
   if (stats && (pick.mercado === 'OVER_CORNERS' || pick.mercado === 'UNDER_CORNERS') && linea != null) {
-    const cornersHome = Object.values(stats)[0]?.['Corner Kicks'] ?? null;
-    const cornersAway = Object.values(stats)[1]?.['Corner Kicks'] ?? null;
+    const cornersHome = homeStats(stats)?.['Corner Kicks'] ?? null;
+    const cornersAway = awayStats(stats)?.['Corner Kicks'] ?? null;
     if (cornersHome != null && cornersAway != null) {
       const totalCorners = cornersHome + cornersAway;
       if (pick.mercado === 'OVER_CORNERS')  return totalCorners > linea ? 'W' : 'L';
@@ -1396,8 +1412,8 @@ async function evaluatePickResult(pick, fixture, stats) {
     }
   }
   if (stats && (pick.mercado === 'OVER_CARDS' || pick.mercado === 'UNDER_CARDS') && linea != null) {
-    const cardsHome = (Object.values(stats)[0]?.['Yellow Cards'] ?? 0) + (Object.values(stats)[0]?.['Red Cards'] ?? 0);
-    const cardsAway = (Object.values(stats)[1]?.['Yellow Cards'] ?? 0) + (Object.values(stats)[1]?.['Red Cards'] ?? 0);
+    const cardsHome = (homeStats(stats)?.['Yellow Cards'] ?? 0) + (homeStats(stats)?.['Red Cards'] ?? 0);
+    const cardsAway = (awayStats(stats)?.['Yellow Cards'] ?? 0) + (awayStats(stats)?.['Red Cards'] ?? 0);
     const totalCards = cardsHome + cardsAway;
     if (pick.mercado === 'OVER_CARDS')  return totalCards > linea ? 'W' : 'L';
     if (pick.mercado === 'UNDER_CARDS') return totalCards < linea ? 'W' : 'L';
@@ -1748,16 +1764,16 @@ async function handlePartido(chatId, teamName, countryHint = '') {
   // Momentum y proyecciones en vivo
   const momentum   = isLive ? calcLiveMomentum(liveStatsData, homeTeam, awayTeam) : null;
   const elapsed    = nextRaw.fixture?.status?.elapsed || 0;
-  const homeCorners= liveStatsData ? (Object.values(liveStatsData)[0]?.['Corner Kicks'] ?? 0) : 0;
-  const awayCorners= liveStatsData ? (Object.values(liveStatsData)[1]?.['Corner Kicks'] ?? 0) : 0;
+  const homeCorners= liveStatsData ? (homeStats(liveStatsData)?.['Corner Kicks'] ?? 0) : 0;
+  const awayCorners= liveStatsData ? (awayStats(liveStatsData)?.['Corner Kicks'] ?? 0) : 0;
   const cornersProj= isLive && elapsed > 0
     ? calcLiveProjection(homeCorners + awayCorners, elapsed)
     : null;
   const homeCards  = liveStatsData
-    ? ((Object.values(liveStatsData)[0]?.['Yellow Cards'] ?? 0) + (Object.values(liveStatsData)[0]?.['Red Cards'] ?? 0))
+    ? ((homeStats(liveStatsData)?.['Yellow Cards'] ?? 0) + (homeStats(liveStatsData)?.['Red Cards'] ?? 0))
     : 0;
   const awayCards  = liveStatsData
-    ? ((Object.values(liveStatsData)[1]?.['Yellow Cards'] ?? 0) + (Object.values(liveStatsData)[1]?.['Red Cards'] ?? 0))
+    ? ((awayStats(liveStatsData)?.['Yellow Cards'] ?? 0) + (awayStats(liveStatsData)?.['Red Cards'] ?? 0))
     : 0;
   const cardsProj  = isLive && elapsed > 0
     ? calcLiveProjection(homeCards + awayCards, elapsed)
@@ -1827,18 +1843,18 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
     const momentum = calcLiveMomentum(liveStats, f.homeTeam, f.awayTeam);
 
     // Proyección de corners al ritmo actual
-    const homeCorners = liveStats ? (Object.values(liveStats)[0]?.['Corner Kicks'] ?? 0) : 0;
-    const awayCorners = liveStats ? (Object.values(liveStats)[1]?.['Corner Kicks'] ?? 0) : 0;
+    const homeCorners = liveStats ? (homeStats(liveStats)?.['Corner Kicks'] ?? 0) : 0;
+    const awayCorners = liveStats ? (awayStats(liveStats)?.['Corner Kicks'] ?? 0) : 0;
     const cornersProj = elapsed > 0
       ? calcLiveProjection(homeCorners + awayCorners, elapsed)
       : null;
 
     // Proyección de tarjetas
     const homeCards = liveStats
-      ? ((Object.values(liveStats)[0]?.['Yellow Cards'] ?? 0) + (Object.values(liveStats)[0]?.['Red Cards'] ?? 0))
+      ? ((homeStats(liveStats)?.['Yellow Cards'] ?? 0) + (homeStats(liveStats)?.['Red Cards'] ?? 0))
       : 0;
     const awayCards = liveStats
-      ? ((Object.values(liveStats)[1]?.['Yellow Cards'] ?? 0) + (Object.values(liveStats)[1]?.['Red Cards'] ?? 0))
+      ? ((awayStats(liveStats)?.['Yellow Cards'] ?? 0) + (awayStats(liveStats)?.['Red Cards'] ?? 0))
       : 0;
     const cardsProj = elapsed > 0
       ? calcLiveProjection(homeCards + awayCards, elapsed)
