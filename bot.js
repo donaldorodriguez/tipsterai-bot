@@ -521,7 +521,7 @@ async function getTeamStats(teamId, leagueId) {
     equipo:             r.team?.name,
     liga:               r.league?.name,
     temporada:          season,
-    forma:              r.form?.replace(/W/g,'G').replace(/L/g,'P').replace(/D/g,'E').slice(-6),
+    forma:              r.form?.replace(/W/g,'G').replace(/L/g,'P').replace(/D/g,'E').slice(-6).split('').join('-'),
     golesAnotadosHome:  r.goals?.for?.average?.home,
     golesAnotadosAway:  r.goals?.for?.average?.away,
     golesRecibidosHome: r.goals?.against?.average?.home,
