@@ -312,8 +312,97 @@ function normalizeTeamName(str) {
     .trim();
 }
 
+// Aliases de nombres cortos/populares → nombre exacto en la API
+const TEAM_ALIASES = {
+  'roma':            'AS Roma',
+  'inter':           'Inter Milan',
+  'inter milan':     'Inter Milan',
+  'atletico':        'Atletico Madrid',
+  'atletico madrid': 'Atletico Madrid',
+  'atleti':          'Atletico Madrid',
+  'milan':           'AC Milan',
+  'ac milan':        'AC Milan',
+  'psg':             'Paris Saint Germain',
+  'paris':           'Paris Saint Germain',
+  'paris sg':        'Paris Saint Germain',
+  'paris saint-germain': 'Paris Saint Germain',
+  'man city':        'Manchester City',
+  'manchester city': 'Manchester City',
+  'man united':      'Manchester United',
+  'man utd':         'Manchester United',
+  'manchester utd':  'Manchester United',
+  'united':          'Manchester United',
+  'tottenham':       'Tottenham Hotspur',
+  'spurs':           'Tottenham Hotspur',
+  'newcastle':       'Newcastle United',
+  'wolves':          'Wolverhampton',
+  'wolverhampton':   'Wolverhampton',
+  'bayer':           'Bayer Leverkusen',
+  'leverkusen':      'Bayer Leverkusen',
+  'dortmund':        'Borussia Dortmund',
+  'bvb':             'Borussia Dortmund',
+  'gladbach':        'Borussia Monchengladbach',
+  'monchengladbach': 'Borussia Monchengladbach',
+  'frankfurt':       'Eintracht Frankfurt',
+  'eintracht':       'Eintracht Frankfurt',
+  'ajax':            'Ajax',
+  'porto':           'FC Porto',
+  'benfica':         'SL Benfica',
+  'sporting':        'Sporting CP',
+  'sporting cp':     'Sporting CP',
+  'braga':           'SC Braga',
+  'sevilla':         'Sevilla FC',
+  'valencia':        'Valencia CF',
+  'villarreal':      'Villarreal CF',
+  'betis':           'Real Betis',
+  'real betis':      'Real Betis',
+  'sociedad':        'Real Sociedad',
+  'real sociedad':   'Real Sociedad',
+  'celta':           'Celta Vigo',
+  'osasuna':         'Osasuna',
+  'rayo':            'Rayo Vallecano',
+  'getafe':          'Getafe CF',
+  'girona':          'Girona FC',
+  'alaves':          'Deportivo Alaves',
+  'fiorentina':      'Fiorentina',
+  'napoli':          'Napoli',
+  'juventus':        'Juventus',
+  'atalanta':        'Atalanta',
+  'lazio':           'Lazio',
+  'torino':          'Torino',
+  'udinese':         'Udinese',
+  'bologna':         'Bologna',
+  'genoa':           'Genoa',
+  'lyon':            'Olympique Lyonnais',
+  'marseille':       'Olympique Marseille',
+  'monaco':          'AS Monaco',
+  'lille':           'Lille OSC',
+  'nice':            'OGC Nice',
+  'rennes':          'Stade Rennais',
+  'lens':            'RC Lens',
+  'brest':           'Stade Brestois',
+  'river':           'River Plate',
+  'river plate':     'River Plate',
+  'boca':            'Boca Juniors',
+  'boca juniors':    'Boca Juniors',
+  'flamengo':        'Flamengo',
+  'fluminense':      'Fluminense',
+  'palmeiras':       'Palmeiras',
+  'santos':          'Santos FC',
+  'america':         'Club America',
+  'chivas':          'Guadalajara',
+  'cruz azul':       'Cruz Azul',
+  'pumas':           'Pumas UNAM',
+  'tigres':          'Tigres UANL',
+  'Nacional':        'Club Nacional',
+};
+
 async function searchTeam(name, countryHint = '') {
-  const { data } = await API.get('/teams', { params: { search: name } });
+  // Resolver alias antes de buscar
+  const aliasKey = name.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const resolvedName = TEAM_ALIASES[aliasKey] || name;
+
+  const { data } = await API.get('/teams', { params: { search: resolvedName } });
   const results = data.response || [];
   if (results.length === 0) return null;
   if (results.length === 1) return results[0];
@@ -432,7 +521,7 @@ async function getTeamStats(teamId, leagueId) {
     equipo:             r.team?.name,
     liga:               r.league?.name,
     temporada:          season,
-    forma:              r.form?.replace(/W/g,'G').replace(/L/g,'P').replace(/D/g,'E'),
+    forma:              r.form?.replace(/W/g,'G').replace(/L/g,'P').replace(/D/g,'E').slice(-6),
     golesAnotadosHome:  r.goals?.for?.average?.home,
     golesAnotadosAway:  r.goals?.for?.average?.away,
     golesRecibidosHome: r.goals?.against?.average?.home,
@@ -938,11 +1027,12 @@ async function sonnet(systemPrompt, userMessage) {
 const TIPSTER_SYSTEM = `Eres el mejor tipster profesional del mundo especializado en mercados de VALOR REAL.
 
 PICKS ABSOLUTAMENTE PROHIBIDAS - NUNCA las des:
-- Gana el favorito obvio a cuota menor de 1.80 (gana Bayern, gana Madrid, gana City etc)
-- Over 2.5 en partidos del Real Madrid, Bayern, City, PSG - todo el mundo lo sabe
+- Gana el favorito obvio a cuota menor de 1.80 (gana Bayern, gana Madrid, gana City, gana Barcelona, gana PSG etc)
+- Over 2.5 o Over 3.5 de equipos muy ofensivos (Madrid, Barcelona, Bayern, City, PSG) en casa vs rivales débiles — todo el mundo lo sabe, no hay valor
 - 1X2 simple a cuota menor de 1.75 - no es tipster, es obvio
 - Picks que cualquier persona sin conocimiento daría
 - BTTS No cuando un equipo ya marcó 2+ goles en el HT
+- PICKS YA RESUELTOS: si el mercado ya se cumplió (ej: BTTS cuando ya hay goles de ambos), NO lo incluyas como pick apostable — omítelo completamente o menciona "ya ocurrió, no apostar"
 
 MERCADOS DONDE ESTÁ EL VALOR REAL:
 1. HT/FT combos específicos
@@ -1035,9 +1125,13 @@ FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 
 REGLAS DE FORMATO:
 - Usa *texto* para negritas (Telegram Markdown)
-- No uses tablas HTML ni markdown de escritorio (no | columnas |)
-- No menciones fuentes de datos, plataformas, APIs ni herramientas
-- El pie de página NUNCA debe decir de dónde vienen los datos
+- NUNCA uses # ni ## ni ### (headers markdown de escritorio — no funcionan en Telegram)
+- NUNCA uses | columnas | ni tablas HTML
+- NUNCA menciones fuentes de datos, APIs, plataformas ni herramientas
+- NUNCA escribas disclaimers como "el análisis se basa en estadísticas de la temporada X" ni "el fútbol puede cambiar"
+- NUNCA muestres valores técnicos internos como xGLocal, xGVisitante, lambdaRem, EV%, score de momentum — estos son solo para tu análisis interno, NO para el usuario
+- NUNCA muestres conteos de pases en los primeros minutos (son irrelevantes y confusos)
+- La forma reciente MÁXIMO 6 caracteres (ej: GGGPPE). Nunca más de 6.
 - Si no hay picks válidos: escribe solo "⛔ Sin picks de valor hoy en este partido. Mejor no apostar."
 
 Responde en español. NUNCA inventes estadísticas. Usa SOLO los datos que recibes.`;
