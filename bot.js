@@ -47,6 +47,13 @@ const LEAGUE_SEASONS = {
   4:2025,  5:2025,   480:2025,
   210:2025,103:2025, // Chipre Primera División, Noruega Eliteserien
   239:2026, // Liga BetPlay Colombia (Primera A) — ID real
+  10:2026,  // Amistosos Internacionales
+  1:2026,   // World Cup
+  6:2026,   // World Cup Qualifiers
+  7:2026,   // AFC Asian Cup
+  8:2026,   // Copa Africa (AFCON)
+  29:2026,  // UEFA Nations League Playoffs
+  32:2026,  // CONMEBOL Qualifiers (Eliminatorias Sudamericanas)
 };
 
 const LEAGUE_IDS = new Set([
@@ -55,6 +62,13 @@ const LEAGUE_IDS = new Set([
   235,144,197,218,333,98,179,4,5,480,
   240,40,141,136,79,62,72,66,129,263,89,
   210,103,
+  10,   // Amistosos Internacionales
+  1,    // World Cup
+  6,    // World Cup Qualifiers
+  7,    // AFC Asian Cup
+  8,    // Copa Africa (AFCON)
+  29,   // UEFA Nations League Playoffs
+  32,   // CONMEBOL Qualifiers (Eliminatorias Sudamericanas)
 ]);
 
 const LEAGUE_MAP = {
@@ -88,6 +102,13 @@ const LEAGUE_MAP = {
   4:  { name:'Euro Championship',  country:'Europe'      },
   5:  { name:'Nations League',     country:'Europe'      },
   480:{ name:'Copa America',       country:'South Am.'   },
+  10: { name:'Amistosos Int.',     country:'Mundial'     },
+  1:  { name:'World Cup',          country:'Mundial'     },
+  6:  { name:'WC Qualifiers',      country:'Mundial'     },
+  7:  { name:'AFC Asian Cup',      country:'Asia'        },
+  8:  { name:'Copa Africa',        country:'Africa'      },
+  29: { name:'Nations League Play',country:'Europe'      },
+  32: { name:'Eliminatorias CONMEBOL', country:'South Am.'},
   240:{ name:'Torneo Águila',      country:'Colombia'    },
   40: { name:'Championship',       country:'England'     },
   141:{ name:'LaLiga2',            country:'Spain'       },
@@ -138,6 +159,12 @@ const LEAGUE_NAME_TO_ID = {
   'championship':40,
   'chipre':210, 'primera division chipre':210, 'primera división chipre':210, 'cyprus':210,
   'noruega':103, 'eliteserien':103, 'norway':103,
+  'amistosos':10, 'amistoso':10, 'amistosos internacionales':10, 'friendly':10, 'friendlies':10, 'internacional':10,
+  'world cup':1, 'mundial':1, 'copa mundial':1,
+  'eliminatorias':6, 'qualifiers':6, 'wc qualifiers':6, 'clasificatorias':6,
+  'eliminatorias conmebol':32, 'conmebol':32, 'eliminatorias sudamericanas':32,
+  'copa africa':8, 'afcon':8,
+  'asian cup':7, 'copa asia':7,
 };
 
 function findLeagueId(name) {
@@ -162,7 +189,10 @@ function findLeagueId(name) {
 // ─── League priority for sorting ─────────────────────────────────────────────
 
 const LEAGUE_PRIORITY = {
+  1:105,                       // World Cup — máxima prioridad
+  6:98, 32:97,                 // Eliminatorias mundialistas
   2:100,3:95,848:90,
+  10:89,                       // Amistosos internacionales — entre UCL y ligas top
   39:88,140:87,135:86,78:85,61:84,
   11:80,9:78,
   88:70,94:69,207:68,144:67,169:66,
