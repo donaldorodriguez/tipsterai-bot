@@ -525,6 +525,9 @@ async function searchTeam(name, countryHint = '') {
   const country = countryHint.trim().toLowerCase();
   const RESERVE = /\b(ii|b|reserve|reserva|sub|youth|juvenil|u\d{2}|amateur|filial)\b/i;
 
+  // Si el nombre resuelto es una selección nacional, priorizarla fuertemente
+  const isNationalSearch = resolvedName !== name || TEAM_ALIASES[aliasKey];
+
   function score(t) {
     const tname = normalizeTeamName(t.team.name);
     const tcountry = (t.team.country || '').toLowerCase();
@@ -535,6 +538,10 @@ async function searchTeam(name, countryHint = '') {
     else if (tname.includes(q)) s += 20;
     if (country && tcountry.includes(country)) s += 40;
     if (RESERVE.test(t.team.name)) s -= 40;
+    // Selecciones nacionales tienen prioridad sobre clubes
+    if (t.team.national === true) s += 60;
+    // Si buscamos una selección, penalizar clubes que incluyen el nombre del país
+    if (isNationalSearch && t.team.national !== true) s -= 30;
     return s;
   }
   return results.sort((a, b) => score(b) - score(a))[0];
@@ -627,27 +634,61 @@ async function getH2H(id1, id2) {
 }
 
 async function getTeamStats(teamId, leagueId) {
-  const season = LEAGUE_SEASONS[leagueId] || 2025;
-  const { data } = await API.get('/teams/statistics', { params: { team: teamId, league: leagueId, season } });
-  const r = data.response;
-  if (!r) return null;
-  return {
-    equipo:             r.team?.name,
-    liga:               r.league?.name,
-    temporada:          season,
-    forma:              r.form?.replace(/W/g,'G').replace(/L/g,'P').replace(/D/g,'E').slice(-6).split('').join('-'),
-    golesAnotadosHome:  r.goals?.for?.average?.home,
-    golesAnotadosAway:  r.goals?.for?.average?.away,
-    golesRecibidosHome: r.goals?.against?.average?.home,
-    golesRecibidosAway: r.goals?.against?.average?.away,
-    cleanSheetsHome:    r.clean_sheet?.home,
-    cleanSheetsAway:    r.clean_sheet?.away,
-    failedToScoreHome:  r.failed_to_score?.home,
-    failedToScoreAway:  r.failed_to_score?.away,
-    victorias:          r.fixtures?.wins,
-    empates:            r.fixtures?.draws,
-    derrotas:           r.fixtures?.loses,
-  };
+  const season = LEAGUE_SEASONS[leagueId] || 2026;
+
+  function parseStats(r) {
+    if (!r) return null;
+    // Verificar si hay datos reales (no todo en cero/null)
+    const hasData = r.goals?.for?.total?.total > 0 || r.fixtures?.played?.total > 0;
+    if (!hasData) return null;
+    return {
+      equipo:             r.team?.name,
+      liga:               r.league?.name,
+      temporada:          r.league?.season,
+      forma:              r.form?.replace(/W/g,'G').replace(/L/g,'P').replace(/D/g,'E').slice(-6).split('').join('-'),
+      golesAnotadosHome:  r.goals?.for?.average?.home,
+      golesAnotadosAway:  r.goals?.for?.average?.away,
+      golesRecibidosHome: r.goals?.against?.average?.home,
+      golesRecibidosAway: r.goals?.against?.average?.away,
+      cleanSheetsHome:    r.clean_sheet?.home,
+      cleanSheetsAway:    r.clean_sheet?.away,
+      failedToScoreHome:  r.failed_to_score?.home,
+      failedToScoreAway:  r.failed_to_score?.away,
+      victorias:          r.fixtures?.wins,
+      empates:            r.fixtures?.draws,
+      derrotas:           r.fixtures?.loses,
+    };
+  }
+
+  // 1. Intentar con la liga y temporada del partido
+  try {
+    const { data } = await API.get('/teams/statistics', { params: { team: teamId, league: leagueId, season } });
+    const stats = parseStats(data.response);
+    if (stats) return stats;
+  } catch {}
+
+  // 2. Fallback: buscar la última liga en que el equipo tiene datos reales
+  // Útil para selecciones en amistosos (league 10) que no tienen stats propias
+  const FALLBACK_LEAGUES = [
+    { league: 10, season: 2026 }, // Amistosos Int.
+    { league: 10, season: 2025 }, // Amistosos Int. temporada anterior
+    { league: 32, season: 2026 }, // Eliminatorias CONMEBOL
+    { league: 6,  season: 2026 }, // WC Qualifiers
+    { league: 4,  season: 2024 }, // Euro 2024
+    { league: 5,  season: 2024 }, // Nations League
+    { league: 5,  season: 2025 }, // Nations League 2025
+  ];
+
+  for (const fb of FALLBACK_LEAGUES) {
+    if (fb.league === leagueId && fb.season === season) continue; // ya intentado
+    try {
+      const { data } = await API.get('/teams/statistics', { params: { team: teamId, league: fb.league, season: fb.season } });
+      const stats = parseStats(data.response);
+      if (stats) return { ...stats, nota: `Datos de ${stats.liga} ${stats.temporada} (sin datos en competición actual)` };
+    } catch {}
+  }
+
+  return null;
 }
 
 // ─── Probability & Analytics Engine ──────────────────────────────────────────
@@ -2701,6 +2742,25 @@ bot.on('message', async (msg) => {
       // Picks del día general
       if (/^(picks?|apuestas?)\s*(de\s*)?(hoy|del\s*dia|para\s*hoy)/.test(q) || q === 'picks' || q === 'picks hoy') {
         return { intencion: 'picks_hoy', pregunta_especifica: t };
+      }
+
+      // Selecciones nacionales — NUNCA confundir con ligas
+      const SELECCIONES = [
+        'francia','brazil','brasil','alemania','espana','italia','inglaterra',
+        'portugal','holanda','paises bajos','belgica','croacia','colombia',
+        'argentina','uruguay','chile','peru','ecuador','venezuela','mexico',
+        'estados unidos','usa','eeuu','japon','corea','corea del sur',
+        'marruecos','senegal','nigeria','ghana','camerun','suiza','austria',
+        'turquia','dinamarca','suecia','noruega','polonia','ucrania','serbia',
+        'escocia','gales','irlanda','australia','canada','costa rica','panama',
+        'paraguay','bolivia','arabia saudita','iran','qatar','china','egipto',
+        'sudafrica','france','germany','spain','england','netherlands',
+        'belgium','croatia','sweden','denmark','switzerland',
+      ];
+      // Si el mensaje es solo o empieza por un nombre de selección
+      const qClean = q.replace(/^(analiza?|picks?|apuesta[s]?\s+en?\s+|dame\s+|ver\s+|como\s+viene\s+|amistoso\s+)/,'').trim();
+      if (SELECCIONES.includes(qClean)) {
+        return { intencion: 'partido_especifico', equipo: t.replace(/^(analiza?|picks?|apuesta[s]?\s+en?\s+|dame\s+|ver\s+|como\s+viene\s+|amistoso\s+)/i,'').trim(), pregunta_especifica: t, liga: null, mercado: null, tiempo: null, contexto: 'proximo_partido', period: null, venue: 'all' };
       }
 
       // Rachas
