@@ -439,7 +439,76 @@ const TEAM_ALIASES = {
   'cruz azul':       'Cruz Azul',
   'pumas':           'Pumas UNAM',
   'tigres':          'Tigres UANL',
-  'Nacional':        'Club Nacional',
+  'nacional':        'Club Nacional',
+
+  // ── Selecciones nacionales (español → inglés para API) ──────────────────
+  'francia':         'France',
+  'seleccion francesa': 'France',
+  'brasil':          'Brazil',
+  'seleccion brasilena': 'Brazil',
+  'alemania':        'Germany',
+  'espana':          'Spain',
+  'seleccion espanola': 'Spain',
+  'italia':          'Italy',
+  'seleccion italiana': 'Italy',
+  'inglaterra':      'England',
+  'portugal':        'Portugal',
+  'holanda':         'Netherlands',
+  'paises bajos':    'Netherlands',
+  'belgica':         'Belgium',
+  'croacia':         'Croatia',
+  'colombia':        'Colombia',
+  'seleccion colombia': 'Colombia',
+  'argentina':       'Argentina',
+  'seleccion argentina': 'Argentina',
+  'uruguay':         'Uruguay',
+  'chile':           'Chile',
+  'peru':            'Peru',
+  'ecuador':         'Ecuador',
+  'venezuela':       'Venezuela',
+  'mexico':          'Mexico',
+  'estados unidos':  'United States',
+  'usa':             'United States',
+  'eeuu':            'United States',
+  'japon':           'Japan',
+  'corea':           'Korea Republic',
+  'corea del sur':   'Korea Republic',
+  'marruecos':       'Morocco',
+  'senegal':         'Senegal',
+  'nigeria':         'Nigeria',
+  'ghana':           'Ghana',
+  'camerun':         'Cameroon',
+  'suiza':           'Switzerland',
+  'austria':         'Austria',
+  'turquia':         'Turkey',
+  'dinamarca':       'Denmark',
+  'suecia':          'Sweden',
+  'noruega':         'Norway',
+  'polonia':         'Poland',
+  'ucrania':         'Ukraine',
+  'serbia':          'Serbia',
+  'escocia':         'Scotland',
+  'gales':           'Wales',
+  'irlanda':         'Republic of Ireland',
+  'australia':       'Australia',
+  'canada':          'Canada',
+  'costa rica':      'Costa Rica',
+  'panama':          'Panama',
+  'paraguay':        'Paraguay',
+  'bolivia':         'Bolivia',
+  'arabia saudita':  'Saudi Arabia',
+  'iran':            'IR Iran',
+  'qatar':           'Qatar',
+  'china':           'China',
+  'egipto':          'Egypt',
+  'sudafrica':       'South Africa',
+  'la tri':          'Ecuador',
+  'cafeteros':       'Colombia',
+  'la roja':         'Spain',
+  'la albiceleste':  'Argentina',
+  'la verdeamarela': 'Brazil',
+  'les bleus':       'France',
+  'la sele':         'Costa Rica',
 };
 
 async function searchTeam(name, countryHint = '') {
@@ -1266,6 +1335,13 @@ Ejemplos:
 - "partidos bundesliga hoy" → {"intencion":"picks_liga","equipo":null,"liga":"bundesliga","pregunta_especifica":"partidos bundesliga hoy","mercado":null,"tiempo":null,"contexto":"hoy","period":null}
 - "bundesliga en vivo" → {"intencion":"en_vivo","equipo":null,"liga":"bundesliga","pregunta_especifica":"bundesliga en vivo","mercado":null,"tiempo":null,"contexto":"en_vivo","period":null}
 - "analiza el Real Madrid" → {"intencion":"partido_especifico","equipo":"Real Madrid","liga":null,"pregunta_especifica":"analiza el Real Madrid","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
+- "analiza Francia" → {"intencion":"partido_especifico","equipo":"Francia","liga":null,"pregunta_especifica":"analiza Francia","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
+- "analiza Brasil" → {"intencion":"partido_especifico","equipo":"Brasil","liga":null,"pregunta_especifica":"analiza Brasil","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
+- "picks Francia" → {"intencion":"partido_especifico","equipo":"Francia","liga":null,"pregunta_especifica":"picks Francia","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
+- "picks Brasil" → {"intencion":"partido_especifico","equipo":"Brasil","liga":null,"pregunta_especifica":"picks Brasil","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
+- "Colombia hoy" → {"intencion":"partido_especifico","equipo":"Colombia","liga":null,"pregunta_especifica":"Colombia hoy","mercado":null,"tiempo":null,"contexto":"hoy","period":null}
+- "como viene Croacia" → {"intencion":"partido_especifico","equipo":"Croacia","liga":null,"pregunta_especifica":"como viene Croacia","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
+- IMPORTANTE: nombres de países solos (Francia, Brasil, Colombia, Alemania, España, Argentina, etc.) se refieren SIEMPRE a la SELECCIÓN NACIONAL, nunca a la liga. "picks Francia" = selección France, NO Ligue 1. "analiza Brasil" = selección Brazil, NO Brasileirao.
 - "probabilidad que el Real Madrid gane el 1T hoy" → {"intencion":"partido_especifico","equipo":"Real Madrid","liga":null,"pregunta_especifica":"probabilidad que el Real Madrid gane el 1T hoy","mercado":"resultado_1T","tiempo":"1T","contexto":"hoy","period":null}
 - "cuantos corners suelen meter el PSG" → {"intencion":"partido_especifico","equipo":"PSG","liga":null,"pregunta_especifica":"cuantos corners suelen meter el PSG","mercado":"corners","tiempo":"FT","contexto":"proximo_partido","period":null}
 - "que hay en vivo" → {"intencion":"en_vivo","equipo":null,"liga":null,"pregunta_especifica":"que hay en vivo","mercado":null,"tiempo":null,"contexto":"en_vivo","period":null}
