@@ -527,25 +527,55 @@ async function searchTeam(name, countryHint = '') {
 
   const q = normalizeTeamName(name);
   const country = countryHint.trim().toLowerCase();
-  const RESERVE = /\b(ii|b|reserve|reserva|sub|youth|juvenil|u\d{2}|amateur|filial)\b/i;
+
+  // Patrones que indican equipo secundario o no deseado
+  const RESERVE  = /\b(ii|b|reserve|reserva|sub|youth|juvenil|u\d{2}|amateur|filial)\b/i;
+  const WOMEN    = /\b(women|femenin[ao]|ladies|femmes|damen|vrouwen|mujer|femenino|fem\.?)\b/i;
+  const LOW_TIER = /\b(primera\s*[cd]|tercera|cuarta|regional|sunday|indoor|futsal|beach\s*soccer)\b/i;
+
+  // Prefijos/sufijos de clubes europeos profesionales → más probable que sea el equipo correcto
+  const CLUB_PREFIX = /^(fc|cf|ac|as|afc|rc|sc|bk|fk|sk|vfb?|sv|ss|us|ud|cd|sd|rcd|real\s|atletico\s|sporting\s|dynamo\s|dinamo\s)/i;
+
+  // Países europeos y con ligas top → prioridad sobre ligas desconocidas
+  const EURO_COUNTRIES = new Set([
+    'switzerland','england','spain','italy','germany','france','netherlands',
+    'portugal','belgium','turkey','greece','russia','scotland','austria',
+    'sweden','norway','denmark','poland','ukraine','serbia','croatia',
+    'czech republic','romania','hungary','cyprus','israel','bulgaria',
+  ]);
 
   // Si el nombre resuelto es una selección nacional, priorizarla fuertemente
   const isNationalSearch = resolvedName !== name || TEAM_ALIASES[aliasKey];
 
   function score(t) {
-    const tname = normalizeTeamName(t.team.name);
+    const tname    = normalizeTeamName(t.team.name);
     const tcountry = (t.team.country || '').toLowerCase();
     let s = 0;
+
+    // Coincidencia de nombre
     if (tname === q) s += 100;
     else if (tname.endsWith(' ' + q) || tname.endsWith(q)) s += 80;
     else if (tname.startsWith(q + ' ') || tname.startsWith(q)) s += 50;
     else if (tname.includes(q)) s += 20;
+
+    // País coincide con hint
     if (country && tcountry.includes(country)) s += 40;
-    if (RESERVE.test(t.team.name)) s -= 40;
-    // Selecciones nacionales tienen prioridad sobre clubes
+
+    // Penalizaciones fuertes
+    if (RESERVE.test(t.team.name))  s -= 50;
+    if (WOMEN.test(t.team.name))    s -= 80;
+    if (LOW_TIER.test(t.team.name)) s -= 60;
+
+    // Bonus: prefijo de club profesional europeo (FC Lugano vence a Lugano Argentina)
+    if (CLUB_PREFIX.test(t.team.name)) s += 25;
+
+    // Bonus: país europeo conocido (menos ligas oscuras)
+    if (EURO_COUNTRIES.has(tcountry)) s += 20;
+
+    // Selecciones nacionales
     if (t.team.national === true) s += 60;
-    // Si buscamos una selección, penalizar clubes que incluyen el nombre del país
     if (isNationalSearch && t.team.national !== true) s -= 30;
+
     return s;
   }
   return results.sort((a, b) => score(b) - score(a))[0];
