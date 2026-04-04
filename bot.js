@@ -2912,7 +2912,7 @@ setInterval(async () => {
 
 const AIRTABLE_TABLE = process.env.AIRTABLE_TABLE || 'Users';
 const WHOP_SECRET   = process.env.WHOP_WEBHOOK_SECRET;
-const WEBHOOK_PORT  = 3000;
+const WEBHOOK_PORT  = process.env.PORT || 3000;
 
 function getAirtableBase() {
   if (!process.env.AIRTABLE_API_KEY || !process.env.AIRTABLE_BASE_ID) {
