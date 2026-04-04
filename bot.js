@@ -292,18 +292,22 @@ function parseFixture(f) {
 }
 
 async function fetchFixturesByDate(date) {
-  if (dateCache.has(date)) return dateCache.get(date);
-  // Sin timezone: la API devuelve todos los partidos del día UTC
-  // Esto evita que partidos nocturnos (ej: 8 PM Bogota = 1 AM UTC día siguiente) se pierdan
+  const cached = dateCache.get(date);
+  // Caché válido por 30 minutos para reflejar cambios de status durante el día
+  if (cached && (Date.now() - cached.ts) < 30 * 60 * 1000) return cached.data;
   const { data } = await API.get('/fixtures', { params: { date } });
   const result = data.response || [];
-  dateCache.set(date, result);
+  dateCache.set(date, { data: result, ts: Date.now() });
   return result;
 }
 
+const FINISHED_STATUSES = new Set(['FT', 'AET', 'PEN', 'AWD', 'WO']);
+
 async function getFixturesByDate(date) {
   const all = await fetchFixturesByDate(date);
-  return all.filter(f => LEAGUE_IDS.has(f.league.id)).map(parseFixture);
+  return all
+    .filter(f => LEAGUE_IDS.has(f.league.id) && !FINISHED_STATUSES.has(f.fixture.status.short))
+    .map(parseFixture);
 }
 
 async function fetchLiveRaw() {
@@ -667,24 +671,19 @@ async function getTeamStats(teamId, leagueId) {
     if (stats) return stats;
   } catch {}
 
-  // 2. Fallback: buscar la última liga en que el equipo tiene datos reales
-  // Útil para selecciones en amistosos (league 10) que no tienen stats propias
+  // 2. Fallback ligero: máximo 2 intentos adicionales para no agotar la API
+  // Solo aplica cuando la liga actual no tiene datos (ej: amistosos sin historial)
   const FALLBACK_LEAGUES = [
-    { league: 10, season: 2026 }, // Amistosos Int.
     { league: 10, season: 2025 }, // Amistosos Int. temporada anterior
-    { league: 32, season: 2026 }, // Eliminatorias CONMEBOL
-    { league: 6,  season: 2026 }, // WC Qualifiers
-    { league: 4,  season: 2024 }, // Euro 2024
-    { league: 5,  season: 2024 }, // Nations League
-    { league: 5,  season: 2025 }, // Nations League 2025
+    { league: 5,  season: 2024 }, // Nations League 2024
   ];
 
   for (const fb of FALLBACK_LEAGUES) {
-    if (fb.league === leagueId && fb.season === season) continue; // ya intentado
+    if (fb.league === leagueId && fb.season === season) continue;
     try {
       const { data } = await API.get('/teams/statistics', { params: { team: teamId, league: fb.league, season: fb.season } });
       const stats = parseStats(data.response);
-      if (stats) return { ...stats, nota: `Datos de ${stats.liga} ${stats.temporada} (sin datos en competición actual)` };
+      if (stats) return { ...stats, nota: `Referencia: ${stats.liga} ${stats.temporada}` };
     } catch {}
   }
 
