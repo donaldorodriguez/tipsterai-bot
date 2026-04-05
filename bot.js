@@ -555,9 +555,9 @@ function scoreTeamResult(t, q, country = '', isNationalSearch = false) {
 }
 
 async function searchTeam(name, countryHint = '') {
-  // Resolver alias antes de buscar
   const aliasKey = name.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  const resolvedName = TEAM_ALIASES[aliasKey] || name;
+  const stripped = name.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const resolvedName = TEAM_ALIASES[aliasKey] || stripped;
 
   const { data } = await API.get('/teams', { params: { search: resolvedName } });
   const results = data.response || [];
@@ -598,7 +598,8 @@ async function getTeamPlayingPriority(teamId) {
 
 async function findTeamWithButtons(chatId, name, countryHint = '', intent = null) {
   const aliasKey = name.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  const resolvedName = TEAM_ALIASES[aliasKey] || name;
+  const stripped = name.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // sin tildes
+  const resolvedName = TEAM_ALIASES[aliasKey] || stripped;
 
   const { data } = await API.get('/teams', { params: { search: resolvedName } });
   const results = data.response || [];
