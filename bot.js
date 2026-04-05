@@ -1140,6 +1140,9 @@ function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats) {
 
   const { period, remaining, total } = timeInfo;
   const elapsed     = fixture.elapsed || 1;
+
+  // No recomendar partidos después del minuto 75
+  if (elapsed > 75) return null;
   const homeGoals   = fixture.homeGoals ?? 0;
   const awayGoals   = fixture.awayGoals ?? 0;
   const totalGoals  = homeGoals + awayGoals;
@@ -1264,9 +1267,13 @@ STAKE:
 - Stake 6: prob 55-62%
 - Omite alertas con prob < 55% o cuota < 1.45
 
-MINUTO LÍMITE: siempre concreto. En 1T apuesta antes del min 40. En HT decide antes de que empiece el 2T. En 2T nunca más allá del min 82.
+MINUTO LÍMITE: siempre concreto. En 1T apuesta antes del min 30. En HT decide antes de que empiece el 2T. En 2T nunca más allá del min 75.
 
-Al final añade:
+IMPORTANTE:
+- Si una alerta no cumple criterios (prob < 55% o cuota < 1.45), simplemente NO la incluyas. Nada de "omitida", nada de notas explicativas. Solo las alertas válidas.
+- No añadas notas, aclaraciones ni explicaciones sobre alertas descartadas.
+
+Al final añade únicamente:
 ⚠️ _Cuotas en vivo cambian rápido. Verifica antes de apostar._
 
 Responde en español. No menciones APIs.`;
