@@ -10,7 +10,15 @@ const Airtable = require('airtable');
 
 // ─── Clients ─────────────────────────────────────────────────────────────────
 
-const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, { polling: true });
+const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, {
+  polling: {
+    interval: 300,
+    params: {
+      timeout: 10,
+      allowed_updates: ['message', 'callback_query', 'edited_message', 'inline_query'],
+    },
+  },
+});
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
 // ─── API-Football ─────────────────────────────────────────────────────────────
