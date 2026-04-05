@@ -250,8 +250,10 @@ function getPicksCache(scope) {
   const cache = loadPicksCache();
   const entry = cache[`${today}_${scope}`];
   if (!entry) return null;
-  // Verificar que es del mismo día Colombia (seguridad extra)
   if (entry.fecha !== today) return null;
+  // Invalidar si el caché tiene más de 3 horas — los partidos pueden haber empezado o terminado
+  const ageMs = Date.now() - new Date(entry.generadoAt).getTime();
+  if (ageMs > 3 * 60 * 60 * 1000) return null;
   return entry;
 }
 
@@ -672,13 +674,17 @@ async function getTeamStats(teamId, leagueId) {
 
   function parseStats(r) {
     if (!r) return null;
-    // Verificar si hay datos reales (no todo en cero/null)
-    const hasData = r.goals?.for?.total?.total > 0 || r.fixtures?.played?.total > 0;
+    const played = r.fixtures?.played?.total || 0;
+    const hasData = played > 0 || r.goals?.for?.total?.total > 0;
     if (!hasData) return null;
+    // Marcar muestras pequeñas para que Claude no las use como argumento sólido
+    const muestraReducida = played > 0 && played < 5;
     return {
       equipo:             r.team?.name,
       liga:               r.league?.name,
       temporada:          r.league?.season,
+      partidosJugados:    played,
+      ...(muestraReducida && { advertencia: `Muestra reducida (${played} partido${played>1?'s':''}) — promedios poco confiables` }),
       forma:              r.form?.replace(/W/g,'G').replace(/L/g,'P').replace(/D/g,'E').slice(-6).split('').join('-'),
       golesAnotadosHome:  r.goals?.for?.average?.home,
       golesAnotadosAway:  r.goals?.for?.average?.away,
@@ -1319,16 +1325,24 @@ FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 🔥 PICK ESTRELLA DEL DÍA [Solo si stake 8+/10]
 ━━━━━━━━━━━━━━━━━━━
 
-REGLAS DE FORMATO:
+REGLAS DE FORMATO — OBLIGATORIAS SIN EXCEPCIÓN:
 - Usa *texto* para negritas (Telegram Markdown)
-- NUNCA uses # ni ## ni ### (headers markdown de escritorio — no funcionan en Telegram)
-- NUNCA uses | columnas | ni tablas HTML
-- NUNCA menciones fuentes de datos, APIs, plataformas ni herramientas
-- NUNCA escribas disclaimers como "el análisis se basa en estadísticas de la temporada X" ni "el fútbol puede cambiar"
-- NUNCA muestres valores técnicos internos como xGLocal, xGVisitante, lambdaRem, EV%, score de momentum — estos son solo para tu análisis interno, NO para el usuario
-- NUNCA muestres conteos de pases en los primeros minutos (son irrelevantes y confusos)
-- La forma reciente MÁXIMO 6 caracteres (ej: GGGPPE). Nunca más de 6.
-- Si no hay picks válidos: escribe solo "⛔ Sin picks de valor hoy en este partido. Mejor no apostar."
+- ⛔ NUNCA uses # ni ## ni ### — son headers de escritorio, se ven como texto plano en Telegram
+- ⛔ NUNCA uses | columnas | ni tablas HTML
+- ⛔ NUNCA menciones fuentes de datos, APIs, plataformas ni herramientas
+- ⛔ NUNCA escribas disclaimers ni advertencias de responsabilidad al final
+- ⛔ NUNCA muestres valores técnicos: xG, lambdaRem, EV%, score de momentum, pases — son internos
+- ⛔ NUNCA muestres conteos de pases en los primeros minutos del partido
+- La forma reciente SIEMPRE con guiones: *G-G-P-E-G* (máximo 6 resultados, nunca más)
+- Si la muestra de partidos es menor a 5, NO uses ese promedio como argumento principal — menciónalo como "datos limitados (N partidos)"
+- Si no hay picks válidos: escribe solo "⛔ Sin picks de valor. Mejor no apostar."
+
+REGLAS DE PICKS — OBLIGATORIAS:
+- MÁXIMO 2 picks por partido. Si ya diste 2 picks de un mismo partido, NO agregues más de ese partido
+- BTTS Solo si: % local marcó en casa ≥65% Y % visitante marcó fuera ≥65% Y H2H BTTS ≥65%. Si alguno no llega, NO dar BTTS
+- Asian Handicap MÁXIMO -0.5. NUNCA recomendar -1, -1.5 ni más — el riesgo no justifica el stake
+- Stake 7: requiere probabilidad ≥68% + EV >+5%. Si no cumple ambas, bajar a stake 6 o no dar
+- PROHIBIDO analizar partidos que ya empezaron hace más de 10 minutos (evitar picks sobre partidos en curso sin datos en vivo)
 
 Responde en español. NUNCA inventes estadísticas. Usa SOLO los datos que recibes.`;
 
