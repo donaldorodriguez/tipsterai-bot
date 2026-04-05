@@ -421,6 +421,7 @@ const TEAM_ALIASES = {
   'sociedad':        'Real Sociedad',
   'real sociedad':   'Real Sociedad',
   'celta':           'Celta Vigo',
+  'celta de vigo':   'Celta Vigo',
   'osasuna':         'Osasuna',
   'rayo':            'Rayo Vallecano',
   'getafe':          'Getafe CF',
@@ -565,9 +566,8 @@ async function searchTeam(name, countryHint = '') {
 
   const q = normalizeTeamName(resolvedName);
   const country = countryHint.trim().toLowerCase();
-  const isNationalSearch = resolvedName !== name || !!TEAM_ALIASES[aliasKey];
 
-  return results.sort((a, b) => scoreTeamResult(b, q, country, isNationalSearch) - scoreTeamResult(a, q, country, isNationalSearch))[0];
+  return results.sort((a, b) => scoreTeamResult(b, q, country, false) - scoreTeamResult(a, q, country, false))[0];
 }
 
 // Verifica si un equipo está jugando ahora, hoy o en los próximos 2 días
@@ -599,7 +599,6 @@ async function getTeamPlayingPriority(teamId) {
 async function findTeamWithButtons(chatId, name, countryHint = '', intent = null) {
   const aliasKey = name.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const resolvedName = TEAM_ALIASES[aliasKey] || name;
-  const isNationalSearch = resolvedName !== name || !!TEAM_ALIASES[aliasKey];
 
   const { data } = await API.get('/teams', { params: { search: resolvedName } });
   const results = data.response || [];
@@ -608,14 +607,14 @@ async function findTeamWithButtons(chatId, name, countryHint = '', intent = null
   const q       = normalizeTeamName(resolvedName);
   const country = countryHint.trim().toLowerCase();
 
-  // Filtrar equipos no profesionales (sub20, sub21, reservas, femeninos)
-  const YOUTH_RE = /\b(u\d{2}|sub[\s-]?\d{2}|under[\s-]?\d{2}|ii\b|b\b|reserve|reserves|youth|juvenil|cadete|filial)\b/i;
+  // Filtrar equipos no profesionales (sub20, sub21, reservas, filiales, tier3+)
+  const YOUTH_RE = /\b(u\d{2}|sub[\s-]?\d{2}|under[\s-]?\d{2}|ii|iii|iv|vi?|reserve|reserves|youth|juvenil|cadete|filial|amador|amateur)\b/i;
   const filtered = results.filter(t => !YOUTH_RE.test(t.team.name));
   const pool = filtered.length > 0 ? filtered : results; // fallback si todo es filtrado
 
   // Puntuar todos los resultados
   const scored = pool
-    .map(t => ({ ...t, _score: scoreTeamResult(t, q, country, isNationalSearch) }))
+    .map(t => ({ ...t, _score: scoreTeamResult(t, q, country, false) }))
     .filter(t => t._score > 0)
     .sort((a, b) => b._score - a._score)
     .slice(0, 5);
