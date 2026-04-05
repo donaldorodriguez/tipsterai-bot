@@ -630,28 +630,18 @@ async function findTeamWithButtons(chatId, name, countryHint = '', intent = null
   // Si tras el ordenamiento hay uno claramente en vivo/hoy y los demás no → elegir automático
   if (enriched[0]._priority >= 2 && (enriched[1]?._priority || 0) === 0) return enriched[0];
 
-  // Mostrar botones de selección
+  // Codificar intencion en callback_data (sin estado en memoria)
+  const intentCode = (intent?.intencion === 'rachas') ? 'r' : 'p';
+
   const buttons = enriched.map(t => [{
     text: `${t._priorityLabel ? t._priorityLabel + ' · ' : ''}${t.team.name} (${t.team.country})`,
-    callback_data: `team_${t.team.id}_${chatId}`
+    callback_data: `tm_${t.team.id}_${intentCode}`
   }]);
-
-  buttons.push([{ text: '❌ Cancelar', callback_data: `team_cancel_${chatId}` }]);
-
-  // Guardar estado pendiente
-  pendingTeamSelection.set(chatId, {
-    candidates: enriched,
-    intent,
-    originalName: name,
-    expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutos para responder
-  });
+  buttons.push([{ text: '❌ Cancelar', callback_data: 'tm_cancel' }]);
 
   await bot.sendMessage(chatId,
     `🔍 Encontré *${enriched.length}* equipos con ese nombre. ¿A cuál te refieres?`,
-    {
-      parse_mode: 'Markdown',
-      reply_markup: { inline_keyboard: buttons },
-    }
+    { parse_mode: 'Markdown', reply_markup: { inline_keyboard: buttons } }
   );
 
   return 'PENDING';
@@ -3057,64 +3047,49 @@ bot.on('callback_query', async (query) => {
   console.log(`[callback_query] chatId=${chatId} data="${data}"`);
 
   try {
-    // Botón de cancelar
-    if (data.startsWith('team_cancel_')) {
-      pendingTeamSelection.delete(chatId);
-      await bot.editMessageText('❌ Selección cancelada.', {
-        chat_id: chatId, message_id: query.message.message_id,
-      }).catch(e => console.error('editMessageText cancel:', e.message));
+    // Cancelar
+    if (data === 'tm_cancel') {
+      await bot.editMessageText('❌ Selección cancelada.',
+        { chat_id: chatId, message_id: query.message.message_id }
+      ).catch(() => {});
       return;
     }
 
-    // Selección de equipo
-    if (data.startsWith('team_')) {
-      const parts  = data.split('_');
-      const teamId = parseInt(parts[1]);
-      console.log(`[callback_query] teamId parsed=${teamId}`);
+    // Selección: tm_{teamId}_{intentCode}
+    if (data.startsWith('tm_')) {
+      const parts      = data.split('_');      // ['tm','12345','p']
+      const teamId     = parseInt(parts[1]);
+      const intentCode = parts[2] || 'p';
 
-      const pending = pendingTeamSelection.get(chatId);
-      console.log(`[callback_query] pending=${pending ? 'found' : 'null'} candidates=${pending?.candidates?.length ?? 0}`);
+      console.log(`[callback_query] teamId=${teamId} intentCode=${intentCode}`);
 
-      if (!pending || Date.now() > pending.expiresAt) {
-        await bot.sendMessage(chatId, '⏱️ Esta selección expiró. Vuelve a escribir el equipo.');
+      // Editar el mensaje de botones para mostrar que estamos procesando
+      await bot.editMessageText('⏳ Buscando información del equipo...',
+        { chat_id: chatId, message_id: query.message.message_id }
+      ).catch(() => {});
+
+      // Obtener datos del equipo directo de la API (sin Map en memoria)
+      const { data: apiRes } = await API.get('/teams', { params: { id: teamId } });
+      const teamData = (apiRes.response || [])[0];
+
+      if (!teamData) {
+        await bot.sendMessage(chatId, '❌ No pude cargar el equipo. Escribe la pregunta de nuevo.');
         return;
       }
 
-      const selected = pending.candidates.find(t => t.team.id === teamId);
-      console.log(`[callback_query] selected=${selected ? selected.team.name : 'NOT FOUND'} (ids: ${pending.candidates.map(c => c.team.id).join(',')})`);
+      console.log(`[callback_query] team=${teamData.team.name} intencion=${intentCode}`);
 
-      if (!selected) {
-        await bot.sendMessage(chatId, '⚠️ No pude encontrar ese equipo. Escribe la pregunta de nuevo.');
-        return;
-      }
-
-      pendingTeamSelection.delete(chatId);
-
-      // Editar mensaje — si falla (ej. Telegram rechaza) seguimos igual
-      await bot.editMessageText(
-        `✅ Analizando *${selected.team.name}* (${selected.team.country})...`,
-        { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'Markdown' }
-      ).catch(e => console.error('editMessageText select:', e.message));
-
-      const intent    = pending.intent || {};
-      const intencion = intent.intencion || 'partido_especifico';
-      console.log(`[callback_query] intencion=${intencion} → ejecutando análisis`);
-
-      if (intencion === 'rachas') {
-        await handleRachasConTeam(chatId, selected, intent);
+      if (intentCode === 'r') {
+        await handleRachasConTeam(chatId, teamData, {});
       } else {
-        await handlePartidoConTeam(chatId, selected, intent);
+        await handlePartidoConTeam(chatId, teamData, {});
       }
       return;
     }
-
-    // Callback no reconocido
-    await bot.answerCallbackQuery(query.id).catch(() => {});
 
   } catch (err) {
-    console.error('callback_query handler error:', err.message, err.stack);
-    await bot.answerCallbackQuery(query.id).catch(() => {});
-    await bot.sendMessage(chatId, '❌ Error al procesar la selección. Intenta de nuevo.').catch(() => {});
+    console.error('callback_query error:', err.message);
+    await bot.sendMessage(chatId, '❌ Error al procesar. Intenta de nuevo.').catch(() => {});
   }
 });
 
