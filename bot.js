@@ -1097,7 +1097,7 @@ function selectGoalMarket(homeGoals, awayGoals, pGoal, elapsed, period) {
  *
  * @returns {object|null} datos de alerta o null si el partido no está activo
  */
-function calcGoalAlert(fixture, liveStats, homeStats, awayStats) {
+function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats) {
   const timeInfo = matchTimeInfo(fixture.status, fixture.elapsed);
   if (!timeInfo) return null;
 
@@ -1109,10 +1109,10 @@ function calcGoalAlert(fixture, liveStats, homeStats, awayStats) {
   const timeFrac    = remaining / 90; // fracción de 90 min restante
 
   // ── xG histórico ajustado a tiempo restante ──────────────────────────────
-  const hFor  = parseFloat(homeStats?.golesAnotadosHome) || 1.2;
-  const hAgt  = parseFloat(homeStats?.golesRecibidosHome) || 1.1;
-  const aFor  = parseFloat(awayStats?.golesAnotadosAway) || 1.0;
-  const aAgt  = parseFloat(awayStats?.golesRecibidosAway) || 1.0;
+  const hFor  = parseFloat(homeTeamStats?.golesAnotadosHome) || 1.2;
+  const hAgt  = parseFloat(homeTeamStats?.golesRecibidosHome) || 1.1;
+  const aFor  = parseFloat(awayTeamStats?.golesAnotadosAway) || 1.0;
+  const aAgt  = parseFloat(awayTeamStats?.golesRecibidosAway) || 1.0;
 
   const homeLambdaFull = ((hFor + aAgt) / 2);
   const awayLambdaFull = ((aFor + hAgt) / 2);
