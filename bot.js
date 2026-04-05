@@ -2171,11 +2171,11 @@ async function handleAlertaGol(chatId) {
   for (let i = 0; i < candidates.length; i++) {
     const f = candidates[i];
     const parsed = parseFixture(f);
-    const liveStats  = liveStatsResults[i].status  === 'fulfilled' ? liveStatsResults[i].value  : null;
-    const homeStats  = homeStatsResults[i].status  === 'fulfilled' ? homeStatsResults[i].value  : null;
-    const awayStats  = awayStatsResults[i].status  === 'fulfilled' ? awayStatsResults[i].value  : null;
+    const liveStats      = liveStatsResults[i].status  === 'fulfilled' ? liveStatsResults[i].value  : null;
+    const homeStatsData  = homeStatsResults[i].status  === 'fulfilled' ? homeStatsResults[i].value  : null;
+    const awayStatsData  = awayStatsResults[i].status  === 'fulfilled' ? awayStatsResults[i].value  : null;
 
-    const alert = calcGoalAlert(parsed, liveStats, homeStats, awayStats);
+    const alert = calcGoalAlert(parsed, liveStats, homeStatsData, awayStatsData);
     if (alert && alert.impliedOdds >= 1.45) alerts.push(alert);
   }
 
