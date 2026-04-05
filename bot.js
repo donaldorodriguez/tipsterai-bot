@@ -600,8 +600,13 @@ async function findTeamWithButtons(chatId, name, countryHint = '', intent = null
   const q       = normalizeTeamName(resolvedName);
   const country = countryHint.trim().toLowerCase();
 
+  // Filtrar equipos no profesionales (sub20, sub21, reservas, femeninos)
+  const YOUTH_RE = /\b(u\d{2}|sub[\s-]?\d{2}|under[\s-]?\d{2}|ii\b|b\b|reserve|reserves|youth|juvenil|cadete|filial)\b/i;
+  const filtered = results.filter(t => !YOUTH_RE.test(t.team.name));
+  const pool = filtered.length > 0 ? filtered : results; // fallback si todo es filtrado
+
   // Puntuar todos los resultados
-  const scored = results
+  const scored = pool
     .map(t => ({ ...t, _score: scoreTeamResult(t, q, country, isNationalSearch) }))
     .filter(t => t._score > 0)
     .sort((a, b) => b._score - a._score)
@@ -3041,11 +3046,10 @@ async function handleRachasConTeam(chatId, teamData, intent = {}) {
 // ─── Callback query handler (botones inline) ──────────────────────────────────
 
 bot.on('callback_query', async (query) => {
-  // Null-safety: inline queries pueden no tener message
-  if (!query.message) {
-    await bot.answerCallbackQuery(query.id).catch(() => {});
-    return;
-  }
+  // Dismissar el spinner de Telegram INMEDIATAMENTE antes de cualquier procesamiento
+  await bot.answerCallbackQuery(query.id).catch(() => {});
+
+  if (!query.message) return;
 
   const chatId = query.message.chat.id;
   const data   = query.data || '';
@@ -3056,7 +3060,6 @@ bot.on('callback_query', async (query) => {
     // Botón de cancelar
     if (data.startsWith('team_cancel_')) {
       pendingTeamSelection.delete(chatId);
-      await bot.answerCallbackQuery(query.id, { text: 'Cancelado' });
       await bot.editMessageText('❌ Selección cancelada.', {
         chat_id: chatId, message_id: query.message.message_id,
       }).catch(e => console.error('editMessageText cancel:', e.message));
@@ -3073,8 +3076,7 @@ bot.on('callback_query', async (query) => {
       console.log(`[callback_query] pending=${pending ? 'found' : 'null'} candidates=${pending?.candidates?.length ?? 0}`);
 
       if (!pending || Date.now() > pending.expiresAt) {
-        await bot.answerCallbackQuery(query.id, { text: '⏱️ Esta selección expiró. Vuelve a preguntar.' });
-        pendingTeamSelection.delete(chatId);
+        await bot.sendMessage(chatId, '⏱️ Esta selección expiró. Vuelve a escribir el equipo.');
         return;
       }
 
@@ -3082,13 +3084,11 @@ bot.on('callback_query', async (query) => {
       console.log(`[callback_query] selected=${selected ? selected.team.name : 'NOT FOUND'} (ids: ${pending.candidates.map(c => c.team.id).join(',')})`);
 
       if (!selected) {
-        await bot.answerCallbackQuery(query.id, { text: '⚠️ Equipo no encontrado. Intenta de nuevo.' });
         await bot.sendMessage(chatId, '⚠️ No pude encontrar ese equipo. Escribe la pregunta de nuevo.');
         return;
       }
 
       pendingTeamSelection.delete(chatId);
-      await bot.answerCallbackQuery(query.id, { text: `✅ ${selected.team.name}` });
 
       // Editar mensaje — si falla (ej. Telegram rechaza) seguimos igual
       await bot.editMessageText(
