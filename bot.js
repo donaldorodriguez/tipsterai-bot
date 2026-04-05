@@ -3041,54 +3041,80 @@ async function handleRachasConTeam(chatId, teamData, intent = {}) {
 // ─── Callback query handler (botones inline) ──────────────────────────────────
 
 bot.on('callback_query', async (query) => {
-  const chatId   = query.message.chat.id;
-  const data     = query.data || '';
-
-  // Botón de cancelar
-  if (data.startsWith('team_cancel_')) {
-    pendingTeamSelection.delete(chatId);
-    await bot.answerCallbackQuery(query.id, { text: 'Cancelado' });
-    await bot.editMessageText('❌ Selección cancelada.', {
-      chat_id: chatId, message_id: query.message.message_id,
-    });
+  // Null-safety: inline queries pueden no tener message
+  if (!query.message) {
+    await bot.answerCallbackQuery(query.id).catch(() => {});
     return;
   }
 
-  // Selección de equipo
-  if (data.startsWith('team_')) {
-    const parts  = data.split('_');
-    const teamId = parseInt(parts[1]);
-    const pending = pendingTeamSelection.get(chatId);
+  const chatId = query.message.chat.id;
+  const data   = query.data || '';
 
-    if (!pending || Date.now() > pending.expiresAt) {
-      await bot.answerCallbackQuery(query.id, { text: '⏱️ Esta selección expiró. Vuelve a preguntar.' });
+  console.log(`[callback_query] chatId=${chatId} data="${data}"`);
+
+  try {
+    // Botón de cancelar
+    if (data.startsWith('team_cancel_')) {
       pendingTeamSelection.delete(chatId);
+      await bot.answerCallbackQuery(query.id, { text: 'Cancelado' });
+      await bot.editMessageText('❌ Selección cancelada.', {
+        chat_id: chatId, message_id: query.message.message_id,
+      }).catch(e => console.error('editMessageText cancel:', e.message));
       return;
     }
 
-    const selected = pending.candidates.find(t => t.team.id === teamId);
-    if (!selected) { await bot.answerCallbackQuery(query.id); return; }
+    // Selección de equipo
+    if (data.startsWith('team_')) {
+      const parts  = data.split('_');
+      const teamId = parseInt(parts[1]);
+      console.log(`[callback_query] teamId parsed=${teamId}`);
 
-    pendingTeamSelection.delete(chatId);
-    await bot.answerCallbackQuery(query.id, { text: `✅ ${selected.team.name}` });
-    await bot.editMessageText(
-      `✅ Analizando *${selected.team.name}* (${selected.team.country})...`,
-      { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'Markdown' }
-    );
+      const pending = pendingTeamSelection.get(chatId);
+      console.log(`[callback_query] pending=${pending ? 'found' : 'null'} candidates=${pending?.candidates?.length ?? 0}`);
 
-    const intent = pending.intent || {};
-    try {
+      if (!pending || Date.now() > pending.expiresAt) {
+        await bot.answerCallbackQuery(query.id, { text: '⏱️ Esta selección expiró. Vuelve a preguntar.' });
+        pendingTeamSelection.delete(chatId);
+        return;
+      }
+
+      const selected = pending.candidates.find(t => t.team.id === teamId);
+      console.log(`[callback_query] selected=${selected ? selected.team.name : 'NOT FOUND'} (ids: ${pending.candidates.map(c => c.team.id).join(',')})`);
+
+      if (!selected) {
+        await bot.answerCallbackQuery(query.id, { text: '⚠️ Equipo no encontrado. Intenta de nuevo.' });
+        await bot.sendMessage(chatId, '⚠️ No pude encontrar ese equipo. Escribe la pregunta de nuevo.');
+        return;
+      }
+
+      pendingTeamSelection.delete(chatId);
+      await bot.answerCallbackQuery(query.id, { text: `✅ ${selected.team.name}` });
+
+      // Editar mensaje — si falla (ej. Telegram rechaza) seguimos igual
+      await bot.editMessageText(
+        `✅ Analizando *${selected.team.name}* (${selected.team.country})...`,
+        { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'Markdown' }
+      ).catch(e => console.error('editMessageText select:', e.message));
+
+      const intent    = pending.intent || {};
       const intencion = intent.intencion || 'partido_especifico';
+      console.log(`[callback_query] intencion=${intencion} → ejecutando análisis`);
+
       if (intencion === 'rachas') {
         await handleRachasConTeam(chatId, selected, intent);
       } else {
         await handlePartidoConTeam(chatId, selected, intent);
       }
-    } catch (err) {
-      console.error('callback_query error:', err.message);
-      await bot.sendMessage(chatId, '❌ Error al procesar la selección. Intenta de nuevo.');
+      return;
     }
-    return;
+
+    // Callback no reconocido
+    await bot.answerCallbackQuery(query.id).catch(() => {});
+
+  } catch (err) {
+    console.error('callback_query handler error:', err.message, err.stack);
+    await bot.answerCallbackQuery(query.id).catch(() => {});
+    await bot.sendMessage(chatId, '❌ Error al procesar la selección. Intenta de nuevo.').catch(() => {});
   }
 });
 
