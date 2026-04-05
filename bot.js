@@ -962,9 +962,10 @@ function calcLiveProjection(current, elapsed, total = 90) {
   const remaining = (total - elapsed) * pace;
   const confidence = elapsed >= 30 ? 'alta' : elapsed >= 15 ? 'media' : 'baja';
   return {
-    projected:  +projected.toFixed(1),
-    remaining:  +remaining.toFixed(1),
-    pace:       +(pace * 90).toFixed(1), // corners/90 equivalentes
+    current:    current,                  // corners/tarjetas YA ocurridos
+    projected:  +projected.toFixed(1),   // total proyectado a 90 min
+    remaining:  +remaining.toFixed(1),   // cuántos más se esperan
+    pace:       +(pace * 90).toFixed(1),
     confidence,
   };
 }
@@ -1332,8 +1333,10 @@ INSTRUCCIONES PARA MOMENTUM EN VIVO:
 Si el JSON incluye "momentumEnVivo", úsalo para detectar oportunidades en tiempo real:
 - Si domina un equipo (score > 15) pero el marcador no lo refleja aún, considera apuesta al próximo gol de ese equipo.
 - Si está equilibrado, prioriza mercados de corners o tarjetas sobre resultado.
-- proyeccionCorners.projected > 10: considera Over 9.5 corners si confidence es "alta".
-- proyeccionTarjetas.projected > 4: considera Over 3.5 tarjetas si confidence es "alta".
+- CORNERS EN VIVO: usa proyeccionCorners.current (ya ocurridos) y .remaining (esperados restantes).
+  La línea válida debe ser: current + (remaining * 0.6) como mínimo. Si current ya supera o está cerca de la línea estándar (9.5/10.5), esa línea NO tiene valor — busca una línea mayor o descarta el mercado.
+  Ejemplo correcto: 8 corners al min 55, remaining=5.1 → proyecta 13. Recomienda Over 11.5 o Over 12.5, NO Over 9.5.
+- TARJETAS EN VIVO: misma lógica. Si ya van 3 tarjetas y projected=5, Over 3.5 no tiene valor. Busca Over 4.5.
 
 TRADUCCIÓN OBLIGATORIA DE TÉRMINOS TÉCNICOS — SIEMPRE en español:
 - failedToScore → "partidos sin marcar"
@@ -1443,10 +1446,12 @@ ANÁLISIS DE MOMENTUM (campo "momentumEnVivo"):
 - intensity > 30: dominio muy claro → stake más alto permitido
 
 PROYECCIONES EN TIEMPO REAL:
-- proyeccionCorners.projected: si > 10.5 con confidence "alta" → considera Over 9.5/10.5
-- proyeccionCorners.remaining: cuántos corners faltan (para saber si vale apostar ahora)
-- proyeccionTarjetas.projected: si > 4.5 con confidence "alta" → considera Over 3.5/4.5
-- Solo usa proyecciones con confidence "alta" (min 30 minutos jugados) para picks de stake 7+
+- CORNERS EN VIVO: proyeccionCorners tiene {current, projected, remaining, confidence}.
+  Regla crítica: la línea que recomiendes debe ser > current + 1.5 para tener valor real.
+  Si current=8 y projected=13 → recomienda Over 11.5 o 12.5, NUNCA Over 9.5 (ya casi se alcanzó).
+  Solo con confidence "alta" (min 30 min jugados) para picks de stake 7+.
+- TARJETAS: misma regla. proyeccionTarjetas.current ya ocurridas → línea recomendada > current + 1.
+- Solo usa proyecciones con confidence "alta" para picks de stake 7+.
 
 FORMATO ADICIONAL IN-PLAY:
 ⏰ Actúa antes del min: [XX]
