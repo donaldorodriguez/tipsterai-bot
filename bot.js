@@ -1053,42 +1053,79 @@ function matchTimeInfo(status, elapsed) {
  * Selecciona el mercado más apropiado y calcula odds estimadas
  * basado en la situación actual del partido.
  */
-function selectGoalMarket(homeGoals, awayGoals, pGoal, elapsed, period) {
-  const total = homeGoals + awayGoals;
-  const diff  = homeGoals - awayGoals;
-
-  // Over de la siguiente línea entera
+function selectGoalMarket(homeTeam, awayTeam, homeGoals, awayGoals, pGoal, elapsed, period, shotsOnH, shotsOnA) {
+  const total  = homeGoals + awayGoals;
+  const diff   = homeGoals - awayGoals;
   const overLine = total + 0.5;
 
-  // BTTS: útil si un equipo aún no marcó y p > 40%
-  const bttsViable = (homeGoals === 0 || awayGoals === 0) && pGoal > 0.42;
+  // Equipo que más ataca (por tiros a puerta)
+  const homeDominates = shotsOnH > shotsOnA + 1;
+  const awayDominates = shotsOnA > shotsOnH + 1;
+  const attackingTeam = homeDominates ? homeTeam : awayDominates ? awayTeam : null;
 
-  // Empate productivo → Over X.5 tiene valor si es 0-0 y tiempo avanzado
-  const drawLate = total === 0 && elapsed >= 60;
+  let market, impliedOdds, tipo;
 
-  let market, impliedOdds;
-
-  if (drawLate) {
-    // 0-0 pasado el min 60 → cuota Over 0.5 sube naturalmente (buena ventana)
-    market = `Over ${overLine} goles (partido terminará en goles)`;
+  if (period === '1T' && elapsed <= 40) {
+    // Primera mitad con tiempo suficiente
+    if (total === 0) {
+      if (attackingTeam) {
+        market = `${attackingTeam} marca en el 1er tiempo`;
+        tipo   = 'gol_equipo_1T';
+      } else {
+        market = `Gol en el 1er tiempo (Over 0.5 1T)`;
+        tipo   = 'over05_1T';
+      }
+    } else {
+      if (attackingTeam && diff !== 0) {
+        const trailing = diff > 0 ? awayTeam : homeTeam;
+        market = `${trailing} marca antes del descanso`;
+        tipo   = 'gol_equipo_1T';
+      } else {
+        market = `Over ${overLine} goles — 1er tiempo`;
+        tipo   = 'over_1T';
+      }
+    }
     impliedOdds = +(1 / pGoal).toFixed(2);
-  } else if (bttsViable && elapsed < 75) {
-    // Un equipo sin marcar + tiempo suficiente → BTTS
-    const noScorer = homeGoals === 0 ? 'local' : 'visitante';
-    market = `Ambos marcan — ${noScorer} todavía sin gol`;
-    // BTTS odds suelen ser mayores
-    impliedOdds = +(1 / (pGoal * 0.85)).toFixed(2);
-  } else if (Math.abs(diff) === 1 && elapsed >= 55) {
-    // Partido igualado 1 gol de diferencia → equipo perdedor presiona
-    const trailing = diff > 0 ? awayGoals : homeGoals;
-    market = `Over ${overLine} goles (equipo perdedor presiona)`;
+
+  } else if (period === 'HT') {
+    // Medio tiempo — pick para el 2do tiempo
+    if (total === 0) {
+      market = attackingTeam
+        ? `${attackingTeam} marca en el 2do tiempo`
+        : `Gol en el 2do tiempo (Over 0.5 2T)`;
+      tipo = 'gol_2T';
+    } else if (Math.abs(diff) >= 1) {
+      const trailing = diff > 0 ? awayTeam : homeTeam;
+      market = `${trailing} marca en el 2do tiempo`;
+      tipo   = 'gol_equipo_2T';
+    } else {
+      market = `Más goles en el 2do tiempo (Over ${overLine})`;
+      tipo   = 'over_2T';
+    }
     impliedOdds = +(1 / pGoal).toFixed(2);
+
   } else {
-    market = `Over ${overLine} goles`;
+    // 2do tiempo en curso
+    if (total === 0 && elapsed >= 60) {
+      market = attackingTeam
+        ? `${attackingTeam} marca antes del final`
+        : `Al menos 1 gol antes del 90' (Over 0.5)`;
+      tipo = 'gol_urgente';
+    } else if (Math.abs(diff) === 1 && elapsed >= 55) {
+      const trailing = diff > 0 ? awayTeam : homeTeam;
+      market = `${trailing} empata — presión alta`;
+      tipo   = 'gol_equipo_2T';
+    } else if (attackingTeam) {
+      market = `${attackingTeam} anota el próximo gol`;
+      tipo   = 'proximo_gol';
+    } else {
+      market = `Over ${overLine} goles`;
+      tipo   = 'over_general';
+    }
     impliedOdds = +(1 / pGoal).toFixed(2);
   }
 
-  return { market, impliedOdds, overLine };
+  return { market, impliedOdds, overLine, tipo };
 }
 
 /**
@@ -1131,105 +1168,108 @@ function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats) {
   let bonus = 0;
 
   // Presión de tiros: muchos tiros con pocos goles → presión acumulada
+  let shotsOnH = 0, shotsOnA = 0, shotsTotal = 0;
   if (liveStats) {
-    const teams = Object.values(liveStats);
-    if (teams.length >= 2) {
-      const hStats = homeStats(liveStats);
-      const aStats = awayStats(liveStats);
-      const shotsOnH = parseInt(hStats['Shots on Goal'] || 0);
-      const shotsOnA = parseInt(aStats['Shots on Goal'] || 0);
-      const shotsTotal = parseInt(hStats['Total Shots'] || 0) + parseInt(aStats['Total Shots'] || 0);
-      const shotsOnTarget = shotsOnH + shotsOnA;
-      // Si hay ≥8 tiros a puerta y pocos goles → +5% probabilidad
-      if (shotsOnTarget >= 8 && shotsOnTarget / (totalGoals + 1) > 4) bonus += 0.05;
-      // Si hay ≥14 tiros totales → más presión ofensiva
-      if (shotsTotal >= 14) bonus += 0.03;
-    }
+    const hSt = homeStats(liveStats);
+    const aSt = awayStats(liveStats);
+    shotsOnH   = parseInt(hSt['Shots on Goal'] || 0);
+    shotsOnA   = parseInt(aSt['Shots on Goal'] || 0);
+    shotsTotal = parseInt(hSt['Total Shots'] || 0) + parseInt(aSt['Total Shots'] || 0);
+    const shotsOnTarget = shotsOnH + shotsOnA;
+    if (shotsOnTarget >= 8 && shotsOnTarget / (totalGoals + 1) > 4) bonus += 0.05;
+    if (shotsTotal >= 14) bonus += 0.03;
   }
 
-  // Equipo perdedor por 1 gol → empuja más (desesperación)
+  // Equipo perdedor por 1 gol → empuja más
   if (Math.abs(homeGoals - awayGoals) === 1 && elapsed >= 55) bonus += 0.04;
-
   // Último cuarto 0-0 → urgencia máxima
   if (totalGoals === 0 && elapsed >= 67) bonus += 0.06;
 
-  // P(al menos 1 gol más) = 1 - P(0 goles) = 1 - e^(-lambda)
-  const pRaw     = 1 - Math.exp(-lambdaCombined);
-  const pGoal    = Math.min(pRaw + bonus, 0.94);
+  // P(al menos 1 gol más) = 1 - e^(-lambda)
+  const pRaw  = 1 - Math.exp(-lambdaCombined);
+  const pGoal = Math.min(pRaw + bonus, 0.94);
   const impliedOdds = pGoal > 0 ? +(1 / pGoal).toFixed(2) : 99;
 
-  // Solo alertamos si las odds estimadas superan 1.45 (P < 69%)
   if (impliedOdds < 1.45) return null;
 
-  const { market, impliedOdds: mktOdds, overLine } = selectGoalMarket(
-    homeGoals, awayGoals, pGoal, elapsed, period
+  const { market, impliedOdds: mktOdds, overLine, tipo } = selectGoalMarket(
+    fixture.homeTeam, fixture.awayTeam,
+    homeGoals, awayGoals, pGoal, elapsed, period,
+    shotsOnH, shotsOnA
   );
 
-  // Score de oportunidad (0-100): combina prob + odds + tiempo restante
-  // Ponderamos más los partidos con odds entre 1.50-2.20 (zona de valor real)
-  const oddsBonus = (mktOdds >= 1.50 && mktOdds <= 2.50) ? 15 : (mktOdds > 2.50 ? 5 : -10);
+  const oddsBonus  = (mktOdds >= 1.50 && mktOdds <= 2.50) ? 15 : (mktOdds > 2.50 ? 5 : -10);
   const alertScore = Math.min(pGoal * 70 + (remaining / 45) * 15 + oddsBonus, 100);
 
-  // Describe por qué es una oportunidad
+  // Razón concreta: qué está pasando en el partido
   const reasons = [];
-  if (totalGoals === 0 && elapsed >= 60)  reasons.push(`0-0 en min ${elapsed}, tiempo aprieta`);
-  if (Math.abs(homeGoals - awayGoals) === 1 && elapsed >= 55) reasons.push('equipo perdedor presiona');
-  if (bonus > 0.07) reasons.push('alta presión ofensiva (tiros a puerta)');
-  if (lambdaCombined > 0.8) reasons.push(`xG restante alto (${lambdaCombined.toFixed(2)} goles esperados)`);
-  if (reasons.length === 0) reasons.push(`${(pGoal*100).toFixed(0)}% prob de gol en ${remaining} min restantes`);
+  if (shotsOnH > 3 && shotsOnH > shotsOnA + 1) reasons.push(`${fixture.homeTeam} domina: ${shotsOnH} tiros a puerta`);
+  if (shotsOnA > 3 && shotsOnA > shotsOnH + 1) reasons.push(`${fixture.awayTeam} domina: ${shotsOnA} tiros a puerta`);
+  if (shotsTotal >= 12) reasons.push(`${shotsTotal} tiros totales — partido muy ofensivo`);
+  if (totalGoals === 0 && elapsed >= 60) reasons.push(`0-0 en min ${elapsed}, presión máxima`);
+  if (Math.abs(homeGoals - awayGoals) === 1 && elapsed >= 55) {
+    const trailing = homeGoals < awayGoals ? fixture.homeTeam : fixture.awayTeam;
+    reasons.push(`${trailing} busca el empate`);
+  }
+  if (lambdaCombined > 0.8) reasons.push(`xG esperado alto: ${lambdaCombined.toFixed(2)} goles restantes`);
+  if (reasons.length === 0) reasons.push(`${(pGoal*100).toFixed(0)}% prob — ${remaining} min restantes`);
 
   return {
-    fixtureId:   fixture.fixtureId,
-    local:       fixture.homeTeam,
-    visitante:   fixture.awayTeam,
-    liga:        fixture.leagueName,
-    country:     fixture.country,
-    marcador:    `${homeGoals}-${awayGoals}`,
-    minuto:      elapsed,
+    fixtureId:  fixture.fixtureId,
+    local:      fixture.homeTeam,
+    visitante:  fixture.awayTeam,
+    liga:       fixture.leagueName,
+    country:    fixture.country,
+    marcador:   `${homeGoals}-${awayGoals}`,
+    minuto:     elapsed,
     period,
     remaining,
-    pGoal:       +(pGoal * 100).toFixed(1),
+    pGoal:      +(pGoal * 100).toFixed(1),
     impliedOdds: mktOdds,
     market,
-    overLine,
-    xGRestante:  +lambdaCombined.toFixed(2),
-    alertScore:  +alertScore.toFixed(1),
-    razon:       reasons.join(' + '),
+    tipo,
+    shotsLocal:    shotsOnH,
+    shotsVisitante: shotsOnA,
+    xGRestante: +lambdaCombined.toFixed(2),
+    alertScore: +alertScore.toFixed(1),
+    razon:      reasons.join(' + '),
   };
 }
 
-const ALERTA_GOL_SYSTEM = `Eres un tipster especializado en apuestas en vivo (in-play). Te llegan datos calculados matemáticamente de partidos en curso con probabilidades de gol reales.
+const ALERTA_GOL_SYSTEM = `Eres un tipster de apuestas en vivo. Recibes datos de partidos en curso y debes emitir picks PUNTUALES y CONCRETOS según el momento del partido.
 
-FORMATO OBLIGATORIO para cada alerta:
+PICKS PUNTUALES según el momento:
+- Partido en 1T → pick sobre si habrá gol en el 1er tiempo o quién marca primero
+- Partido en medio tiempo (HT) → pick sobre el 2do tiempo: quién marca, si habrá gol, Over 0.5 2T
+- Partido en 2T → pick inmediato: próximo gol, equipo que marca, Over X.5 antes del 90'
+- Usa el campo "market" que ya viene calculado — es el pick concreto. No lo cambies.
+- Usa "shotsLocal" y "shotsVisitante" para explicar quién está presionando más.
+
+FORMATO OBLIGATORIO:
 ⚡ *ALERTA DE GOL #[N]*
-⚽ [Local] [marcador] [Visitante] | 🕐 Min [XX] ([período])
-🏆 [Liga] — [País]
+⚽ [local] [marcador] [visitante] | 🕐 Min [minuto] ([period])
+🏆 [liga] — [country]
 ━━━━━━━━━━━━━━━━━━━
-🎯 Mercado: *[mercado recomendado]*
-📊 Prob. de gol: *[X]%*
-💰 Cuota estimada: *~[X.XX]*
-⏱️ Actúa antes del min: *[min_límite]*
-📈 Por qué: [razón en 1 línea]
+🎯 Pick: *[market]*
+📊 Probabilidad: *[pGoal]%*
+💰 Cuota estimada: *~[impliedOdds]*
+⏱️ Apostar antes del min: *[minuto límite concreto]*
+📈 Contexto: [razon — usa tiros a puerta, marcador, minuto para explicar por qué AHORA]
 🏆 Stake: *[X]/10*
 ━━━━━━━━━━━━━━━━━━━
 
-CRITERIO DE STAKE PARA ALERTA EN VIVO:
-- Stake 8: prob > 72% + cuota > 1.55
-- Stake 7: prob 62-72% + cuota > 1.50
-- Stake 6: prob 55-62% + cuota > 1.48
-- Stake 1-5: NUNCA publicar — si la prob no llega a 55%, omite la alerta completamente
-- No publicar si cuota estimada < 1.45
+STAKE:
+- Stake 8: prob > 72%
+- Stake 7: prob 62-72%
+- Stake 6: prob 55-62%
+- Omite alertas con prob < 55% o cuota < 1.45
 
-CRITERIO DEL MINUTO LÍMITE:
-- Siempre da un minuto concreto antes del que vale apostar
-- En 1T: si es min 25, actúa antes del min 35
-- En 2T: si es min 65, actúa antes del min 75
-- Nunca más allá del min 85
+MINUTO LÍMITE: siempre concreto. En 1T apuesta antes del min 40. En HT decide antes de que empiece el 2T. En 2T nunca más allá del min 82.
 
-Al final de todas las alertas, añade:
-⚠️ _Las cuotas en vivo cambian rápidamente. Verifica la cuota real antes de apostar._
+Al final añade:
+⚠️ _Cuotas en vivo cambian rápido. Verifica antes de apostar._
 
-Responde en español. No menciones APIs ni fuentes de datos.`;
+Responde en español. No menciones APIs.`;
 
 // ─── Anthropic helpers ────────────────────────────────────────────────────────
 
