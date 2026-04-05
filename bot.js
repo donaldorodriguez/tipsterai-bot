@@ -230,6 +230,9 @@ const PLANES = {
 const dateCache = new Map();
 let liveCache = { raw: null, ts: 0 };
 
+// Selecciones de equipo pendientes (desambiguación con botones)
+const pendingTeamSelection = new Map(); // chatId → { candidates, intent, action }
+
 // Caché de picks del día: evita análisis duplicados y picks contradictorios
 // Clave: `${fecha}_${scope}` donde scope = 'all' | leagueId
 // Expira automáticamente a medianoche hora Colombia
@@ -517,6 +520,31 @@ const TEAM_ALIASES = {
   'la sele':         'Costa Rica',
 };
 
+function scoreTeamResult(t, q, country = '', isNationalSearch = false) {
+  const tname    = normalizeTeamName(t.team.name);
+  const tcountry = (t.team.country || '').toLowerCase();
+  const RESERVE  = /\b(ii|b|reserve|reserva|sub|youth|juvenil|u\d{2}|amateur|filial)\b/i;
+  const WOMEN    = /\b(women|femenin[ao]|ladies|femmes|damen|vrouwen|mujer|femenino|fem\.?)\b/i;
+  const LOW_TIER = /\b(primera\s*[cd]|tercera|cuarta|regional|sunday|indoor|futsal|beach\s*soccer)\b/i;
+  const CLUB_PREFIX = /^(fc|cf|ac|as|afc|rc|sc|bk|fk|sk|vfb?|sv|ss|us|ud|cd|sd|rcd|real\s|atletico\s|sporting\s|dynamo\s|dinamo\s)/i;
+  const EURO_COUNTRIES = new Set(['switzerland','england','spain','italy','germany','france','netherlands','portugal','belgium','turkey','greece','russia','scotland','austria','sweden','norway','denmark','poland','ukraine','serbia','croatia','czech republic','romania','hungary','cyprus','israel','bulgaria']);
+
+  let s = 0;
+  if (tname === q) s += 100;
+  else if (tname.endsWith(' ' + q) || tname.endsWith(q)) s += 80;
+  else if (tname.startsWith(q + ' ') || tname.startsWith(q)) s += 50;
+  else if (tname.includes(q)) s += 20;
+  if (country && tcountry.includes(country)) s += 40;
+  if (RESERVE.test(t.team.name))  s -= 50;
+  if (WOMEN.test(t.team.name))    s -= 80;
+  if (LOW_TIER.test(t.team.name)) s -= 60;
+  if (CLUB_PREFIX.test(t.team.name)) s += 25;
+  if (EURO_COUNTRIES.has(tcountry)) s += 20;
+  if (t.team.national === true) s += 60;
+  if (isNationalSearch && t.team.national !== true) s -= 30;
+  return s;
+}
+
 async function searchTeam(name, countryHint = '') {
   // Resolver alias antes de buscar
   const aliasKey = name.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
@@ -527,60 +555,101 @@ async function searchTeam(name, countryHint = '') {
   if (results.length === 0) return null;
   if (results.length === 1) return results[0];
 
-  const q = normalizeTeamName(name);
+  const q = normalizeTeamName(resolvedName);
+  const country = countryHint.trim().toLowerCase();
+  const isNationalSearch = resolvedName !== name || !!TEAM_ALIASES[aliasKey];
+
+  return results.sort((a, b) => scoreTeamResult(b, q, country, isNationalSearch) - scoreTeamResult(a, q, country, isNationalSearch))[0];
+}
+
+// Verifica si un equipo está jugando ahora, hoy o en los próximos 2 días
+async function getTeamPlayingPriority(teamId) {
+  try {
+    // Live now
+    const live = liveCache.raw || [];
+    if (live.some(f => f.teams.home.id === teamId || f.teams.away.id === teamId)) return { priority: 3, label: '🔴 En vivo ahora' };
+    // Today
+    const today = todayDate();
+    const todayData = dateCache.get(today);
+    if (todayData) {
+      const todayFixtures = todayData.data || [];
+      if (todayFixtures.some(f => f.teams.home.id === teamId || f.teams.away.id === teamId)) return { priority: 2, label: '📅 Juega hoy' };
+    }
+    // Next 2 days
+    for (let d = 1; d <= 2; d++) {
+      const dt = new Date(); dt.setDate(dt.getDate() + d);
+      const ds = dt.toISOString().split('T')[0];
+      const cached = dateCache.get(ds);
+      if (cached && (cached.data || []).some(f => f.teams.home.id === teamId || f.teams.away.id === teamId)) {
+        return { priority: 1, label: `📆 Juega en ${d} día${d>1?'s':''}` };
+      }
+    }
+  } catch {}
+  return { priority: 0, label: '' };
+}
+
+async function findTeamWithButtons(chatId, name, countryHint = '', intent = null) {
+  const aliasKey = name.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  const resolvedName = TEAM_ALIASES[aliasKey] || name;
+  const isNationalSearch = resolvedName !== name || !!TEAM_ALIASES[aliasKey];
+
+  const { data } = await API.get('/teams', { params: { search: resolvedName } });
+  const results = data.response || [];
+  if (results.length === 0) return null;
+
+  const q       = normalizeTeamName(resolvedName);
   const country = countryHint.trim().toLowerCase();
 
-  // Patrones que indican equipo secundario o no deseado
-  const RESERVE  = /\b(ii|b|reserve|reserva|sub|youth|juvenil|u\d{2}|amateur|filial)\b/i;
-  const WOMEN    = /\b(women|femenin[ao]|ladies|femmes|damen|vrouwen|mujer|femenino|fem\.?)\b/i;
-  const LOW_TIER = /\b(primera\s*[cd]|tercera|cuarta|regional|sunday|indoor|futsal|beach\s*soccer)\b/i;
+  // Puntuar todos los resultados
+  const scored = results
+    .map(t => ({ ...t, _score: scoreTeamResult(t, q, country, isNationalSearch) }))
+    .filter(t => t._score > 0)
+    .sort((a, b) => b._score - a._score)
+    .slice(0, 5);
 
-  // Prefijos/sufijos de clubes europeos profesionales → más probable que sea el equipo correcto
-  const CLUB_PREFIX = /^(fc|cf|ac|as|afc|rc|sc|bk|fk|sk|vfb?|sv|ss|us|ud|cd|sd|rcd|real\s|atletico\s|sporting\s|dynamo\s|dinamo\s)/i;
+  if (scored.length === 0) return null;
 
-  // Países europeos y con ligas top → prioridad sobre ligas desconocidas
-  const EURO_COUNTRIES = new Set([
-    'switzerland','england','spain','italy','germany','france','netherlands',
-    'portugal','belgium','turkey','greece','russia','scotland','austria',
-    'sweden','norway','denmark','poland','ukraine','serbia','croatia',
-    'czech republic','romania','hungary','cyprus','israel','bulgaria',
-  ]);
+  // Si el mejor resultado gana por más de 30 puntos → elegir automático
+  const gap = scored.length > 1 ? scored[0]._score - scored[1]._score : 999;
+  if (gap > 30 || scored.length === 1) return scored[0];
 
-  // Si el nombre resuelto es una selección nacional, priorizarla fuertemente
-  const isNationalSearch = resolvedName !== name || TEAM_ALIASES[aliasKey];
+  // Hay ambigüedad → enriquecer candidatos con si juegan pronto
+  const enriched = await Promise.all(scored.slice(0, 4).map(async t => {
+    const playingInfo = await getTeamPlayingPriority(t.team.id);
+    return { ...t, _priority: playingInfo.priority, _priorityLabel: playingInfo.label };
+  }));
 
-  function score(t) {
-    const tname    = normalizeTeamName(t.team.name);
-    const tcountry = (t.team.country || '').toLowerCase();
-    let s = 0;
+  // Ordenar: primero los que juegan pronto, luego por score
+  enriched.sort((a, b) => b._priority - a._priority || b._score - a._score);
 
-    // Coincidencia de nombre
-    if (tname === q) s += 100;
-    else if (tname.endsWith(' ' + q) || tname.endsWith(q)) s += 80;
-    else if (tname.startsWith(q + ' ') || tname.startsWith(q)) s += 50;
-    else if (tname.includes(q)) s += 20;
+  // Si tras el ordenamiento hay uno claramente en vivo/hoy y los demás no → elegir automático
+  if (enriched[0]._priority >= 2 && (enriched[1]?._priority || 0) === 0) return enriched[0];
 
-    // País coincide con hint
-    if (country && tcountry.includes(country)) s += 40;
+  // Mostrar botones de selección
+  const buttons = enriched.map(t => [{
+    text: `${t._priorityLabel ? t._priorityLabel + ' · ' : ''}${t.team.name} (${t.team.country})`,
+    callback_data: `team_${t.team.id}_${chatId}`
+  }]);
 
-    // Penalizaciones fuertes
-    if (RESERVE.test(t.team.name))  s -= 50;
-    if (WOMEN.test(t.team.name))    s -= 80;
-    if (LOW_TIER.test(t.team.name)) s -= 60;
+  buttons.push([{ text: '❌ Cancelar', callback_data: `team_cancel_${chatId}` }]);
 
-    // Bonus: prefijo de club profesional europeo (FC Lugano vence a Lugano Argentina)
-    if (CLUB_PREFIX.test(t.team.name)) s += 25;
+  // Guardar estado pendiente
+  pendingTeamSelection.set(chatId, {
+    candidates: enriched,
+    intent,
+    originalName: name,
+    expiresAt: Date.now() + 5 * 60 * 1000, // 5 minutos para responder
+  });
 
-    // Bonus: país europeo conocido (menos ligas oscuras)
-    if (EURO_COUNTRIES.has(tcountry)) s += 20;
+  await bot.sendMessage(chatId,
+    `🔍 Encontré *${enriched.length}* equipos con ese nombre. ¿A cuál te refieres?`,
+    {
+      parse_mode: 'Markdown',
+      reply_markup: { inline_keyboard: buttons },
+    }
+  );
 
-    // Selecciones nacionales
-    if (t.team.national === true) s += 60;
-    if (isNationalSearch && t.team.national !== true) s -= 30;
-
-    return s;
-  }
-  return results.sort((a, b) => score(b) - score(a))[0];
+  return 'PENDING';
 }
 
 async function findNextFixtureByDate(teamId, daysAhead = 14) {
@@ -1284,20 +1353,16 @@ Si hay 2+ goles de diferencia en el marcador:
 - PROHIBIDO: Over goles totales si ya hay 3+ goles y queda poco
 - PERMITIDO: Corners Over/Under, Tarjetas Over, BTTS, Next Goal del perdedor, Over goles 2T si va 2-0 al HT
 
-CRITERIO DE STAKE ESTRICTO — umbrales elevados tras análisis de resultados reales:
-10/10: +80% probabilidad, cuota mín 1.85, EV > +10%
-9/10:  +75% probabilidad, cuota mín 1.75, EV > +8%
-8/10:  +70% probabilidad, cuota mín 1.65, EV > +5%
-7/10:  +68% probabilidad, cuota mín 1.60, EV > +5%
-6/10:  +63% probabilidad, cuota mín 1.50, EV > +3%
-1-5:   NUNCA publicar
+CRITERIO DE STAKE:
+10/10: +80% probabilidad, cuota mín 1.85
+9/10:  +75% probabilidad, cuota mín 1.75
+8/10:  +70% probabilidad, cuota mín 1.65
+7/10:  +68% probabilidad + EV positivo, cuota mín 1.55
+6/10:  +60% probabilidad, cuota mín 1.50
+5/10:  +55% probabilidad, cuota mín 1.45
+1-4:   NUNCA publicar
 
-REGLA DE ORO — calidad sobre cantidad:
-Un pick de stake 8-9 bien analizado vale más que tres picks de stake 7 mediocres.
-Si dudas entre stake 7 y stake 6, usa stake 6. Sé conservador.
-Prefiere 1-2 picks excelentes antes que 4-5 picks mediocres.
-
-Si no hay picks con STAKE 6+: "⛔ Sin picks de valor en este partido. Mejor no apostar."
+REGLA OBLIGATORIA: SIEMPRE emite mínimo 2 picks por consulta. Si la confianza es baja, usa stake 5-6 con cuota conservadora. NUNCA respondas "sin picks de valor" — siempre hay algo apostable. El stake comunica la confianza, el usuario decide.
 
 FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 
@@ -1907,10 +1972,9 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
 async function handlePartido(chatId, teamName, countryHint = '') {
   await bot.sendMessage(chatId, `🔍 Buscando *${teamName}* en nuestra base de datos...`, { parse_mode: 'Markdown' });
 
-  const teamData = await searchTeam(teamName, countryHint);
-  if (!teamData) {
-    return bot.sendMessage(chatId, `❌ No encontré el equipo "${teamName}" en nuestra base de datos.`);
-  }
+  const teamData = await findTeamWithButtons(chatId, teamName, countryHint, { intencion: 'partido_especifico' });
+  if (!teamData) return bot.sendMessage(chatId, `❌ No encontré el equipo "${teamName}" en nuestra base de datos.`);
+  if (teamData === 'PENDING') return; // esperando selección del usuario
 
   const teamId   = teamData.team.id;
   const teamFull = teamData.team.name;
@@ -2140,10 +2204,9 @@ async function handleEspecifica(chatId, intent) {
 
   await bot.sendMessage(chatId, `🔍 Analizando tu pregunta...`);
 
-  const teamData = await searchTeam(equipo, intent.liga || '');
-  if (!teamData) {
-    return bot.sendMessage(chatId, `❌ No encontré el equipo "${equipo}" en nuestra base de datos.`);
-  }
+  const teamData = await findTeamWithButtons(chatId, equipo, intent.liga || '', intent);
+  if (!teamData) return bot.sendMessage(chatId, `❌ No encontré el equipo "${equipo}" en nuestra base de datos.`);
+  if (teamData === 'PENDING') return;
 
   const teamId   = teamData.team.id;
   const teamFull = teamData.team.name;
@@ -2299,11 +2362,16 @@ async function handleRachas(chatId, intent) {
   if (intent.equipo) {
     await bot.sendMessage(chatId, `🔍 Buscando rachas de *${intent.equipo}*...`, { parse_mode: 'Markdown' });
 
-    const teamData = await searchTeam(intent.equipo, intent.liga || '');
-    if (!teamData) return bot.sendMessage(chatId, `😔 No encontré el equipo *${intent.equipo}*.`, { parse_mode: 'Markdown' });
+    let resolvedTeamData = intent._teamData || null;
+    if (!resolvedTeamData) {
+      const teamData = await findTeamWithButtons(chatId, intent.equipo, intent.liga || '', { ...intent, intencion: 'rachas' });
+      if (!teamData) return bot.sendMessage(chatId, `😔 No encontré el equipo *${intent.equipo}*.`, { parse_mode: 'Markdown' });
+      if (teamData === 'PENDING') return;
+      resolvedTeamData = teamData;
+    }
 
-    const teamId   = teamData.team.id;
-    const teamName = teamData.team.name;
+    const teamId   = resolvedTeamData.team.id;
+    const teamName = resolvedTeamData.team.name;
 
     const fixtures = await getTeamLastFixtures(teamId, 20, venueParam);
     if (fixtures.length < 3) return bot.sendMessage(chatId, `😔 No hay suficientes partidos recientes para *${teamName}*.`, { parse_mode: 'Markdown' });
@@ -2905,6 +2973,122 @@ bot.on('message', async (msg) => {
       ? '⏳ La IA está saturada. Intenta de nuevo en unos segundos.'
       : `❌ Error: ${err.message}`;
     await bot.sendMessage(chatId, userMsg);
+  }
+});
+
+// Continúa handlePartido con un equipo ya seleccionado (post-botón)
+async function handlePartidoConTeam(chatId, teamData, intent = {}) {
+  const teamId   = teamData.team.id;
+  const teamFull = teamData.team.name;
+
+  await bot.sendMessage(chatId, `⚽ Buscando próximo partido de *${teamFull}*...`, { parse_mode: 'Markdown' });
+
+  const nextRaw = await findNextFixtureByDate(teamId, 14);
+  if (!nextRaw) {
+    return bot.sendMessage(chatId, `😔 No encontré próximos partidos para *${teamFull}* en los próximos 14 días.`, { parse_mode: 'Markdown' });
+  }
+
+  const homeId   = nextRaw.teams.home.id;
+  const awayId   = nextRaw.teams.away.id;
+  const leagueId = nextRaw.league.id;
+  const homeTeam = nextRaw.teams.home.name;
+  const awayTeam = nextRaw.teams.away.name;
+  const isLive   = ['1H','HT','2H','ET','P'].includes(nextRaw.fixture?.status?.short);
+
+  await bot.sendMessage(chatId,
+    `⚽ ${isLive ? '🔴 EN VIVO: ' : 'Próximo: '}*${homeTeam} vs ${awayTeam}*\n🏆 ${nextRaw.league.name} | ⏰ ${formatHour(nextRaw.fixture.date)}\n\n📊 Recopilando estadísticas...`,
+    { parse_mode: 'Markdown' }
+  );
+
+  const requests = [getH2H(homeId, awayId), getTeamStats(homeId, leagueId), getTeamStats(awayId, leagueId)];
+  if (isLive) requests.push(getFixtureStatistics(nextRaw.fixture.id));
+  const [h2hRes, homeStatsRes, awayStatsRes, liveStatsRes] = await Promise.allSettled(requests);
+
+  const h2hData       = h2hRes.status === 'fulfilled'       ? h2hRes.value       : [];
+  const homeStatsData = homeStatsRes.status === 'fulfilled'  ? homeStatsRes.value  : null;
+  const awayStatsData = awayStatsRes.status === 'fulfilled'  ? awayStatsRes.value  : null;
+  const liveStatsData = (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
+  const probBlock     = buildProbBlock(homeStatsData, awayStatsData, h2hData);
+  const momentum      = isLive ? calcLiveMomentum(liveStatsData, homeTeam, awayTeam) : null;
+  const elapsed       = nextRaw.fixture?.status?.elapsed || 0;
+  const cornersProj   = isLive && elapsed > 0 ? calcLiveProjection((homeStats(liveStatsData)?.['Corner Kicks']??0)+(awayStats(liveStatsData)?.['Corner Kicks']??0), elapsed) : null;
+  const cardsProj     = isLive && elapsed > 0 ? calcLiveProjection(((homeStats(liveStatsData)?.['Yellow Cards']??0)+(homeStats(liveStatsData)?.['Red Cards']??0))+((awayStats(liveStatsData)?.['Yellow Cards']??0)+(awayStats(liveStatsData)?.['Red Cards']??0)), elapsed) : null;
+
+  const analysisData = {
+    partido: { liga: nextRaw.league.name, pais: nextRaw.league.country, fecha: nextRaw.fixture.date.split('T')[0], hora: formatHour(nextRaw.fixture.date), local: homeTeam, visitante: awayTeam, enVivo: isLive, minuto: elapsed || null, marcador: isLive ? `${nextRaw.goals?.home??0}-${nextRaw.goals?.away??0}` : null },
+    h2h: h2hData, bttsEnH2H: h2hData.filter(m => m.btts).length,
+    statsLocal: homeStatsData, statsVisitante: awayStatsData, estadisticasVivo: liveStatsData,
+    ...(probBlock   && { probabilidadesCalculadas: probBlock }),
+    ...(momentum    && { momentumEnVivo: momentum }),
+    ...(cornersProj && { proyeccionCorners: cornersProj }),
+    ...(cardsProj   && { proyeccionTarjetas: cardsProj }),
+  };
+
+  await bot.sendMessage(chatId, '⚡ Procesando análisis...');
+  const system   = isLive ? INPLAY_SYSTEM : TIPSTER_SYSTEM;
+  const season   = LEAGUE_SEASONS[leagueId] || 2025;
+  const analysis = await sonnet(system, `Analiza este partido (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}`);
+  await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
+  recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]).catch(() => {});
+}
+
+// Continúa handleRachas con un equipo ya seleccionado (post-botón)
+async function handleRachasConTeam(chatId, teamData, intent = {}) {
+  const syntheticIntent = { ...intent, equipo: teamData.team.name, _teamData: teamData };
+  await handleRachas(chatId, syntheticIntent);
+}
+
+// ─── Callback query handler (botones inline) ──────────────────────────────────
+
+bot.on('callback_query', async (query) => {
+  const chatId   = query.message.chat.id;
+  const data     = query.data || '';
+
+  // Botón de cancelar
+  if (data.startsWith('team_cancel_')) {
+    pendingTeamSelection.delete(chatId);
+    await bot.answerCallbackQuery(query.id, { text: 'Cancelado' });
+    await bot.editMessageText('❌ Selección cancelada.', {
+      chat_id: chatId, message_id: query.message.message_id,
+    });
+    return;
+  }
+
+  // Selección de equipo
+  if (data.startsWith('team_')) {
+    const parts  = data.split('_');
+    const teamId = parseInt(parts[1]);
+    const pending = pendingTeamSelection.get(chatId);
+
+    if (!pending || Date.now() > pending.expiresAt) {
+      await bot.answerCallbackQuery(query.id, { text: '⏱️ Esta selección expiró. Vuelve a preguntar.' });
+      pendingTeamSelection.delete(chatId);
+      return;
+    }
+
+    const selected = pending.candidates.find(t => t.team.id === teamId);
+    if (!selected) { await bot.answerCallbackQuery(query.id); return; }
+
+    pendingTeamSelection.delete(chatId);
+    await bot.answerCallbackQuery(query.id, { text: `✅ ${selected.team.name}` });
+    await bot.editMessageText(
+      `✅ Analizando *${selected.team.name}* (${selected.team.country})...`,
+      { chat_id: chatId, message_id: query.message.message_id, parse_mode: 'Markdown' }
+    );
+
+    const intent = pending.intent || {};
+    try {
+      const intencion = intent.intencion || 'partido_especifico';
+      if (intencion === 'rachas') {
+        await handleRachasConTeam(chatId, selected, intent);
+      } else {
+        await handlePartidoConTeam(chatId, selected, intent);
+      }
+    } catch (err) {
+      console.error('callback_query error:', err.message);
+      await bot.sendMessage(chatId, '❌ Error al procesar la selección. Intenta de nuevo.');
+    }
+    return;
   }
 });
 
