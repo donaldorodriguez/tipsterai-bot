@@ -2093,7 +2093,8 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
 const SISTEMA_HOY_SYSTEM = `Eres un matemático experto en apuestas de sistema. Recibes una lista de picks candidatos con sus probabilidades estimadas y cuotas. Tu misión:
 
-1. FILTRAR picks con prob ≥ 55% y EV ≥ +5% (EV = prob × cuota - 1).
+1. FILTRAR picks con prob ≥ 52% y EV ≥ +3% (EV = prob × cuota - 1).
+   IMPORTANTE: si un partido no tiene modelo Poisson (statsLocal=null) pero SÍ tiene H2H sólido (≥6 partidos), puedes incluirlo estimando prob a partir del H2H (ej: si BTTS en 7/10 H2H → prob 70%). Márcalos con 🔵 "Basado en H2H".
 2. SELECCIONAR los 3 a 5 mejores picks ordenados por EV descendente.
 3. DECIDIR el tipo de sistema óptimo:
    - 3 picks → Sistema 2/3 (3 dobles): P(≥1 acierto) ≈ 96%, P(≥2 aciertos) ≈ 75%
@@ -2151,10 +2152,10 @@ async function handleSistemaHoy(chatId) {
     return bot.sendMessage(chatId, `😔 No hay partidos hoy (${today}) en las ligas monitoreadas.`);
   }
 
-  // 2. Ordenar por prioridad de liga y tomar top 12 para analizar
+  // 2. Ordenar por prioridad de liga y tomar top 20 para analizar
   const candidates = [...allFixtures]
     .sort((a, b) => (LEAGUE_PRIORITY[b.leagueId] || 0) - (LEAGUE_PRIORITY[a.leagueId] || 0))
-    .slice(0, 12);
+    .slice(0, 20);
 
   await bot.sendMessage(chatId, `📊 ${allFixtures.length} partidos encontrados. Analizando top ${candidates.length} con estadísticas + cuotas...`);
 
@@ -2170,11 +2171,16 @@ async function handleSistemaHoy(chatId) {
     if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 5000));
   }
 
-  // 4. Enriquecer con Poisson + cuotas reales
+  // 4. Enriquecer con Poisson + cuotas reales + H2H para partidos sin stats
+  const h2hResults = await Promise.allSettled(
+    candidates.map(f => getH2H(f.homeId, f.awayId))
+  );
+
   const enriched = candidates.map((f, i) => {
     const homeStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
     const awayStats = statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
-    const probBlock = buildProbBlock(homeStats, awayStats, [], f.leagueId);
+    const h2h = h2hResults[i].status === 'fulfilled' ? h2hResults[i].value : [];
+    const probBlock = buildProbBlock(homeStats, awayStats, h2h, f.leagueId);
     return {
       fixtureId:    f.fixtureId,
       liga:         f.leagueName,
@@ -2183,6 +2189,7 @@ async function handleSistemaHoy(chatId) {
       hora:         formatHour(f.date),
       statsLocal:   homeStats,
       statsVisitante: awayStats,
+      h2h:          h2h.slice(0, 8), // últimos 8 H2H
       ...(probBlock && { probabilidadesCalculadas: probBlock }),
     };
   });
@@ -2199,7 +2206,7 @@ async function handleSistemaHoy(chatId) {
 
   const sistemaText = await sonnet(
     SISTEMA_HOY_SYSTEM,
-    `Fecha: ${today}. Partidos disponibles para armar el sistema. SELECCIONA solo picks pre-partido (1T Over 0.5, BTTS, Result 1T, etc.) con cuota MÍNIMA 1.77 y prob ≥ 55%.\n\nDATA:\n${JSON.stringify(enriched, null, 2)}`
+    `Fecha: ${today}. Partidos disponibles para armar el sistema. SELECCIONA solo picks pre-partido (1T Over 0.5, BTTS, Result 1T, goles, etc.) con cuota MÍNIMA 1.77 y prob ≥ 52%. Si stats son null pero H2H tiene ≥6 partidos, úsalo para estimar probabilidad.\n\nDATA:\n${JSON.stringify(enriched, null, 2)}`
   );
 
   await sendLong(chatId, sistemaText, { parse_mode: 'Markdown' });
