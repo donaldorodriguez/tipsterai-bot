@@ -800,8 +800,12 @@ async function getInjuries(teamId, leagueId) {
 
 async function getRealOdds(fixtureId) {
   try {
-    const { data } = await API.get('/odds', { params: { fixture: fixtureId, bookmaker: 6 } }); // bookmaker 6 = Bet365
-    const bets = data.response?.[0]?.bookmakers?.[0]?.bets || [];
+    // Intentar primero sin filtro de bookmaker para obtener lo que esté disponible
+    const { data } = await API.get('/odds', { params: { fixture: fixtureId } });
+    // Tomar el primer bookmaker disponible (prioriza Bet365 id=6, sino cualquiera)
+    const bookmakers = data.response?.[0]?.bookmakers || [];
+    const bm = bookmakers.find(b => b.id === 6) || bookmakers[0];
+    const bets = bm?.bets || [];
     const odds = {};
     for (const bet of bets) {
       if (bet.name === 'Match Winner') {
@@ -814,9 +818,21 @@ async function getRealOdds(fixtureId) {
         odds.bttsNo  = parseFloat(bet.values.find(v => v.value === 'No')?.odd) || null;
       }
       if (bet.name === 'Goals Over/Under') {
-        odds.over25 = parseFloat(bet.values.find(v => v.value === 'Over 2.5')?.odd) || null;
-        odds.under25= parseFloat(bet.values.find(v => v.value === 'Under 2.5')?.odd) || null;
-        odds.over35 = parseFloat(bet.values.find(v => v.value === 'Over 3.5')?.odd) || null;
+        odds.over05  = parseFloat(bet.values.find(v => v.value === 'Over 0.5')?.odd)  || null;
+        odds.over15  = parseFloat(bet.values.find(v => v.value === 'Over 1.5')?.odd)  || null;
+        odds.over25  = parseFloat(bet.values.find(v => v.value === 'Over 2.5')?.odd)  || null;
+        odds.under25 = parseFloat(bet.values.find(v => v.value === 'Under 2.5')?.odd) || null;
+        odds.over35  = parseFloat(bet.values.find(v => v.value === 'Over 3.5')?.odd)  || null;
+        odds.under35 = parseFloat(bet.values.find(v => v.value === 'Under 3.5')?.odd) || null;
+      }
+      if (bet.name === 'Goals Over/Under First Half') {
+        odds.over05_1T = parseFloat(bet.values.find(v => v.value === 'Over 0.5')?.odd) || null;
+        odds.over15_1T = parseFloat(bet.values.find(v => v.value === 'Over 1.5')?.odd) || null;
+      }
+      if (bet.name === 'First Half Winner') {
+        odds.homeWin_1T = parseFloat(bet.values.find(v => v.value === 'Home')?.odd) || null;
+        odds.draw_1T    = parseFloat(bet.values.find(v => v.value === 'Draw')?.odd) || null;
+        odds.awayWin_1T = parseFloat(bet.values.find(v => v.value === 'Away')?.odd) || null;
       }
     }
     return Object.keys(odds).length > 0 ? odds : null;
@@ -2091,56 +2107,54 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 // óptima (2/3, 3/4, 3/5 etc.) basada en probabilidades Poisson + cuotas reales.
 // No aparece en el menú principal — solo accesible con la keyword "sistema hoy".
 
-const SISTEMA_HOY_SYSTEM = `Eres un matemático experto en apuestas de sistema. Recibes una lista de picks candidatos con sus probabilidades estimadas y cuotas. Tu misión:
+const SISTEMA_HOY_SYSTEM = `Eres un matemático experto en apuestas de sistema. Recibes partidos con estadísticas, H2H y cuotas reales.
 
-1. FILTRAR picks con prob ≥ 52% y EV ≥ +3% (EV = prob × cuota - 1).
-   IMPORTANTE: si un partido no tiene modelo Poisson (statsLocal=null) pero SÍ tiene H2H sólido (≥6 partidos), puedes incluirlo estimando prob a partir del H2H (ej: si BTTS en 7/10 H2H → prob 70%). Márcalos con 🔵 "Basado en H2H".
-2. SELECCIONAR los 3 a 5 mejores picks ordenados por EV descendente.
-3. DECIDIR el tipo de sistema óptimo:
-   - 3 picks → Sistema 2/3 (3 dobles): P(≥1 acierto) ≈ 96%, P(≥2 aciertos) ≈ 75%
-   - 4 picks → Sistema 3/4 (4 triples): P(≥2 triples) ≈ 73%, mejor EV por unidad
-   - 5 picks → Sistema 3/5 (10 triples): P(≥6 triples) ≈ 89.6%, EV total +176%
-   REGLA: si p×cuota_promedio > 1.0, el sistema más largo (triples) es mejor matemáticamente.
-4. CALCULAR la apuesta sugerida: stake total = 2-3% bankroll. Distribuir en combinaciones.
-5. MOSTRAR el resultado en este formato EXACTO:
+REGLAS CRÍTICAS — INCUMPLIRLAS INVALIDA EL SISTEMA:
+- PROHIBIDO mostrar razonamiento, análisis previo, lista de descartados o explicaciones internas. Ve DIRECTO al resultado final.
+- PROHIBIDO usar cuotas del modelo Poisson o inventadas. USA ÚNICAMENTE las cuotas del campo cuotasReales. Si cuotasReales es null o no tiene la cuota del mercado que quieres recomendar, descarta ese pick.
+- PROHIBIDO recomendar dos picks del mismo partido en el mismo sistema (Over 2.5 + BTTS del mismo partido NO es un sistema válido).
+- PROHIBIDO usar blockquotes (>) ni comillas especiales. Solo texto plano, asteriscos para negrita y emojis.
+
+PROCESO (interno, no mostrar):
+1. Filtrar: prob ≥ 52% Y EV ≥ +3% Y cuota en cuotasReales ≥ 1.70 Y partido diferente por pick.
+   - Si stats son null pero H2H tiene ≥6 partidos, estima prob desde H2H (BTTS en 5/8 → 62%).
+   - EV = prob × cuota_real - 1. Si cuota_real no existe → skip.
+2. Seleccionar máximo 1 pick por partido. Ordenar por EV descendente. Tomar 3-5 mejores.
+3. Decidir sistema:
+   - 3 picks → Sistema 2/3 (3 dobles)
+   - 4 picks → Sistema 3/4 (4 triples)
+   - 5 picks → Sistema 3/5 (10 triples)
+
+FORMATO DE SALIDA (exacto, sin nada antes ni después):
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 🎯 *SISTEMA DEL DÍA — [FECHA]*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-📌 *PICKS SELECCIONADOS* (ordenados por EV):
+📌 *PICKS* (por EV descendente):
 
 [N]. [Local] vs [Visitante] — [Liga]
-   🕐 [Hora] | 📊 Mercado: *[mercado]* | Cuota: *[cuota]*
-   ✅ Prob estimada: [X]% | EV: [+X.X]%
-
-[repetir para cada pick]
+   🕐 [Hora] | Mercado: *[mercado]* | Cuota real: *[cuota de cuotasReales]*
+   Prob: [X]% | EV: [+X.X]%[  🔵H2H si basado en H2H]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔢 *ESTRUCTURA DEL SISTEMA*
+🔢 *SISTEMA [K]/[N]*
 
-Tipo: Sistema [K]/[N] — [total combinaciones] [dobles/triples]
-Combinaciones: [listar cada combinación: Pick1 + Pick2 = cuota XX × YY = ~Z.ZZ]
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-💰 *CÁLCULO DE STAKE*
-
-• Bankroll de referencia: $100.000 (ajusta según tu capital real)
-• Stake por combinación: $[X] (total $[Y] = [Z]% bankroll)
-• Retorno mínimo (1 combinación ganada): $[A]
-• Retorno medio (50% combinaciones): $[B]
-• Retorno máximo (100% combinaciones): $[C]
+[Pick A] + [Pick B] = [cuota_A × cuota_B] = *~[resultado]*
+[repetir por cada combinación]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-📐 *MATEMÁTICA DEL SISTEMA*
+💰 *STAKE SUGERIDO*
 
-• Probabilidad de rentabilidad: [X]%
-• EV total del sistema: [+X.X]%
-• Break-even: necesitas ganar [K] de [N] combinaciones
+Stake por combinación: [X]% bankroll
+Retorno si gana 1 combinación: [X]x
+Retorno si gana todo: [X]x
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
+📐 *MATEMÁTICA*
 
-Responde SOLO con el análisis del sistema. No saludes ni des introducciones. Usa SOLO los datos que recibes.`;
+P(rentabilidad): [X]% | EV total: [+X.X]% | Break-even: [K]/[N] combinaciones
+━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
 async function handleSistemaHoy(chatId) {
   const today = todayDate();
@@ -2206,10 +2220,16 @@ async function handleSistemaHoy(chatId) {
 
   const sistemaText = await sonnet(
     SISTEMA_HOY_SYSTEM,
-    `Fecha: ${today}. Partidos disponibles para armar el sistema. SELECCIONA solo picks pre-partido (1T Over 0.5, BTTS, Result 1T, goles, etc.) con cuota MÍNIMA 1.70 y prob ≥ 52%. Si stats son null pero H2H tiene ≥6 partidos, úsalo para estimar probabilidad.\n\nDATA:\n${JSON.stringify(enriched, null, 2)}`
+    `Fecha: ${today}. DATOS de partidos disponibles. Recuerda: usa SOLO cuotas del campo cuotasReales (no inventes), máximo 1 pick por partido, cuota mínima 1.70.\n\nDATA:\n${JSON.stringify(enriched, null, 2)}`
   );
 
-  await sendLong(chatId, sistemaText, { parse_mode: 'Markdown' });
+  // Enviar con fallback a texto plano si Markdown falla
+  try {
+    await sendLong(chatId, sistemaText, { parse_mode: 'Markdown' });
+  } catch (e) {
+    console.error('Sistema sendLong Markdown error, retrying plain:', e.message);
+    await sendLong(chatId, sistemaText.replace(/[*_`]/g, ''));
+  }
 }
 
 async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
