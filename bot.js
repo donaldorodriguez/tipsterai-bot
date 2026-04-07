@@ -48,6 +48,7 @@ const LEAGUE_SEASONS = {
   207:2025,179:2025, 197:2025, 169:2025,144:2025,
   235:2025,40:2025,  141:2025, 136:2025,79:2025,
   62:2025, 89:2025,
+  671:2025, // Azerbaijan Premier League
   11:2026, 9:2026,   71:2026,  65:2026, 128:2026,
   262:2026,253:2026, 72:2026,  66:2026, 129:2026,
   263:2026,240:2026,
@@ -70,6 +71,7 @@ const LEAGUE_IDS = new Set([
   235,144,197,218,333,98,179,4,5,480,
   240,40,141,136,79,62,72,66,129,263,89,
   210,103,
+  671,  // Azerbaijan Premier League
   10,   // Amistosos Internacionales
   1,    // World Cup
   6,    // World Cup Qualifiers
@@ -130,6 +132,7 @@ const LEAGUE_MAP = {
   89: { name:'Eerste Divisie',     country:'Netherlands' },
   210:{ name:'Primera División',   country:'Cyprus'      },
   103:{ name:'Eliteserien',        country:'Norway'      },
+  671:{ name:'Premier League',     country:'Azerbaijan'  },
 };
 
 // Maps user-written league names → league ID
@@ -167,6 +170,7 @@ const LEAGUE_NAME_TO_ID = {
   'championship':40,
   'chipre':210, 'primera division chipre':210, 'primera división chipre':210, 'cyprus':210,
   'noruega':103, 'eliteserien':103, 'norway':103,
+  'azerbaiyan':671, 'azerbaiyán':671, 'azerbaijan':671, 'liga azerbaiyan':671, 'liga azerbaiyán':671, 'premier league azerbaijan':671,
   'amistosos':10, 'amistoso':10, 'amistosos internacionales':10, 'friendly':10, 'friendlies':10, 'internacional':10,
   'world cup':1, 'mundial':1, 'copa mundial':1,
   'eliminatorias':6, 'qualifiers':6, 'wc qualifiers':6, 'clasificatorias':6,
@@ -207,7 +211,30 @@ const LEAGUE_PRIORITY = {
   71:65,262:64,128:63,239:62,253:61,
   40:55,141:54,136:53,79:52,62:51,
   240:45,72:44,66:43,129:42,263:41,89:40,
-  210:38,103:37,
+  210:38,103:37,671:35,
+};
+
+// Ligas excluidas de picks automáticos (picks de hoy, picks en vivo)
+// El bot sigue respondiendo si el usuario pregunta por estas ligas específicamente
+const PICKS_EXCLUDE_LEAGUES = new Set([78, 94, 128]); // Bundesliga, Primeira Liga, Liga Argentina
+
+// Tasas históricas base de Over 2.5 y BTTS por liga
+// Fuente: estadísticas 2023-2025, usadas para calibrar probabilidades
+const LEAGUE_BASE_RATES = {
+  39:  { over25: 56, btts: 61, name: 'Premier League' },    // alta
+  140: { over25: 52, btts: 55, name: 'LaLiga' },            // media
+  135: { over25: 54, btts: 57, name: 'Serie A' },           // media
+  78:  { over25: 62, btts: 60, name: 'Bundesliga' },        // alta (pero 0% WR)
+  61:  { over25: 53, btts: 54, name: 'Ligue 1' },           // media-baja
+  2:   { over25: 61, btts: 63, name: 'Champions League' },  // alta
+  3:   { over25: 58, btts: 59, name: 'Europa League' },     // media-alta
+  71:  { over25: 55, btts: 58, name: 'Brasileirao' },       // media
+  94:  { over25: 50, btts: 53, name: 'Primeira Liga' },     // baja (0% WR)
+  128: { over25: 48, btts: 50, name: 'Liga Argentina' },    // baja (0% WR)
+  262: { over25: 54, btts: 56, name: 'Liga MX' },
+  239: { over25: 53, btts: 55, name: 'Liga BetPlay' },
+  207: { over25: 59, btts: 60, name: 'Super Lig' },
+  88:  { over25: 57, btts: 61, name: 'Eredivisie' },
 };
 
 // ─── Plans config ─────────────────────────────────────────────────────────────
@@ -741,6 +768,78 @@ async function getH2H(id1, id2) {
   }));
 }
 
+async function getLineups(fixtureId) {
+  try {
+    const { data } = await API.get('/fixtures/lineups', { params: { fixture: fixtureId } });
+    const res = data.response || [];
+    return res.map(t => ({
+      team: t.team.name,
+      formation: t.formation,
+      startXI: (t.startXI || []).map(p => ({
+        name: p.player.name,
+        number: p.player.number,
+        pos: p.player.pos,
+      })),
+      coach: t.coach?.name,
+    }));
+  } catch { return null; }
+}
+
+async function getInjuries(teamId, leagueId) {
+  try {
+    const season = LEAGUE_SEASONS[leagueId] || 2025;
+    const { data } = await API.get('/injuries', { params: { team: teamId, league: leagueId, season } });
+    const res = data.response || [];
+    return res.slice(0, 5).map(i => ({
+      player: i.player.name,
+      type: i.player.type,
+      reason: i.player.reason,
+    }));
+  } catch { return []; }
+}
+
+async function getRealOdds(fixtureId) {
+  try {
+    const { data } = await API.get('/odds', { params: { fixture: fixtureId, bookmaker: 6 } }); // bookmaker 6 = Bet365
+    const bets = data.response?.[0]?.bookmakers?.[0]?.bets || [];
+    const odds = {};
+    for (const bet of bets) {
+      if (bet.name === 'Match Winner') {
+        odds.homeWin = parseFloat(bet.values.find(v => v.value === 'Home')?.odd) || null;
+        odds.draw    = parseFloat(bet.values.find(v => v.value === 'Draw')?.odd) || null;
+        odds.awayWin = parseFloat(bet.values.find(v => v.value === 'Away')?.odd) || null;
+      }
+      if (bet.name === 'Both Teams Score') {
+        odds.bttsYes = parseFloat(bet.values.find(v => v.value === 'Yes')?.odd) || null;
+        odds.bttsNo  = parseFloat(bet.values.find(v => v.value === 'No')?.odd) || null;
+      }
+      if (bet.name === 'Goals Over/Under') {
+        odds.over25 = parseFloat(bet.values.find(v => v.value === 'Over 2.5')?.odd) || null;
+        odds.under25= parseFloat(bet.values.find(v => v.value === 'Under 2.5')?.odd) || null;
+        odds.over35 = parseFloat(bet.values.find(v => v.value === 'Over 3.5')?.odd) || null;
+      }
+    }
+    return Object.keys(odds).length > 0 ? odds : null;
+  } catch { return null; }
+}
+
+async function getApiPrediction(fixtureId) {
+  try {
+    const { data } = await API.get('/predictions', { params: { fixture: fixtureId } });
+    const pred = data.response?.[0];
+    if (!pred) return null;
+    return {
+      winner: pred.predictions?.winner?.name,
+      winnerComment: pred.predictions?.winner?.comment,
+      under_over: pred.predictions?.under_over,
+      goals_home: pred.predictions?.goals?.home,
+      goals_away: pred.predictions?.goals?.away,
+      advice: pred.predictions?.advice,
+      percent: pred.predictions?.percent,
+    };
+  } catch { return null; }
+}
+
 async function getTeamStats(teamId, leagueId) {
   const season = LEAGUE_SEASONS[leagueId] || 2026;
 
@@ -758,6 +857,14 @@ async function getTeamStats(teamId, leagueId) {
       partidosJugados:    played,
       ...(muestraReducida && { advertencia: `Muestra reducida (${played} partido${played>1?'s':''}) — promedios poco confiables` }),
       forma:              r.form?.replace(/W/g,'G').replace(/L/g,'P').replace(/D/g,'E').slice(-6).split('').join('-'),
+      forma5:             (() => {
+        const f5 = r.form?.replace(/W/g,'G').replace(/L/g,'P').replace(/D/g,'E').slice(-5) || '';
+        const wins = (f5.match(/G/g) || []).length;
+        const losses = (f5.match(/P/g) || []).length;
+        const draws = (f5.match(/E/g) || []).length;
+        const pts = wins * 3 + draws;
+        return { forma: f5.split('').join('-'), victorias: wins, empates: draws, derrotas: losses, puntos: pts, nota: pts >= 12 ? 'Forma excelente' : pts >= 9 ? 'Forma buena' : pts >= 6 ? 'Forma regular' : 'Forma mala' };
+      })(),
       golesAnotadosHome:  r.goals?.for?.average?.home,
       golesAnotadosAway:  r.goals?.for?.average?.away,
       golesRecibidosHome: r.goals?.against?.average?.home,
@@ -981,7 +1088,7 @@ function calcLiveProjection(current, elapsed, total = 90) {
  * @param {boolean} isHome   - true si homeStats es el equipo local
  * @returns {object} bloque de probabilidades para incluir en el prompt
  */
-function buildProbBlock(homeStats, awayStats, h2h = []) {
+function buildProbBlock(homeStats, awayStats, h2h = [], leagueId = null) {
   if (!homeStats || !awayStats) return null;
 
   const hFor  = parseFloat(homeStats.golesAnotadosHome) || 0;
@@ -1009,6 +1116,14 @@ function buildProbBlock(homeStats, awayStats, h2h = []) {
     ev[k] = calcEV(prob, odds);
   }
 
+  // Contexto de liga: tasas base históricas
+  const leagueRates = LEAGUE_BASE_RATES[leagueId] || null;
+  const leagueContext = leagueRates ? {
+    tasaBaseOver25Liga: `${leagueRates.over25}%`,
+    tasaBaseBTTSLiga:   `${leagueRates.btts}%`,
+    alertaLiga: leagueRates.over25 < 52 ? `Liga defensiva — reducir confianza en Over/BTTS` : null,
+  } : null;
+
   return {
     modeloPoisson: {
       xGLocal: probs.homeLambda,
@@ -1034,6 +1149,7 @@ function buildProbBlock(homeStats, awayStats, h2h = []) {
       'DNB Local @ 1.50': ev.dnbHome !== null ? `${ev.dnbHome > 0 ? '+' : ''}${ev.dnbHome}%` : 'N/D',
     },
     nota: 'EV positivo = apuesta con valor real vs cuota de mercado. Usa estos datos para calibrar el stake.',
+    ...(leagueContext && { contextoLiga: leagueContext }),
   };
 }
 
@@ -1349,6 +1465,8 @@ PICKS ABSOLUTAMENTE PROHIBIDAS - NUNCA las des:
 - BTTS en derbis o clásicos de alta tensión táctica (Milan vs Inter, Real Madrid vs Atlético, Arsenal vs Tottenham, Celtic vs Rangers, etc.) — estos partidos se cierran defensivamente, el BTTS falla sistemáticamente
 - Asian Handicap de -1 o mayor (-1, -1.5, -2) — falla con frecuencia. Máximo permitido: AH -0.5, y solo si el equipo promedia más de 2.0 goles en su contexto
 - BTTS cuando un equipo tiene más del 35% de partidos sin marcar en su contexto (casa o fuera)
+- Asian Handicap (AH) y Draw No Bet local (DNB_HOME) en picks automáticos del día — mercados con historial de 10-22% win rate. Solo usar DNB_AWAY si la probabilidad supera 75%
+- Cualquier pick en Bundesliga, Primeira Liga o Liga Argentina para picks automáticos del día — estas ligas tienen 0% win rate histórico en este sistema
 
 MERCADOS DONDE ESTÁ EL VALOR REAL:
 1. HT/FT combos específicos
@@ -1376,6 +1494,10 @@ Si el JSON de datos incluye el campo "probabilidadesCalculadas", DEBES usarlo co
 - probBTTS_Combinada: combinación de Poisson + H2H. Más fiable que solo H2H. Debe superar 65%.
 - expectedValue_vs_CuotasReferencia: si el EV de un mercado es negativo, NO lo recomiendes. Busca mercados con EV > +5%.
 - Las probabilidades son calculadas matemáticamente — úsalas para CALIBRAR el stake.
+- contextoLiga.tasaBaseOver25Liga: tasa histórica de Over 2.5 en esa liga. Si la tasa de la liga es < 52%, reduce 5% la probabilidad de Over. Si alertaLiga dice "Liga defensiva", baja el stake en 1 nivel.
+- forma5: forma reciente ponderada de los últimos 5 partidos. Si un equipo tiene forma5.nota = "Forma mala" (≤5 puntos), reduce 8% la prob de victoria.
+- cuotasReales: cuotas reales de Bet365. Usa ESTAS cuotas para el campo "Cuota mínima" del pick (no inventes cuotas). Si no hay cuotas reales, mantén las estimadas.
+- prediccionAPI: predicción del modelo de API-Football. Úsala como señal de confirmación — si coincide con tu análisis, sube el stake en 0.5. Si contradice, baja el stake en 1.
 
 INSTRUCCIONES PARA MOMENTUM EN VIVO:
 Si el JSON incluye "momentumEnVivo", úsalo para detectar oportunidades en tiempo real:
@@ -1407,12 +1529,12 @@ Si hay 2+ goles de diferencia en el marcador:
 - PERMITIDO: Corners Over/Under, Tarjetas Over, BTTS, Next Goal del perdedor, Over goles 2T si va 2-0 al HT
 
 CRITERIO DE STAKE:
-10/10: +80% probabilidad, cuota mín 1.85
-9/10:  +75% probabilidad, cuota mín 1.75
-8/10:  +70% probabilidad, cuota mín 1.65
-7/10:  +68% probabilidad + EV positivo, cuota mín 1.55
-6/10:  +60% probabilidad, cuota mín 1.50
-5/10:  +55% probabilidad, cuota mín 1.45
+10/10: +80% probabilidad, cuota mín 1.90
+9/10:  +75% probabilidad, cuota mín 1.80
+8/10:  +70% probabilidad, cuota mín 1.70
+7/10:  +68% probabilidad + EV positivo, cuota mín 1.65
+6/10:  +63% probabilidad, cuota mín 1.65
+5/10:  +58% probabilidad, cuota mín 1.65
 1-4:   NUNCA publicar
 
 REGLA OBLIGATORIA: SIEMPRE emite mínimo 2 picks por consulta. Si la confianza es baja, usa stake 5-6 con cuota conservadora. NUNCA respondas "sin picks de valor" — siempre hay algo apostable. El stake comunica la confianza, el usuario decide.
@@ -1465,6 +1587,12 @@ REGLAS DE PICKS — OBLIGATORIAS:
 Responde en español. NUNCA inventes estadísticas. Usa SOLO los datos que recibes.`;
 
 const PICKS_HOY_SYSTEM = `${TIPSTER_SYSTEM}
+
+FILTROS ADICIONALES PARA PICKS DEL DÍA:
+- PROHIBIDO recomendar mercados AH_HOME, AH_AWAY o DNB_HOME en picks del día
+- PROHIBIDO incluir partidos de Bundesliga, Primeira Liga o Liga Argentina en picks del día
+- CUOTA MÍNIMA ABSOLUTA: 1.65 para cualquier pick del día. Cualquier cuota menor se descarta.
+- Stake 7 SOLO si probabilidad ≥ 70% + EV > +8%. Si no cumple ambas condiciones, es stake 6 máximo.
 
 INSTRUCCIÓN ESPECIAL PARA PICKS DEL DÍA:
 Emite EXACTAMENTE 3 picks individuales (partidos diferentes) + 1 APUESTA COMBINADA al final.
@@ -1885,7 +2013,8 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   }
 
   await bot.sendMessage(chatId, '🔍 Consultando nuestra base de datos estadística...');
-  const fixtures = await getFixturesByDate(today);
+  const allFixtures = await getFixturesByDate(today);
+  const fixtures = allFixtures.filter(f => !PICKS_EXCLUDE_LEAGUES.has(f.leagueId));
 
   if (fixtures.length === 0) {
     return bot.sendMessage(chatId, `😔 No hay partidos en las ligas monitoreadas hoy (${today}).`);
@@ -1913,7 +2042,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   const enriched = selected.map((f, i) => {
     const homeStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
     const awayStats = statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
-    const probBlock = buildProbBlock(homeStats, awayStats, []);
+    const probBlock = buildProbBlock(homeStats, awayStats, [], f.leagueId);
     return {
       fixtureId:      f.fixtureId,
       liga:           f.leagueName,
@@ -1927,6 +2056,22 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     };
   });
 
+  // Fetch real odds + API predictions for selected fixtures (batched to save API calls)
+  await bot.sendMessage(chatId, `📈 Consultando cuotas reales y predicciones...`);
+  const oddsResults = await Promise.allSettled(
+    selected.map(f => getRealOdds(f.fixtureId))
+  );
+  const predResults = await Promise.allSettled(
+    selected.map(f => getApiPrediction(f.fixtureId))
+  );
+  // Merge into enriched
+  for (let i = 0; i < enriched.length; i++) {
+    const odds = oddsResults[i].status === 'fulfilled' ? oddsResults[i].value : null;
+    const pred = predResults[i].status === 'fulfilled' ? predResults[i].value : null;
+    if (odds) enriched[i].cuotasReales = odds;
+    if (pred) enriched[i].prediccionAPI = pred;
+  }
+
   await bot.sendMessage(chatId, `🧠 Calculando picks de valor...`);
 
   const picksText = await sonnet(
@@ -1939,6 +2084,125 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   await sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
   recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
+}
+
+// ─── Sistema del Día (admin-only) ────────────────────────────────────────────
+// Escanea TODOS los partidos de hoy, calcula EV por pick y arma la apuesta de sistema
+// óptima (2/3, 3/4, 3/5 etc.) basada en probabilidades Poisson + cuotas reales.
+// No aparece en el menú principal — solo accesible con la keyword "sistema hoy".
+
+const SISTEMA_HOY_SYSTEM = `Eres un matemático experto en apuestas de sistema. Recibes una lista de picks candidatos con sus probabilidades estimadas y cuotas. Tu misión:
+
+1. FILTRAR picks con prob ≥ 55% y EV ≥ +5% (EV = prob × cuota - 1).
+2. SELECCIONAR los 3 a 5 mejores picks ordenados por EV descendente.
+3. DECIDIR el tipo de sistema óptimo:
+   - 3 picks → Sistema 2/3 (3 dobles): P(≥1 acierto) ≈ 96%, P(≥2 aciertos) ≈ 75%
+   - 4 picks → Sistema 3/4 (4 triples): P(≥2 triples) ≈ 73%, mejor EV por unidad
+   - 5 picks → Sistema 3/5 (10 triples): P(≥6 triples) ≈ 89.6%, EV total +176%
+   REGLA: si p×cuota_promedio > 1.0, el sistema más largo (triples) es mejor matemáticamente.
+4. CALCULAR la apuesta sugerida: stake total = 2-3% bankroll. Distribuir en combinaciones.
+5. MOSTRAR el resultado en este formato EXACTO:
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+🎯 *SISTEMA DEL DÍA — [FECHA]*
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+📌 *PICKS SELECCIONADOS* (ordenados por EV):
+
+[N]. [Local] vs [Visitante] — [Liga]
+   🕐 [Hora] | 📊 Mercado: *[mercado]* | Cuota: *[cuota]*
+   ✅ Prob estimada: [X]% | EV: [+X.X]%
+
+[repetir para cada pick]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔢 *ESTRUCTURA DEL SISTEMA*
+
+Tipo: Sistema [K]/[N] — [total combinaciones] [dobles/triples]
+Combinaciones: [listar cada combinación: Pick1 + Pick2 = cuota XX × YY = ~Z.ZZ]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+💰 *CÁLCULO DE STAKE*
+
+• Bankroll de referencia: $100.000 (ajusta según tu capital real)
+• Stake por combinación: $[X] (total $[Y] = [Z]% bankroll)
+• Retorno mínimo (1 combinación ganada): $[A]
+• Retorno medio (50% combinaciones): $[B]
+• Retorno máximo (100% combinaciones): $[C]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+📐 *MATEMÁTICA DEL SISTEMA*
+
+• Probabilidad de rentabilidad: [X]%
+• EV total del sistema: [+X.X]%
+• Break-even: necesitas ganar [K] de [N] combinaciones
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+Responde SOLO con el análisis del sistema. No saludes ni des introducciones. Usa SOLO los datos que recibes.`;
+
+async function handleSistemaHoy(chatId) {
+  const today = todayDate();
+  await bot.sendMessage(chatId, '🔬 *Sistema del Día* — Escaneando todos los partidos disponibles...', { parse_mode: 'Markdown' });
+
+  // 1. Obtener TODOS los fixtures del día (sin filtro de ligas excluidas)
+  const allFixtures = await getFixturesByDate(today);
+  if (allFixtures.length === 0) {
+    return bot.sendMessage(chatId, `😔 No hay partidos hoy (${today}) en las ligas monitoreadas.`);
+  }
+
+  // 2. Ordenar por prioridad de liga y tomar top 12 para analizar
+  const candidates = [...allFixtures]
+    .sort((a, b) => (LEAGUE_PRIORITY[b.leagueId] || 0) - (LEAGUE_PRIORITY[a.leagueId] || 0))
+    .slice(0, 12);
+
+  await bot.sendMessage(chatId, `📊 ${allFixtures.length} partidos encontrados. Analizando top ${candidates.length} con estadísticas + cuotas...`);
+
+  // 3. Traer estadísticas en batches
+  const statsPairs = candidates.flatMap(f => [
+    getTeamStats(f.homeId, f.leagueId),
+    getTeamStats(f.awayId, f.leagueId),
+  ]);
+  const statsResults = [];
+  for (let i = 0; i < statsPairs.length; i += 4) {
+    const batch = await Promise.allSettled(statsPairs.slice(i, i + 4));
+    statsResults.push(...batch);
+    if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 5000));
+  }
+
+  // 4. Enriquecer con Poisson + cuotas reales
+  const enriched = candidates.map((f, i) => {
+    const homeStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
+    const awayStats = statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
+    const probBlock = buildProbBlock(homeStats, awayStats, [], f.leagueId);
+    return {
+      fixtureId:    f.fixtureId,
+      liga:         f.leagueName,
+      local:        f.homeTeam,
+      visitante:    f.awayTeam,
+      hora:         formatHour(f.date),
+      statsLocal:   homeStats,
+      statsVisitante: awayStats,
+      ...(probBlock && { probabilidadesCalculadas: probBlock }),
+    };
+  });
+
+  // 5. Cuotas reales para calcular EV real
+  await bot.sendMessage(chatId, '📈 Consultando cuotas pre-partido...');
+  const oddsResults = await Promise.allSettled(candidates.map(f => getRealOdds(f.fixtureId)));
+  for (let i = 0; i < enriched.length; i++) {
+    const odds = oddsResults[i].status === 'fulfilled' ? oddsResults[i].value : null;
+    if (odds) enriched[i].cuotasReales = odds;
+  }
+
+  await bot.sendMessage(chatId, '🧮 Calculando sistema óptimo...');
+
+  const sistemaText = await sonnet(
+    SISTEMA_HOY_SYSTEM,
+    `Fecha: ${today}. Partidos disponibles para armar el sistema. SELECCIONA solo picks pre-partido (1T Over 0.5, BTTS, Result 1T, etc.) con cuota MÍNIMA 1.77 y prob ≥ 55%.\n\nDATA:\n${JSON.stringify(enriched, null, 2)}`
+  );
+
+  await sendLong(chatId, sistemaText, { parse_mode: 'Markdown' });
 }
 
 async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
@@ -2068,7 +2332,7 @@ async function handlePartido(chatId, teamName, countryHint = '') {
   const liveStatsData= (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
 
   // Calcular probabilidades con modelo de Poisson
-  const probBlock = buildProbBlock(homeStatsData, awayStatsData, h2hData);
+  const probBlock = buildProbBlock(homeStatsData, awayStatsData, h2hData, leagueId);
 
   // Momentum y proyecciones en vivo
   const momentum   = isLive ? calcLiveMomentum(liveStatsData, homeTeam, awayTeam) : null;
@@ -2126,7 +2390,11 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
   const displayName = leagueName || 'todas las ligas';
   await bot.sendMessage(chatId, `📡 Obteniendo datos en tiempo real (${displayName})...`);
 
-  const liveFixtures = await getLiveFixtures(leagueId);
+  let liveFixtures = await getLiveFixtures(leagueId);
+  // En picks en vivo automáticos (sin liga específica), excluir ligas con mal historial
+  if (!leagueId) {
+    liveFixtures = liveFixtures.filter(f => !PICKS_EXCLUDE_LEAGUES.has(f.leagueId));
+  }
   console.log(`📊 Partidos en vivo encontrados: ${liveFixtures.length}`);
 
   if (liveFixtures.length === 0) {
@@ -2900,6 +3168,11 @@ bot.on('message', async (msg) => {
     function preDetectIntent(t) {
       const q = t.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
 
+      // Sistema del Día — solo admin (no aparece en menú público)
+      if (ADMIN_IDS.has(telegramId) && /sistema\s*(del?\s*)?(dia|hoy|d[íi]a)/.test(q)) {
+        return { intencion: 'sistema_hoy', pregunta_especifica: t };
+      }
+
       // Alerta de gol — debe ir ANTES de en_vivo para capturar "gol en vivo"
       if (/alerta.{0,6}gol|gol.{0,10}(en\s*vivo|vivo|live|ahora|ahora mismo)|probabilidad.{0,6}gol|donde.{0,10}gol|partido.{0,10}gol|next.{0,4}goal/.test(q)) {
         return { intencion: 'alerta_gol', pregunta_especifica: t };
@@ -2964,6 +3237,9 @@ bot.on('message', async (msg) => {
     const forceRefresh = /\b(actualizar|refresh|forzar|nuevo|recalcul|regenera)\b/i.test(text);
 
     switch (intencion) {
+      case 'sistema_hoy':
+        await handleSistemaHoy(chatId);
+        break;
       case 'picks_hoy':
         await handlePicksHoy(chatId, forceRefresh);
         break;
@@ -3063,7 +3339,7 @@ async function handlePartidoConTeam(chatId, teamData, intent = {}) {
   const homeStatsData = homeStatsRes.status === 'fulfilled'  ? homeStatsRes.value  : null;
   const awayStatsData = awayStatsRes.status === 'fulfilled'  ? awayStatsRes.value  : null;
   const liveStatsData = (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
-  const probBlock     = buildProbBlock(homeStatsData, awayStatsData, h2hData);
+  const probBlock     = buildProbBlock(homeStatsData, awayStatsData, h2hData, leagueId);
   const momentum      = isLive ? calcLiveMomentum(liveStatsData, homeTeam, awayTeam) : null;
   const elapsed       = nextRaw.fixture?.status?.elapsed || 0;
   const cornersProj   = isLive && elapsed > 0 ? calcLiveProjection((homeStats(liveStatsData)?.['Corner Kicks']??0)+(awayStats(liveStatsData)?.['Corner Kicks']??0), elapsed) : null;
