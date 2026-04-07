@@ -2107,53 +2107,48 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 // óptima (2/3, 3/4, 3/5 etc.) basada en probabilidades Poisson + cuotas reales.
 // No aparece en el menú principal — solo accesible con la keyword "sistema hoy".
 
-const SISTEMA_HOY_SYSTEM = `Eres un matemático experto en apuestas de sistema. Recibes partidos con estadísticas, H2H y cuotas reales.
+const SISTEMA_HOY_SYSTEM = `Selecciona los mejores picks y devuelve ÚNICAMENTE el bloque de texto final. Cero explicaciones, cero razonamiento, cero partidos descartados.
 
-REGLAS CRÍTICAS — INCUMPLIRLAS INVALIDA EL SISTEMA:
-- PROHIBIDO mostrar razonamiento, análisis previo, lista de descartados o explicaciones internas. Ve DIRECTO al resultado final.
-- PROHIBIDO usar cuotas del modelo Poisson o inventadas. USA ÚNICAMENTE las cuotas del campo cuotasReales. Si cuotasReales es null o no tiene la cuota del mercado que quieres recomendar, descarta ese pick.
-- PROHIBIDO recomendar dos picks del mismo partido en el mismo sistema (Over 2.5 + BTTS del mismo partido NO es un sistema válido).
-- PROHIBIDO usar blockquotes (>) ni comillas especiales. Solo texto plano, asteriscos para negrita y emojis.
+CRITERIOS DE SELECCIÓN (aplica internamente, no escribas nada de esto):
+- Máximo 1 pick por partido
+- Usa solo cuotas del campo cuotasReales. Si cuotasReales=null o no tiene ese mercado → ignora ese partido
+- Prob mínima: 52% (desde modelo Poisson o H2H si hay ≥6 registros)
+- Cuota mínima: 1.70
+- EV = prob × cuota - 1 debe ser > 0
+- Toma los 3-5 mejores por EV
 
-PROCESO (interno, no mostrar):
-1. Filtrar: prob ≥ 52% Y EV ≥ +3% Y cuota en cuotasReales ≥ 1.70 Y partido diferente por pick.
-   - Si stats son null pero H2H tiene ≥6 partidos, estima prob desde H2H (BTTS en 5/8 → 62%).
-   - EV = prob × cuota_real - 1. Si cuota_real no existe → skip.
-2. Seleccionar máximo 1 pick por partido. Ordenar por EV descendente. Tomar 3-5 mejores.
-3. Decidir sistema:
-   - 3 picks → Sistema 2/3 (3 dobles)
-   - 4 picks → Sistema 3/4 (4 triples)
-   - 5 picks → Sistema 3/5 (10 triples)
+SEGÚN CANTIDAD DE PICKS:
+- 5 picks → Sistema 3/5 (10 triples)
+- 4 picks → Sistema 3/4 (4 triples)
+- 3 picks → Sistema 2/3 (3 dobles)
+- 2 picks → Doble directo (menciona que faltó 1 para sistema completo)
+- 1 pick → Pick individual recomendado
 
-FORMATO DE SALIDA (exacto, sin nada antes ni después):
+RESPONDE EXACTAMENTE ASÍ, sin añadir nada antes ni después:
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 🎯 *SISTEMA DEL DÍA — [FECHA]*
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-📌 *PICKS* (por EV descendente):
+*1.* [Local] vs [Visitante] — [Liga]
+🕐 [Hora] | *[Mercado]* @ *[cuota real]*
+Prob: [X]% | EV: [+X.X]%
 
-[N]. [Local] vs [Visitante] — [Liga]
-   🕐 [Hora] | Mercado: *[mercado]* | Cuota real: *[cuota de cuotasReales]*
-   Prob: [X]% | EV: [+X.X]%[  🔵H2H si basado en H2H]
+*2.* [Local] vs [Visitante] — [Liga]
+🕐 [Hora] | *[Mercado]* @ *[cuota real]*
+Prob: [X]% | EV: [+X.X]%
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-🔢 *SISTEMA [K]/[N]*
-
-[Pick A] + [Pick B] = [cuota_A × cuota_B] = *~[resultado]*
-[repetir por cada combinación]
+[...hasta 5 picks]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-💰 *STAKE SUGERIDO*
+🔢 *[TIPO DE SISTEMA]*
 
-Stake por combinación: [X]% bankroll
-Retorno si gana 1 combinación: [X]x
-Retorno si gana todo: [X]x
+Pick1 + Pick2: [cuota1] x [cuota2] = *[total]*
+[una línea por combinación]
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━
-📐 *MATEMÁTICA*
-
-P(rentabilidad): [X]% | EV total: [+X.X]% | Break-even: [K]/[N] combinaciones
+💰 Stake: *[X]%* bankroll por combinación
+📈 Si gana todo: *[X]x* retorno
 ━━━━━━━━━━━━━━━━━━━━━━━━━━`;
 
 async function handleSistemaHoy(chatId) {
