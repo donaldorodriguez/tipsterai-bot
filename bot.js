@@ -2206,7 +2206,7 @@ async function handleSistemaHoy(chatId) {
 
   const sistemaText = await sonnet(
     SISTEMA_HOY_SYSTEM,
-    `Fecha: ${today}. Partidos disponibles para armar el sistema. SELECCIONA solo picks pre-partido (1T Over 0.5, BTTS, Result 1T, goles, etc.) con cuota MÍNIMA 1.77 y prob ≥ 52%. Si stats son null pero H2H tiene ≥6 partidos, úsalo para estimar probabilidad.\n\nDATA:\n${JSON.stringify(enriched, null, 2)}`
+    `Fecha: ${today}. Partidos disponibles para armar el sistema. SELECCIONA solo picks pre-partido (1T Over 0.5, BTTS, Result 1T, goles, etc.) con cuota MÍNIMA 1.70 y prob ≥ 52%. Si stats son null pero H2H tiene ≥6 partidos, úsalo para estimar probabilidad.\n\nDATA:\n${JSON.stringify(enriched, null, 2)}`
   );
 
   await sendLong(chatId, sistemaText, { parse_mode: 'Markdown' });
