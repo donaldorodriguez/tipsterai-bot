@@ -43,96 +43,142 @@ API.interceptors.response.use(res => {
 // ─── League config ────────────────────────────────────────────────────────────
 
 const LEAGUE_SEASONS = {
+  // Europa — Top 5
   39:2025, 140:2025, 135:2025, 78:2025, 61:2025,
-  2:2025,  3:2025,   848:2025, 88:2025, 94:2025,
-  207:2025,179:2025, 197:2025, 169:2025,144:2025,
-  235:2025,40:2025,  141:2025, 136:2025,79:2025,
-  62:2025, 89:2025,
-  671:2025, // Azerbaijan Premier League
-  11:2026, 9:2026,   71:2026,  65:2026, 128:2026,
-  262:2026,253:2026, 72:2026,  66:2026, 129:2026,
-  263:2026,240:2026,
-  203:2025,98:2025,  333:2025, 218:2025,
+  // Europa — Segundas divisiones top 5
+  40:2025, 141:2025, 136:2025, 79:2025, 62:2025,
+  // Europa — Copas y ligas medianas
+  2:2025,  3:2025,   848:2025, 88:2025, 89:2025,
+  94:2025, 95:2025,  // Portugal 1a y 2a
+  179:2025,180:2025, // Scotland 1a y 2a
+  144:2025,169:2025, // Belgium
+  197:2025,          // Greece Super League 1
+  203:2025,          // Turkey Süper Lig
+  207:2025,          // Switzerland Super League
+  210:2025,          // Croatia HNL
+  218:2025,          // Austria Bundesliga
+  235:2025,          // Russia Premier Liga
+  333:2025,          // Ukraine Premier League
+  98:2025,           // Japan J League
+  // Europa — Más ligas
+  119:2025,          // Denmark Superliga
+  106:2025,          // Poland Ekstraklasa
+  283:2025,          // Romania Liga I
+  345:2025,          // Czech Fortuna Liga
+  286:2025,          // Serbia Super Liga
+  172:2025,          // Bulgaria First League
+  113:2026,          // Sweden Allsvenskan
+  // Medio Oriente / Asia / Africa
+  307:2025,          // Saudi Pro League
+  233:2025,          // Egypt Premier League
+  318:2025,          // Cyprus First Division
+  292:2026,          // South Korea K League 1
+  // Sudamérica
+  11:2026, 9:2026, 71:2026, 128:2026, 239:2026,
+  262:2026,253:2026, 72:2026, 66:2026, 129:2026,
+  263:2026,240:2026, 65:2026,
+  // Colombia
+  239:2026,          // Liga BetPlay Colombia
+  // Resto
+  671:2025,          // Azerbaijan Premier League
+  103:2026,          // Norway Eliteserien
+  // Competiciones internacionales
   4:2025,  5:2025,   480:2025,
-  210:2025,103:2025, // Chipre Primera División, Noruega Eliteserien
-  239:2026, // Liga BetPlay Colombia (Primera A) — ID real
-  10:2026,  // Amistosos Internacionales
-  1:2026,   // World Cup
-  6:2026,   // World Cup Qualifiers
-  7:2026,   // AFC Asian Cup
-  8:2026,   // Copa Africa (AFCON)
-  29:2026,  // UEFA Nations League Playoffs
-  32:2026,  // CONMEBOL Qualifiers (Eliminatorias Sudamericanas)
+  10:2026, 1:2026,   6:2026,  7:2026,  8:2026,
+  29:2026, 32:2026,
 };
 
 const LEAGUE_IDS = new Set([
-  39,140,135,78,61,2,3,848,11,9,
-  71,239,128,262,253,88,94,207,203,169,
-  235,144,197,218,333,98,179,4,5,480,
-  240,40,141,136,79,62,72,66,129,263,89,
-  210,103,
-  671,  // Azerbaijan Premier League
-  10,   // Amistosos Internacionales
-  1,    // World Cup
-  6,    // World Cup Qualifiers
-  7,    // AFC Asian Cup
-  8,    // Copa Africa (AFCON)
-  29,   // UEFA Nations League Playoffs
-  32,   // CONMEBOL Qualifiers (Eliminatorias Sudamericanas)
+  // Top 5 Europa + segundas
+  39,40,140,141,135,136,78,79,61,62,
+  // Otras ligas europeas
+  2,3,848,88,89,94,95,179,180,144,169,197,
+  203,207,210,218,235,333, // Turkey,Switzerland,Croatia,Austria,Russia,Ukraine
+  98,119,106,283,345,286,172,113, // Japan,Denmark,Poland,Romania,Czech,Serbia,Bulgaria,Sweden
+  // Oriente Medio / Asia / Africa
+  307,233,318,292,
+  // Sudamérica
+  11,9,71,128,239,262,253,72,66,129,263,240,65,
+  // Otros
+  671,103,
+  // Competiciones internacionales
+  1,4,5,6,7,8,10,29,32,480,
 ]);
 
 const LEAGUE_MAP = {
+  // Top 5 Europa
   39: { name:'Premier League',     country:'England'     },
   140:{ name:'LaLiga',             country:'Spain'       },
   135:{ name:'Serie A',            country:'Italy'       },
   78: { name:'Bundesliga',         country:'Germany'     },
   61: { name:'Ligue 1',            country:'France'      },
-  2:  { name:'Champions League',   country:'Europe'      },
-  3:  { name:'Europa League',      country:'Europe'      },
-  848:{ name:'Conference League',  country:'Europe'      },
-  11: { name:'Libertadores',       country:'South Am.'   },
-  9:  { name:'Sudamericana',       country:'South Am.'   },
-  71: { name:'Brasileirao',        country:'Brazil'      },
-  239:{ name:'Liga BetPlay',        country:'Colombia'    },
-  128:{ name:'Liga Argentina',     country:'Argentina'   },
-  262:{ name:'Liga MX',            country:'Mexico'      },
-  253:{ name:'MLS',                country:'USA'         },
-  88: { name:'Eredivisie',         country:'Netherlands' },
-  94: { name:'Primeira Liga',      country:'Portugal'    },
-  207:{ name:'Super Lig',          country:'Turkey'      },
-  203:{ name:'Saudi Pro League',   country:'Saudi Arabia'},
-  169:{ name:'Jupiler Pro',        country:'Belgium'     },
-  235:{ name:'Premier Liga Rusia', country:'Russia'      },
-  144:{ name:'Jupiler Pro League', country:'Belgium'     },
-  197:{ name:'Super League Grecia',country:'Greece'      },
-  218:{ name:'Liga Egipto',        country:'Egypt'       },
-  333:{ name:'K League',           country:'South Korea' },
-  98: { name:'J League',           country:'Japan'       },
-  179:{ name:'Scottish Premier',   country:'Scotland'    },
-  4:  { name:'Euro Championship',  country:'Europe'      },
-  5:  { name:'Nations League',     country:'Europe'      },
-  480:{ name:'Copa America',       country:'South Am.'   },
-  10: { name:'Amistosos Int.',     country:'Mundial'     },
-  1:  { name:'World Cup',          country:'Mundial'     },
-  6:  { name:'WC Qualifiers',      country:'Mundial'     },
-  7:  { name:'AFC Asian Cup',      country:'Asia'        },
-  8:  { name:'Copa Africa',        country:'Africa'      },
-  29: { name:'Nations League Play',country:'Europe'      },
-  32: { name:'Eliminatorias CONMEBOL', country:'South Am.'},
-  240:{ name:'Torneo Águila',      country:'Colombia'    },
+  // Top 5 segundas divisiones
   40: { name:'Championship',       country:'England'     },
   141:{ name:'LaLiga2',            country:'Spain'       },
   136:{ name:'Serie B',            country:'Italy'       },
   79: { name:'2.Bundesliga',       country:'Germany'     },
   62: { name:'Ligue 2',            country:'France'      },
-  72: { name:'Brasileirao B',      country:'Brazil'      },
-  66: { name:'Liga Colombia B',    country:'Colombia'    },
-  129:{ name:'Primera B Argentina',country:'Argentina'   },
-  263:{ name:'Ascenso MX',         country:'Mexico'      },
+  // Copas europeas
+  2:  { name:'Champions League',   country:'Europe'      },
+  3:  { name:'Europa League',      country:'Europe'      },
+  848:{ name:'Conference League',  country:'Europe'      },
+  // Ligas europeas medianas (IDs verificados con API-Football)
+  88: { name:'Eredivisie',         country:'Netherlands' },
   89: { name:'Eerste Divisie',     country:'Netherlands' },
-  210:{ name:'Primera División',   country:'Cyprus'      },
+  94: { name:'Primeira Liga',      country:'Portugal'    },
+  95: { name:'Segunda Liga',       country:'Portugal'    },
+  179:{ name:'Scottish Premier',   country:'Scotland'    },
+  180:{ name:'Scottish Championship', country:'Scotland' },
+  144:{ name:'Jupiler Pro League', country:'Belgium'     },
+  169:{ name:'Jupiler Pro',        country:'Belgium'     },
+  197:{ name:'Super League 1',     country:'Greece'      },
+  203:{ name:'Süper Lig',          country:'Turkey'      },  // ← ID correcto Turkey
+  207:{ name:'Super League',       country:'Switzerland' }, // ← ID correcto Suiza
+  210:{ name:'HNL',                country:'Croatia'     }, // ← ID correcto Croacia
+  218:{ name:'Bundesliga',         country:'Austria'     }, // ← ID correcto Austria
+  235:{ name:'Premier Liga',       country:'Russia'      },
+  333:{ name:'Premier League',     country:'Ukraine'     }, // ← ID correcto Ucrania
+  // Ligas europeas adicionales (verificadas)
+  119:{ name:'Superliga',          country:'Denmark'     },
+  106:{ name:'Ekstraklasa',        country:'Poland'      },
+  283:{ name:'Liga I',             country:'Romania'     },
+  345:{ name:'Fortuna Liga',       country:'Czech Rep.'  },
+  286:{ name:'Super Liga',         country:'Serbia'      },
+  172:{ name:'First League',       country:'Bulgaria'    },
+  113:{ name:'Allsvenskan',        country:'Sweden'      },
   103:{ name:'Eliteserien',        country:'Norway'      },
-  671:{ name:'Premier League',     country:'Azerbaijan'  },
+  98: { name:'J League',           country:'Japan'       },
+  // Oriente Medio / Asia / Africa (IDs verificados)
+  307:{ name:'Pro League',         country:'Saudi Arabia'},// ← ID correcto Saudi
+  233:{ name:'Premier League',     country:'Egypt'       }, // ← ID correcto Egypt
+  318:{ name:'First Division',     country:'Cyprus'      }, // ← ID correcto Cyprus
+  292:{ name:'K League 1',         country:'South Korea' }, // ← ID correcto Korea
+  // Sudamérica
+  11: { name:'Libertadores',       country:'South Am.'   },
+  9:  { name:'Sudamericana',       country:'South Am.'   },
+  71: { name:'Brasileirao',        country:'Brazil'      },
+  72: { name:'Brasileirao B',      country:'Brazil'      },
+  128:{ name:'Liga Argentina',     country:'Argentina'   },
+  129:{ name:'Primera B Argentina',country:'Argentina'   },
+  239:{ name:'Liga BetPlay',       country:'Colombia'    },
+  240:{ name:'Torneo Águila',      country:'Colombia'    },
+  66: { name:'Liga Colombia B',    country:'Colombia'    },
+  262:{ name:'Liga MX',            country:'Mexico'      },
+  263:{ name:'Ascenso MX',         country:'Mexico'      },
+  253:{ name:'MLS',                country:'USA'         },
+  // Competiciones internacionales
+  1:  { name:'World Cup',          country:'Mundial'     },
+  4:  { name:'Euro Championship',  country:'Europe'      },
+  5:  { name:'Nations League',     country:'Europe'      },
+  6:  { name:'WC Qualifiers',      country:'Mundial'     },
+  7:  { name:'AFC Asian Cup',      country:'Asia'        },
+  8:  { name:'Copa Africa',        country:'Africa'      },
+  10: { name:'Amistosos Int.',     country:'Mundial'     },
+  29: { name:'Nations League Play',country:'Europe'      },
+  32: { name:'Eliminatorias CONMEBOL', country:'South Am.'},
+  480:{ name:'Copa America',       country:'South Am.'   },
+  // Otros
+  671:{ name:'Premyer Liqa',       country:'Azerbaijan'  },
 };
 
 // Maps user-written league names → league ID
@@ -159,18 +205,40 @@ const LEAGUE_NAME_TO_ID = {
   'mls':253,
   'eredivisie':88, 'eerste divisie':89,
   'primeira liga':94, 'liga nos':94,
-  'super lig':207, 'superlig':207, 'turquia':207, 'turkey':207, 'liga turca':207, 'tff':207, 'turkiye':207,
-  'saudi pro league':203, 'saudi league':203,
-  'jupiler pro league':144, 'jupiler':144,
-  'super league grecia':197, 'super league':197,
-  'liga egipto':218,
-  'k league':333, 'k-league':333,
+  // Turkey — ID correcto 203
+  'super lig':203, 'superlig':203, 'turquia':203, 'turkey':203, 'liga turca':203, 'tff':203, 'turkiye':203,
+  // Saudi Arabia — ID correcto 307
+  'saudi pro league':307, 'saudi league':307, 'arabia saudita':307, 'saudi':307,
+  // Suiza — ID correcto 207
+  'switzerland':207, 'suiza':207, 'super league suiza':207, 'swiss super league':207,
+  // Croacia — ID correcto 210
+  'croacia':210, 'croatia':210, 'hnl':210, 'liga croacia':210,
+  // Austria — ID correcto 218
+  'austria':218, 'austria bundesliga':218, 'liga austria':218,
+  // Ucrania — ID correcto 333
+  'ucrania':333, 'ukraine':333, 'liga ucrania':333, 'premier league ucrania':333,
+  // Egipto — ID correcto 233
+  'liga egipto':233, 'egypt':233, 'egipto':233,
+  // Chipre — ID correcto 318
+  'chipre':318, 'primera division chipre':318, 'primera división chipre':318, 'cyprus':318,
+  // Corea — ID correcto 292
+  'k league':292, 'k-league':292, 'k league 1':292, 'corea':292, 'south korea':292,
   'j league':98, 'j1 league':98,
-  'scottish premier':179, 'scottish premiership':179,
+  'scottish premier':179, 'scottish premiership':179, 'scotland':179,
+  'scottish championship':180,
   'championship':40,
-  'chipre':210, 'primera division chipre':210, 'primera división chipre':210, 'cyprus':210,
+  // Nuevas ligas europeas
+  'dinamarca':119, 'denmark':119, 'superliga dinamarca':119, 'danish superliga':119,
+  'polonia':106, 'poland':106, 'ekstraklasa':106,
+  'rumania':283, 'romania':283, 'liga i':283, 'liga rumania':283,
+  'republica checa':345, 'czech':345, 'fortuna liga':345, 'czech liga':345,
+  'serbia':286, 'super liga serbia':286,
+  'bulgaria':172, 'liga bulgaria':172, 'first league bulgaria':172, 'primera bulgaria':172,
+  'suecia':113, 'sweden':113, 'allsvenskan':113,
+  'segunda liga portugal':95, 'liga portugal 2':95,
+  'segunda liga':95,
   'noruega':103, 'eliteserien':103, 'norway':103,
-  'azerbaiyan':671, 'azerbaiyán':671, 'azerbaijan':671, 'liga azerbaiyan':671, 'liga azerbaiyán':671, 'premier league azerbaijan':671,
+  'azerbaiyan':671, 'azerbaiyán':671, 'azerbaijan':671, 'liga azerbaiyan':671, 'liga azerbaiyán':671,
   'amistosos':10, 'amistoso':10, 'amistosos internacionales':10, 'friendly':10, 'friendlies':10, 'internacional':10,
   'world cup':1, 'mundial':1, 'copa mundial':1,
   'eliminatorias':6, 'qualifiers':6, 'wc qualifiers':6, 'clasificatorias':6,
@@ -211,7 +279,27 @@ const LEAGUE_PRIORITY = {
   71:65,262:64,128:63,239:62,253:61,
   40:55,141:54,136:53,79:52,62:51,
   240:45,72:44,66:43,129:42,263:41,89:40,
-  210:38,103:37,671:35,
+  // Ligas europeas medianas
+  207:42, // Switzerland
+  210:41, // Croatia
+  218:40, // Austria
+  119:39, // Denmark
+  235:38, // Russia
+  333:37, // Ukraine
+  103:36, // Norway
+  106:35, // Poland
+  113:34, // Sweden
+  283:33, // Romania
+  286:32, // Serbia
+  345:31, // Czech
+  172:30, // Bulgaria
+  // Otros
+  671:25, // Azerbaijan
+  // Asia / Oriente Medio / Africa
+  307:28, // Saudi
+  292:27, // K League
+  233:26, // Egypt
+  318:24, // Cyprus
 };
 
 // Ligas excluidas de picks automáticos (picks de hoy, picks en vivo)
