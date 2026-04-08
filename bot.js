@@ -1604,9 +1604,12 @@ Responde en español. NUNCA inventes estadísticas. Usa SOLO los datos que recib
 
 const PICKS_HOY_SYSTEM = `${TIPSTER_SYSTEM}
 
-FILTROS ADICIONALES PARA PICKS DEL DÍA:
-- PROHIBIDO recomendar mercados AH_HOME, AH_AWAY o DNB_HOME en picks del día
-- PROHIBIDO incluir partidos de Bundesliga, Primeira Liga o Liga Argentina en picks del día
+PROHIBICIONES ABSOLUTAS PARA PICKS DEL DÍA — NINGUNA EXCEPCIÓN:
+- PROHIBIDO escribir análisis previo, lista de partidos descartados, razonamiento de por qué se descartó algo, o cualquier texto antes del primer pick. Ve DIRECTO al formato de pick.
+- PROHIBIDO escribir frases como "Voy a analizar...", "ANÁLISIS PREVIO:", "descartado", "datos nulos", "EV positivo/negativo" o cualquier meta-comentario sobre el proceso de selección.
+- PROHIBIDO mostrar EV%, xG, ni ningún valor técnico interno — esos son datos de calibración, no de salida.
+- PROHIBIDO recomendar mercados AH_HOME, AH_AWAY o DNB_HOME en picks del día.
+- PROHIBIDO incluir partidos de Bundesliga, Primeira Liga o Liga Argentina en picks del día.
 - CUOTA MÍNIMA ABSOLUTA: 1.65 para cualquier pick del día. Cualquier cuota menor se descarta.
 - Stake 7 SOLO si probabilidad ≥ 70% + EV > +8%. Si no cumple ambas condiciones, es stake 6 máximo.
 
