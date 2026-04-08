@@ -489,6 +489,34 @@ function normalizeTeamName(str) {
     .trim();
 }
 
+// IDs directos para equipos que la API no encuentra bien por búsqueda de texto
+// Formato: 'alias normalizado' → teamId (número)
+const TEAM_ID_OVERRIDES = {
+  // Saudi Pro League
+  'al ahli':          2929,
+  'al ahli saudi':    2929,
+  'al ahli sc':       2929,
+  'al ahli jeddah':   2929,
+  'al hilal':         2932,
+  'hilal':            2932,
+  'al nassr':         2939,
+  'nassr':            2939,
+  'al ittihad':       2938,
+  'ittihad':          2938,
+  'al qadsiah':       2933,
+  'al qadisiyah':     2933,
+  'al shabab':        2940,
+  'al ettifaq':       2934,
+  'ettifaq':          2934,
+  'al fateh':         2931,
+  'al taawoun':       2936,
+  'al taawon':        2936,
+  'al fayha':         2944,
+  'al khaleej':       2928,
+  'al hazm':          2945,
+  'damac':            2956,
+};
+
 // Aliases de nombres cortos/populares → nombre exacto en la API
 const TEAM_ALIASES = {
   'roma':            'AS Roma',
@@ -696,6 +724,13 @@ function scoreTeamResult(t, q, country = '', isNationalSearch = false) {
 
 async function searchTeam(name, countryHint = '') {
   const aliasKey = name.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+  // Lookup directo por ID (evita fallos de búsqueda de texto para equipos conocidos)
+  if (TEAM_ID_OVERRIDES[aliasKey]) {
+    const { data } = await API.get('/teams', { params: { id: TEAM_ID_OVERRIDES[aliasKey] } });
+    if (data.response?.[0]) return data.response[0];
+  }
+
   const stripped = name.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
   const resolvedName = TEAM_ALIASES[aliasKey] || stripped;
 
@@ -738,6 +773,13 @@ async function getTeamPlayingPriority(teamId) {
 
 async function findTeamWithButtons(chatId, name, countryHint = '', intent = null) {
   const aliasKey = name.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+
+  // Lookup directo por ID (evita fallos de búsqueda de texto para equipos conocidos)
+  if (TEAM_ID_OVERRIDES[aliasKey]) {
+    const { data } = await API.get('/teams', { params: { id: TEAM_ID_OVERRIDES[aliasKey] } });
+    if (data.response?.[0]) return data.response[0];
+  }
+
   const stripped = name.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // sin tildes
   const resolvedName = TEAM_ALIASES[aliasKey] || stripped;
 
