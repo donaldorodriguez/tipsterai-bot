@@ -574,6 +574,25 @@ const TEAM_ALIASES = {
   'tigres':          'Tigres UANL',
   'nacional':        'Club Nacional',
 
+  // ── Saudi Pro League ────────────────────────────────────────────────────
+  'al ahli':         'Al-Ahli Saudi FC',
+  'al ahli saudi':   'Al-Ahli Saudi FC',
+  'al ahli sc':      'Al-Ahli Saudi FC',
+  'al hilal':        'Al-Hilal',
+  'hilal':           'Al-Hilal',
+  'al nassr':        'Al-Nassr',
+  'nassr':           'Al-Nassr',
+  'al ittihad':      'Al-Ittihad',
+  'ittihad':         'Al-Ittihad',
+  'al qadsiah':      'Al-Qadsiah',
+  'al shabab':       'Al-Shabab',
+  'al ettifaq':      'Al-Ettifaq',
+  'al fateh':        'Al-Fateh',
+  'al taawoun':      'Al-Taawoun',
+  'al wehda':        'Al-Wehda',
+  'al fayha':        'Al-Fayha',
+  'al khaleej':      'Al-Khaleej',
+
   // ── Selecciones nacionales (español → inglés para API) ──────────────────
   'francia':         'France',
   'seleccion francesa': 'France',
@@ -651,7 +670,7 @@ function scoreTeamResult(t, q, country = '', isNationalSearch = false) {
   const WOMEN    = /\b(women|femenin[ao]|ladies|femmes|damen|vrouwen|mujer|femenino|fem\.?)\b/i;
   const LOW_TIER = /\b(primera\s*[cd]|tercera|cuarta|regional|sunday|indoor|futsal|beach\s*soccer)\b/i;
   const CLUB_PREFIX = /^(fc|cf|ac|as|afc|rc|sc|bk|fk|sk|vfb?|sv|ss|us|ud|cd|sd|rcd|real\s|atletico\s|sporting\s|dynamo\s|dinamo\s)/i;
-  const EURO_COUNTRIES = new Set(['switzerland','england','spain','italy','germany','france','netherlands','portugal','belgium','turkey','greece','russia','scotland','austria','sweden','norway','denmark','poland','ukraine','serbia','croatia','czech republic','romania','hungary','cyprus','israel','bulgaria']);
+  const EURO_COUNTRIES = new Set(['switzerland','england','spain','italy','germany','france','netherlands','portugal','belgium','turkey','greece','russia','scotland','austria','sweden','norway','denmark','poland','ukraine','serbia','croatia','czech republic','romania','hungary','cyprus','israel','bulgaria','saudi arabia','egypt','south korea','japan','brazil','argentina','colombia','mexico','usa','united states','china','morocco','algeria','nigeria','south africa']);
 
   let s = 0;
   if (tname === q) s += 100;
