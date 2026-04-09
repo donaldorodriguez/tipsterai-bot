@@ -1482,39 +1482,39 @@ function buildPickCandidates(enrichedFixtures) {
     // Al usuario se muestra cuota real + ODDS_DISPLAY_BUFFER.
     const markets = [
       // ── Resultado FT
-      { key: 'homeWin',     label: 'Victoria Local',       prob: probs.homeWin  / 100, oddsVal: odds.homeWin,  cat: 'result',    minOdds: 1.55, minProb: 0.58 },
-      { key: 'awayWin',     label: 'Victoria Visitante',   prob: probs.awayWin  / 100, oddsVal: odds.awayWin,  cat: 'result',    minOdds: 1.70, minProb: 0.55 },
+      { key: 'homeWin',     label: 'Victoria Local',       prob: probs.homeWin  / 100, oddsVal: odds.homeWin,  cat: 'result',    minOdds: 1.50, minProb: 0.52 },
+      { key: 'awayWin',     label: 'Victoria Visitante',   prob: probs.awayWin  / 100, oddsVal: odds.awayWin,  cat: 'result',    minOdds: 1.65, minProb: 0.50 },
       // ── Goles FT
-      { key: 'over25',      label: 'Más de 2.5 Goles',     prob: probs.over25   / 100, oddsVal: odds.over25,   cat: 'goals',     minOdds: 1.50, minProb: 0.60 },
-      { key: 'over35',      label: 'Más de 3.5 Goles',     prob: probs.over35   / 100, oddsVal: odds.over35,   cat: 'goals',     minOdds: 1.60, minProb: 0.52 },
-      { key: 'under25',     label: 'Menos de 2.5 Goles',   prob: probs.under25  / 100, oddsVal: odds.under25,  cat: 'goals',     minOdds: 1.50, minProb: 0.55 },
+      { key: 'over25',      label: 'Más de 2.5 Goles',     prob: probs.over25   / 100, oddsVal: odds.over25,   cat: 'goals',     minOdds: 1.45, minProb: 0.52 },
+      { key: 'over35',      label: 'Más de 3.5 Goles',     prob: probs.over35   / 100, oddsVal: odds.over35,   cat: 'goals',     minOdds: 1.55, minProb: 0.45 },
+      { key: 'under25',     label: 'Menos de 2.5 Goles',   prob: probs.under25  / 100, oddsVal: odds.under25,  cat: 'goals',     minOdds: 1.45, minProb: 0.50 },
       // ── BTTS
-      { key: 'btts',        label: 'Ambos Marcan (Sí)',     prob: probs.btts     / 100, oddsVal: odds.bttsYes,  cat: 'btts',      minOdds: 1.50, minProb: 0.65 },
+      { key: 'btts',        label: 'Ambos Marcan (Sí)',     prob: probs.btts     / 100, oddsVal: odds.bttsYes,  cat: 'btts',      minOdds: 1.45, minProb: 0.55 },
       // ── 1er tiempo — goles
-      { key: 'ht_over05',   label: 'Gol en el 1er Tiempo', prob: probs.htOver05 / 100, oddsVal: odds.over05_1T, cat: 'ht_goals', minOdds: 1.45, minProb: 0.62 },
-      { key: 'ht_over15',   label: 'Más de 1.5 Goles 1T',  prob: probs.htOver15 / 100, oddsVal: odds.over15_1T, cat: 'ht_goals', minOdds: 1.60, minProb: 0.52 },
+      { key: 'ht_over05',   label: 'Gol en el 1er Tiempo', prob: probs.htOver05 / 100, oddsVal: odds.over05_1T, cat: 'ht_goals', minOdds: 1.40, minProb: 0.55 },
+      { key: 'ht_over15',   label: 'Más de 1.5 Goles 1T',  prob: probs.htOver15 / 100, oddsVal: odds.over15_1T, cat: 'ht_goals', minOdds: 1.55, minProb: 0.45 },
       // ── 1er tiempo — resultado
-      { key: 'homeWin_1T',  label: 'Local Gana el 1er Tiempo',      prob: probs.htHomeWin / 100, oddsVal: odds.homeWin_1T, cat: 'ht_result', minOdds: 1.55, minProb: 0.52 },
-      { key: 'awayWin_1T',  label: 'Visitante Gana el 1er Tiempo',  prob: probs.htAwayWin / 100, oddsVal: odds.awayWin_1T, cat: 'ht_result', minOdds: 1.70, minProb: 0.50 },
+      { key: 'homeWin_1T',  label: 'Local Gana el 1er Tiempo',      prob: probs.htHomeWin / 100, oddsVal: odds.homeWin_1T, cat: 'ht_result', minOdds: 1.50, minProb: 0.45 },
+      { key: 'awayWin_1T',  label: 'Visitante Gana el 1er Tiempo',  prob: probs.htAwayWin / 100, oddsVal: odds.awayWin_1T, cat: 'ht_result', minOdds: 1.65, minProb: 0.42 },
       // ── Corners FT
-      { key: 'cornersOver75',  label: 'Corners Over 7.5',   prob: probs.cornersOver75  / 100, oddsVal: odds.cornersOver75,  cat: 'corners', minOdds: 1.50, minProb: 0.65 },
-      { key: 'cornersOver85',  label: 'Corners Over 8.5',   prob: probs.cornersOver85  / 100, oddsVal: odds.cornersOver85,  cat: 'corners', minOdds: 1.50, minProb: 0.58 },
-      { key: 'cornersOver95',  label: 'Corners Over 9.5',   prob: probs.cornersOver95  / 100, oddsVal: odds.cornersOver95,  cat: 'corners', minOdds: 1.55, minProb: 0.52 },
-      { key: 'cornersOver105', label: 'Corners Over 10.5',  prob: probs.cornersOver105 / 100, oddsVal: odds.cornersOver105, cat: 'corners', minOdds: 1.60, minProb: 0.50 },
-      { key: 'cornersUnder85', label: 'Corners Under 8.5',  prob: 1 - probs.cornersOver75 / 100, oddsVal: odds.cornersUnder85, cat: 'corners', minOdds: 1.50, minProb: 0.55 },
-      { key: 'cornersUnder95', label: 'Corners Under 9.5',  prob: 1 - probs.cornersOver85 / 100, oddsVal: odds.cornersUnder95, cat: 'corners', minOdds: 1.50, minProb: 0.55 },
+      { key: 'cornersOver75',  label: 'Corners Over 7.5',   prob: probs.cornersOver75  / 100, oddsVal: odds.cornersOver75,  cat: 'corners', minOdds: 1.45, minProb: 0.58 },
+      { key: 'cornersOver85',  label: 'Corners Over 8.5',   prob: probs.cornersOver85  / 100, oddsVal: odds.cornersOver85,  cat: 'corners', minOdds: 1.45, minProb: 0.52 },
+      { key: 'cornersOver95',  label: 'Corners Over 9.5',   prob: probs.cornersOver95  / 100, oddsVal: odds.cornersOver95,  cat: 'corners', minOdds: 1.50, minProb: 0.45 },
+      { key: 'cornersOver105', label: 'Corners Over 10.5',  prob: probs.cornersOver105 / 100, oddsVal: odds.cornersOver105, cat: 'corners', minOdds: 1.55, minProb: 0.40 },
+      { key: 'cornersUnder85', label: 'Corners Under 8.5',  prob: 1 - probs.cornersOver75 / 100, oddsVal: odds.cornersUnder85, cat: 'corners', minOdds: 1.45, minProb: 0.50 },
+      { key: 'cornersUnder95', label: 'Corners Under 9.5',  prob: 1 - probs.cornersOver85 / 100, oddsVal: odds.cornersUnder95, cat: 'corners', minOdds: 1.45, minProb: 0.50 },
       // ── Tarjetas FT
-      { key: 'cardsOver25',  label: 'Tarjetas Over 2.5',   prob: 0.72, oddsVal: odds.cardsOver25,  cat: 'cards', minOdds: 1.50, minProb: 0.68 },
-      { key: 'cardsOver35',  label: 'Tarjetas Over 3.5',   prob: 0.55, oddsVal: odds.cardsOver35,  cat: 'cards', minOdds: 1.50, minProb: 0.52 },
-      { key: 'cardsOver45',  label: 'Tarjetas Over 4.5',   prob: 0.38, oddsVal: odds.cardsOver45,  cat: 'cards', minOdds: 1.70, minProb: 0.50 },
+      { key: 'cardsOver25',  label: 'Tarjetas Over 2.5',   prob: 0.72, oddsVal: odds.cardsOver25,  cat: 'cards', minOdds: 1.45, minProb: 0.60 },
+      { key: 'cardsOver35',  label: 'Tarjetas Over 3.5',   prob: 0.55, oddsVal: odds.cardsOver35,  cat: 'cards', minOdds: 1.45, minProb: 0.48 },
+      { key: 'cardsOver45',  label: 'Tarjetas Over 4.5',   prob: 0.38, oddsVal: odds.cardsOver45,  cat: 'cards', minOdds: 1.65, minProb: 0.42 },
       // ── Doble oportunidad (DC)
-      { key: 'dc_1X', label: 'Doble Oportunidad 1X (Local o Empate)',    prob: (probs.homeWin + probs.draw) / 100, oddsVal: odds.dc_1X, cat: 'dc', minOdds: 1.50, minProb: 0.72 },
-      { key: 'dc_X2', label: 'Doble Oportunidad X2 (Empate o Visitante)', prob: (probs.draw + probs.awayWin) / 100, oddsVal: odds.dc_X2, cat: 'dc', minOdds: 1.50, minProb: 0.72 },
+      { key: 'dc_1X', label: 'Doble Oportunidad 1X (Local o Empate)',    prob: (probs.homeWin + probs.draw) / 100, oddsVal: odds.dc_1X, cat: 'dc', minOdds: 1.45, minProb: 0.65 },
+      { key: 'dc_X2', label: 'Doble Oportunidad X2 (Empate o Visitante)', prob: (probs.draw + probs.awayWin) / 100, oddsVal: odds.dc_X2, cat: 'dc', minOdds: 1.45, minProb: 0.65 },
       // ── Hándicap asiático
-      { key: 'ah_home_m05', label: 'Hándicap Asiático Local -0.5',      prob: probs.homeWin / 100, oddsVal: odds.ah_home_m05, cat: 'ah', minOdds: 1.55, minProb: 0.68 },
-      { key: 'ah_away_m05', label: 'Hándicap Asiático Visitante -0.5',  prob: probs.awayWin / 100, oddsVal: odds.ah_away_m05, cat: 'ah', minOdds: 1.55, minProb: 0.65 },
+      { key: 'ah_home_m05', label: 'Hándicap Asiático Local -0.5',      prob: probs.homeWin / 100, oddsVal: odds.ah_home_m05, cat: 'ah', minOdds: 1.50, minProb: 0.60 },
+      { key: 'ah_away_m05', label: 'Hándicap Asiático Visitante -0.5',  prob: probs.awayWin / 100, oddsVal: odds.ah_away_m05, cat: 'ah', minOdds: 1.50, minProb: 0.58 },
       // ── Goals Both Halves
-      { key: 'goalsBothHalves', label: 'Goles en Ambas Mitades', prob: probs.btts * 0.75 / 100, oddsVal: odds.goalsBothHalves, cat: 'both_halves', minOdds: 1.60, minProb: 0.52 },
+      { key: 'goalsBothHalves', label: 'Goles en Ambas Mitades', prob: probs.btts * 0.75 / 100, oddsVal: odds.goalsBothHalves, cat: 'both_halves', minOdds: 1.55, minProb: 0.45 },
     ];
 
     for (const m of markets) {
@@ -2579,15 +2579,18 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   }
 
   // Construir enriched con probabilidades extendidas (HT + corners)
+  // Usar promedios de liga como fallback cuando no hay stats del equipo
   const enriched = selected.map((f, i) => {
     const hStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
     const aStats = statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
 
-    const hFor  = parseFloat(hStats?.golesAnotadosHome) || 0;
-    const hAgt  = parseFloat(hStats?.golesRecibidosHome) || 0;
-    const aFor  = parseFloat(aStats?.golesAnotadosAway) || 0;
-    const aAgt  = parseFloat(aStats?.golesRecibidosAway) || 0;
-    const extProbs = (hFor > 0 || aFor > 0) ? calcExtendedProbs(hFor, hAgt, aFor, aAgt) : null;
+    // Fallback a promedios europeos cuando no hay stats: 1.3 goles en casa, 1.1 fuera
+    const hFor  = parseFloat(hStats?.golesAnotadosHome) || 1.3;
+    const hAgt  = parseFloat(hStats?.golesRecibidosHome) || 1.1;
+    const aFor  = parseFloat(aStats?.golesAnotadosAway) || 1.0;
+    const aAgt  = parseFloat(aStats?.golesRecibidosAway) || 1.3;
+    // Siempre calculamos probs — con stats reales o con promedios de referencia
+    const extProbs = calcExtendedProbs(hFor, hAgt, aFor, aAgt);
 
     return {
       fixtureId:      f.fixtureId,
@@ -2600,24 +2603,50 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       statsLocal:     hStats,
       statsVisitante: aStats,
       _extendedProbs: extProbs,
+      _statsSource:   (hStats && aStats) ? 'real' : hStats ? 'local_only' : aStats ? 'away_only' : 'fallback',
     };
   });
 
   // Fetch cuotas reales para todos los partidos
   await bot.sendMessage(chatId, `📈 Consultando cuotas reales (goles, corners, tarjetas, HT...)...`);
   const oddsResults = await Promise.allSettled(selected.map(f => getRealOdds(f.fixtureId)));
+  let conOdds = 0;
   for (let i = 0; i < enriched.length; i++) {
     const odds = oddsResults[i].status === 'fulfilled' ? oddsResults[i].value : null;
-    if (odds) enriched[i].cuotasReales = odds;
+    if (odds) { enriched[i].cuotasReales = odds; conOdds++; }
   }
 
   await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV por mercado...`);
+
+  // ── Debug logging detallado ───────────────────────────────────────────────
+  console.log(`📊 DEBUG picks motor:`);
+  console.log(`   Partidos analizados: ${enriched.length}`);
+  console.log(`   Con cuotas reales: ${conOdds}/${enriched.length}`);
+  const sinStats = enriched.filter(e => e._statsSource === 'fallback').length;
+  console.log(`   Sin stats reales (usando fallback): ${sinStats}`);
 
   // ── Selección matemática de picks ────────────────────────────────────────
   const candidates = buildPickCandidates(enriched);
   const topPicks   = selectDiversePicks(candidates, 3);
 
-  console.log(`🎯 Candidatos con EV+: ${candidates.length} | Picks seleccionados: ${topPicks.length}`);
+  // Log detallado de por qué cada partido pasó o no
+  console.log(`🎯 Candidatos válidos: ${candidates.length}`);
+  if (candidates.length > 0) {
+    candidates.slice(0, 5).forEach(c =>
+      console.log(`   ✅ ${c.local} vs ${c.visitante} | ${c.marketLabel} @ ${c.odds} | EV: ${c.ev}% | prob: ${c.prob}%`)
+    );
+  }
+  enriched.forEach(e => {
+    const p = e._extendedProbs;
+    const o = e.cuotasReales || {};
+    if (!o.over25 && !o.bttsYes && !o.cornersOver85) {
+      console.log(`   ❌ ${e.local} vs ${e.visitante} — sin cuotas disponibles`);
+    } else {
+      const hasCand = candidates.some(c => c.fixtureId === e.fixtureId);
+      if (!hasCand) console.log(`   ⚠️ ${e.local} vs ${e.visitante} — cuotas OK pero ningún pick superó los umbrales (over25=${o.over25} prob=${p?.over25}%)`);
+    }
+  });
+  console.log(`   Picks seleccionados: ${topPicks.length}`);
 
   let picksText;
 
