@@ -995,6 +995,46 @@ async function getRealOdds(fixtureId) {
         odds.draw_1T    = parseFloat(bet.values.find(v => v.value === 'Draw')?.odd) || null;
         odds.awayWin_1T = parseFloat(bet.values.find(v => v.value === 'Away')?.odd) || null;
       }
+      if (bet.name === 'Double Chance') {
+        for (const v of bet.values) {
+          if (v.value === '1X') odds.dc_1X = parseFloat(v.odd) || null;
+          if (v.value === 'X2') odds.dc_X2 = parseFloat(v.odd) || null;
+          if (v.value === '12') odds.dc_12 = parseFloat(v.odd) || null;
+        }
+      }
+      if (bet.name === 'Asian Handicap') {
+        for (const v of bet.values) {
+          if (v.value === 'Home -0.5') odds.ah_home_m05 = parseFloat(v.odd) || null;
+          if (v.value === 'Away -0.5') odds.ah_away_m05 = parseFloat(v.odd) || null;
+          if (v.value === 'Home +0.5') odds.ah_home_p05 = parseFloat(v.odd) || null;
+          if (v.value === 'Away +0.5') odds.ah_away_p05 = parseFloat(v.odd) || null;
+        }
+      }
+      if (bet.name === 'Corners Over/Under') {
+        for (const v of bet.values) {
+          if (v.value === 'Over 7.5')   odds.cornersOver75  = parseFloat(v.odd) || null;
+          if (v.value === 'Over 8.5')   odds.cornersOver85  = parseFloat(v.odd) || null;
+          if (v.value === 'Over 9.5')   odds.cornersOver95  = parseFloat(v.odd) || null;
+          if (v.value === 'Over 10.5')  odds.cornersOver105 = parseFloat(v.odd) || null;
+          if (v.value === 'Over 11.5')  odds.cornersOver115 = parseFloat(v.odd) || null;
+          if (v.value === 'Under 7.5')  odds.cornersUnder75 = parseFloat(v.odd) || null;
+          if (v.value === 'Under 8.5')  odds.cornersUnder85 = parseFloat(v.odd) || null;
+          if (v.value === 'Under 9.5')  odds.cornersUnder95 = parseFloat(v.odd) || null;
+        }
+      }
+      if (bet.name === 'Cards Over/Under') {
+        for (const v of bet.values) {
+          if (v.value === 'Over 2.5')  odds.cardsOver25  = parseFloat(v.odd) || null;
+          if (v.value === 'Over 3.5')  odds.cardsOver35  = parseFloat(v.odd) || null;
+          if (v.value === 'Over 4.5')  odds.cardsOver45  = parseFloat(v.odd) || null;
+          if (v.value === 'Over 5.5')  odds.cardsOver55  = parseFloat(v.odd) || null;
+          if (v.value === 'Under 3.5') odds.cardsUnder35 = parseFloat(v.odd) || null;
+          if (v.value === 'Under 4.5') odds.cardsUnder45 = parseFloat(v.odd) || null;
+        }
+      }
+      if (bet.name === 'Goals Both Halves') {
+        odds.goalsBothHalves = parseFloat(bet.values.find(v => v.value === 'Yes')?.odd) || null;
+      }
     }
     return Object.keys(odds).length > 0 ? odds : null;
   } catch { return null; }
@@ -1199,6 +1239,53 @@ function calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
 }
 
 /**
+ * Extiende calcPoissonProbs con probabilidades de 1er tiempo y corners.
+ * Necesario para pick selection multi-mercado sin depender del LLM.
+ */
+function calcExtendedProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
+  const base = calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst);
+
+  // ── HT: escalar lambdas al primer tiempo (≈45% de los goles FT)
+  // Ligeramente menos que 50% porque hay sesgo hacia la 2a mitad
+  const htHomeLambda = base.homeLambda * 0.45;
+  const htAwayLambda = base.awayLambda * 0.45;
+
+  let htHomeWin = 0, htDraw = 0, htAwayWin = 0, htOver05 = 0, htOver15 = 0;
+  const MAX = 7;
+  for (let h = 0; h < MAX; h++) {
+    for (let a = 0; a < MAX; a++) {
+      const p = poissonPMF(htHomeLambda, h) * poissonPMF(htAwayLambda, a);
+      if (h > a)      htHomeWin += p;
+      else if (h===a) htDraw    += p;
+      else            htAwayWin += p;
+      if (h + a >= 1) htOver05  += p;
+      if (h + a >= 2) htOver15  += p;
+    }
+  }
+
+  // ── Corners: estimación basada en xG total
+  // Empíricamente: ~10 corners/partido cuando xG total ≈ 2.5
+  // Fórmula calibrada: cornersLambda = 8 + (xGTotal - 2.0) * 3.0
+  const xGTotal       = base.homeLambda + base.awayLambda;
+  const cornersLambda = Math.max(5, Math.min(14, 8 + (xGTotal - 2.0) * 3.0));
+
+  return {
+    ...base,
+    htHomeWin:      +(htHomeWin * 100).toFixed(1),
+    htDraw:         +(htDraw    * 100).toFixed(1),
+    htAwayWin:      +(htAwayWin * 100).toFixed(1),
+    htOver05:       +(htOver05  * 100).toFixed(1),
+    htOver15:       +(htOver15  * 100).toFixed(1),
+    cornersLambda:  +cornersLambda.toFixed(1),
+    cornersOver75:  +(poissonCDF_above(cornersLambda,  8) * 100).toFixed(1),
+    cornersOver85:  +(poissonCDF_above(cornersLambda,  9) * 100).toFixed(1),
+    cornersOver95:  +(poissonCDF_above(cornersLambda, 10) * 100).toFixed(1),
+    cornersOver105: +(poissonCDF_above(cornersLambda, 11) * 100).toFixed(1),
+    cornersOver115: +(poissonCDF_above(cornersLambda, 12) * 100).toFixed(1),
+  };
+}
+
+/**
  * Calcula el Expected Value de una apuesta.
  * EV > 0 = apuesta con valor real; EV > 0.05 = buen valor (>5%)
  *
@@ -1366,6 +1453,156 @@ function buildProbBlock(homeStats, awayStats, h2h = [], leagueId = null) {
     nota: 'EV positivo = apuesta con valor real vs cuota de mercado. Usa estos datos para calibrar el stake.',
     ...(leagueContext && { contextoLiga: leagueContext }),
   };
+}
+
+// ─── Multi-market Pick Engine ─────────────────────────────────────────────────
+// Selección matemática de picks usando EV real. El LLM solo formatea.
+
+/**
+ * Dado un array de fixtures enriquecidos (con _extendedProbs + cuotasReales),
+ * evalúa todos los mercados disponibles y retorna candidatos con EV positivo,
+ * ordenados de mayor a menor EV.
+ */
+function buildPickCandidates(enrichedFixtures) {
+  const candidates = [];
+
+  for (const f of enrichedFixtures) {
+    const probs = f._extendedProbs;
+    const odds  = f.cuotasReales || {};
+    if (!probs) continue;
+
+    // ── Definición de mercados a evaluar ──────────────────────────────────────
+    // [{ key, label, prob(0-1), oddsValue, category, minOdds, minProb }]
+    const markets = [
+      // ── Resultado FT
+      { key: 'homeWin',     label: 'Victoria Local',       prob: probs.homeWin  / 100, oddsVal: odds.homeWin,  cat: 'result',    minOdds: 1.80, minProb: 0.58 },
+      { key: 'awayWin',     label: 'Victoria Visitante',   prob: probs.awayWin  / 100, oddsVal: odds.awayWin,  cat: 'result',    minOdds: 2.00, minProb: 0.55 },
+      // ── Goles FT
+      { key: 'over25',      label: 'Más de 2.5 Goles',     prob: probs.over25   / 100, oddsVal: odds.over25,   cat: 'goals',     minOdds: 1.70, minProb: 0.60 },
+      { key: 'over35',      label: 'Más de 3.5 Goles',     prob: probs.over35   / 100, oddsVal: odds.over35,   cat: 'goals',     minOdds: 1.80, minProb: 0.52 },
+      { key: 'under25',     label: 'Menos de 2.5 Goles',   prob: probs.under25  / 100, oddsVal: odds.under25,  cat: 'goals',     minOdds: 1.70, minProb: 0.55 },
+      // ── BTTS
+      { key: 'btts',        label: 'Ambos Marcan (Sí)',     prob: probs.btts     / 100, oddsVal: odds.bttsYes,  cat: 'btts',      minOdds: 1.70, minProb: 0.65 },
+      // ── 1er tiempo — goles
+      { key: 'ht_over05',   label: 'Gol en el 1er Tiempo', prob: probs.htOver05 / 100, oddsVal: odds.over05_1T, cat: 'ht_goals', minOdds: 1.65, minProb: 0.62 },
+      { key: 'ht_over15',   label: 'Más de 1.5 Goles 1T',  prob: probs.htOver15 / 100, oddsVal: odds.over15_1T, cat: 'ht_goals', minOdds: 1.80, minProb: 0.52 },
+      // ── 1er tiempo — resultado
+      { key: 'homeWin_1T',  label: 'Local Gana el 1er Tiempo',      prob: probs.htHomeWin / 100, oddsVal: odds.homeWin_1T, cat: 'ht_result', minOdds: 1.75, minProb: 0.52 },
+      { key: 'awayWin_1T',  label: 'Visitante Gana el 1er Tiempo',  prob: probs.htAwayWin / 100, oddsVal: odds.awayWin_1T, cat: 'ht_result', minOdds: 2.00, minProb: 0.50 },
+      // ── Corners FT
+      { key: 'cornersOver75',  label: 'Corners Over 7.5',   prob: probs.cornersOver75  / 100, oddsVal: odds.cornersOver75,  cat: 'corners', minOdds: 1.65, minProb: 0.65 },
+      { key: 'cornersOver85',  label: 'Corners Over 8.5',   prob: probs.cornersOver85  / 100, oddsVal: odds.cornersOver85,  cat: 'corners', minOdds: 1.65, minProb: 0.58 },
+      { key: 'cornersOver95',  label: 'Corners Over 9.5',   prob: probs.cornersOver95  / 100, oddsVal: odds.cornersOver95,  cat: 'corners', minOdds: 1.70, minProb: 0.52 },
+      { key: 'cornersOver105', label: 'Corners Over 10.5',  prob: probs.cornersOver105 / 100, oddsVal: odds.cornersOver105, cat: 'corners', minOdds: 1.80, minProb: 0.50 },
+      { key: 'cornersUnder85', label: 'Corners Under 8.5',  prob: 1 - probs.cornersOver75 / 100, oddsVal: odds.cornersUnder85, cat: 'corners', minOdds: 1.65, minProb: 0.55 },
+      { key: 'cornersUnder95', label: 'Corners Under 9.5',  prob: 1 - probs.cornersOver85 / 100, oddsVal: odds.cornersUnder95, cat: 'corners', minOdds: 1.65, minProb: 0.55 },
+      // ── Tarjetas FT
+      { key: 'cardsOver25',  label: 'Tarjetas Over 2.5',   prob: 0.72, oddsVal: odds.cardsOver25,  cat: 'cards', minOdds: 1.65, minProb: 0.68 },
+      { key: 'cardsOver35',  label: 'Tarjetas Over 3.5',   prob: 0.55, oddsVal: odds.cardsOver35,  cat: 'cards', minOdds: 1.65, minProb: 0.52 },
+      { key: 'cardsOver45',  label: 'Tarjetas Over 4.5',   prob: 0.38, oddsVal: odds.cardsOver45,  cat: 'cards', minOdds: 1.90, minProb: 0.50 },
+      // ── Doble oportunidad (DC)
+      { key: 'dc_1X', label: 'Doble Oportunidad 1X (Local o Empate)',    prob: (probs.homeWin + probs.draw) / 100, oddsVal: odds.dc_1X, cat: 'dc', minOdds: 1.65, minProb: 0.72 },
+      { key: 'dc_X2', label: 'Doble Oportunidad X2 (Empate o Visitante)', prob: (probs.draw + probs.awayWin) / 100, oddsVal: odds.dc_X2, cat: 'dc', minOdds: 1.65, minProb: 0.72 },
+      // ── Hándicap asiático
+      { key: 'ah_home_m05', label: 'Hándicap Asiático Local -0.5',      prob: probs.homeWin / 100, oddsVal: odds.ah_home_m05, cat: 'ah', minOdds: 1.75, minProb: 0.68 },
+      { key: 'ah_away_m05', label: 'Hándicap Asiático Visitante -0.5',  prob: probs.awayWin / 100, oddsVal: odds.ah_away_m05, cat: 'ah', minOdds: 1.75, minProb: 0.65 },
+      // ── Goals Both Halves
+      { key: 'goalsBothHalves', label: 'Goles en Ambas Mitades', prob: probs.btts * 0.75 / 100, oddsVal: odds.goalsBothHalves, cat: 'both_halves', minOdds: 1.80, minProb: 0.52 },
+    ];
+
+    for (const m of markets) {
+      const o = m.oddsVal;
+      if (!o || o <= 1) continue;                          // sin cuota
+      if (o < (m.minOdds || 1.65)) continue;              // cuota muy baja
+      if (!m.prob || m.prob < (m.minProb || 0.50)) continue; // prob insuficiente
+
+      // Tarjetas: no hay modelo propio → solo evaluar si la cuota tiene valor implícito
+      // usamos prob heurística directamente (ya definida en cada tarjeta arriba)
+
+      const ev = calcEV(m.prob, o);
+      if (ev === null || ev <= 0) continue;                // EV negativo → sin valor
+
+      // DNB absolutamente prohibido
+      if (m.key.includes('dnb')) continue;
+
+      // Stake basado en prob + EV
+      let stake;
+      if      (m.prob >= 0.80 && o >= 1.90) stake = 10;
+      else if (m.prob >= 0.75 && o >= 1.80) stake = 9;
+      else if (m.prob >= 0.70 && o >= 1.70) stake = 8;
+      else if (m.prob >= 0.68 && ev > 5)    stake = 7;
+      else if (m.prob >= 0.63)               stake = 6;
+      else                                   stake = 5;
+
+      candidates.push({
+        fixtureId:    f.fixtureId,
+        liga:         f.liga,
+        country:      f.country,
+        local:        f.local,
+        visitante:    f.visitante,
+        hora:         f.hora,
+        statsLocal:   f.statsLocal,
+        statsVisitante: f.statsVisitante,
+        market:       m.key,
+        marketLabel:  m.label,
+        category:     m.cat,
+        prob:         +(m.prob * 100).toFixed(1),
+        odds:         o,
+        ev:           ev,
+        stake,
+        xGLocal:      probs.homeLambda,
+        xGVisitante:  probs.awayLambda,
+        cornersLambda: probs.cornersLambda,
+      });
+    }
+  }
+
+  // Ordenar de mayor EV a menor
+  return candidates.sort((a, b) => b.ev - a.ev);
+}
+
+/**
+ * Selecciona N picks con diversidad de mercado y fixture.
+ * Reglas: máx 1 pick por fixture, máx 1 pick por categoría (se relaja si faltan picks).
+ */
+function selectDiversePicks(candidates, count = 3) {
+  const usedFixtures = new Set();
+  const catCount     = {};
+  const selected     = [];
+
+  // Paso 1: estricto — max 1 por fixture, max 1 por categoría
+  for (const c of candidates) {
+    if (selected.length >= count) break;
+    if (usedFixtures.has(c.fixtureId)) continue;
+    if ((catCount[c.category] || 0) >= 1) continue;
+    usedFixtures.add(c.fixtureId);
+    catCount[c.category] = (catCount[c.category] || 0) + 1;
+    selected.push(c);
+  }
+
+  // Paso 2: si faltan, relaja a max 2 por categoría (pero sigue max 1 por fixture)
+  if (selected.length < count) {
+    for (const c of candidates) {
+      if (selected.length >= count) break;
+      if (usedFixtures.has(c.fixtureId)) continue;
+      if ((catCount[c.category] || 0) >= 2) continue;
+      usedFixtures.add(c.fixtureId);
+      catCount[c.category] = (catCount[c.category] || 0) + 1;
+      selected.push(c);
+    }
+  }
+
+  // Paso 3: si aún faltan, toma cualquier fixture distinto sin límite de categoría
+  if (selected.length < count) {
+    for (const c of candidates) {
+      if (selected.length >= count) break;
+      if (usedFixtures.has(c.fixtureId)) continue;
+      usedFixtures.add(c.fixtureId);
+      selected.push(c);
+    }
+  }
+
+  return selected;
 }
 
 // ─── Goal Alert Engine ────────────────────────────────────────────────────────
@@ -1834,6 +2071,54 @@ Mínimo 3 selecciones, máximo 5. Mercados y partidos distintos.
 💡 Cuota combinada estimada: *~X.XX*
 ━━━━━━━━━━━━━━━━━━━`;
 
+// ─── Formatter-only prompt ────────────────────────────────────────────────────
+// Usado cuando los picks ya fueron seleccionados matemáticamente.
+// El LLM SOLO formatea — no selecciona, no descarta, no agrega picks.
+const PICKS_HOY_FORMATTER_SYSTEM = `Eres el redactor del tipster profesional. Los picks ya fueron seleccionados por nuestro motor matemático de valor esperado. Tu función es ÚNICAMENTE escribir el texto final en español.
+
+REGLAS ABSOLUTAS — SIN EXCEPCIÓN:
+- Escribe EXACTAMENTE los picks que recibes, en el orden dado. NO añadas ni elimines ningún pick.
+- NO cuestiones ni justifiques las selecciones.
+- NO menciones EV%, xG, lambda, cornersLambda ni ningún valor técnico — son internos.
+- NO uses # ## ### (se ven mal en Telegram).
+- NO inventes estadísticas — usa solo lo que viene en statsLocal / statsVisitante.
+- Si statsLocal o statsVisitante son null, escribe "datos limitados" en lugar de inventar.
+
+FORMATO OBLIGATORIO para cada pick:
+🌍 [country] — [liga]
+⚽ [local] vs [visitante] | ⏰ [hora]
+━━━━━━━━━━━━━━━━━━━
+
+📊 *ESTADÍSTICAS CLAVE*
+▸ [local] anota en casa: *[golesAnotadosHome]* por partido
+▸ [visitante] anota fuera: *[golesAnotadosAway]* por partido
+▸ [local] recibe en casa: *[golesRecibidosHome]* por partido
+▸ Forma reciente [local]: *[forma5.forma]*
+▸ Forma reciente [visitante]: *[forma5.forma]*
+
+🎯 *PICK: [marketLabel]*
+┌ Selección: [descripción exacta del pick]
+├ Razonamiento: [1-2 líneas con el dato concreto de las estadísticas que lo justifica]
+├ Probabilidad: *[prob]%*
+├ 🏆 Stake: *[stake]/10*
+├ 💡 Cuota mínima: *[odds]*
+└ ⚠️ Riesgo: [1 línea máximo]
+
+━━━━━━━━━━━━━━━━━━━
+
+Después de todos los picks individuales, añade la combinada:
+
+━━━━━━━━━━━━━━━━━━━
+🎰 *COMBINADA DEL DÍA*
+▸ [local] vs [visitante] → *[marketLabel]* | Cuota: *[odds]*
+[una línea por pick]
+
+🏆 Stake combinada: *3/10*
+💡 Cuota combinada: *~[producto de todas las cuotas redondeado a 2 decimales]*
+━━━━━━━━━━━━━━━━━━━
+
+Responde en español. Sé conciso y directo.`;
+
 const INPLAY_SYSTEM = `${TIPSTER_SYSTEM}
 
 INSTRUCCIÓN ESPECIAL IN-PLAY:
@@ -2256,14 +2541,15 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     return bot.sendMessage(chatId, `😔 No hay partidos en las ligas monitoreadas hoy (${today}).`);
   }
 
+  // Top 12 partidos por prioridad de liga
   const selected = [...fixtures]
     .sort((a, b) => (LEAGUE_PRIORITY[b.leagueId] || 0) - (LEAGUE_PRIORITY[a.leagueId] || 0))
-    .slice(0, 8);
+    .slice(0, 12);
 
-  console.log(`✅ Seleccionados ${selected.length} partidos para análisis`);
-  await bot.sendMessage(chatId, `📊 ${fixtures.length} partidos identificados. Recopilando estadísticas de equipos...`);
+  console.log(`✅ Candidatos seleccionados: ${selected.length} partidos`);
+  await bot.sendMessage(chatId, `📊 ${fixtures.length} partidos identificados. Recopilando estadísticas...`);
 
-  // Fetch team stats in batches of 4 to avoid rate limit
+  // Fetch team stats en batches de 4 para no saturar la API
   const statsPairs = selected.flatMap(f => [
     getTeamStats(f.homeId, f.leagueId),
     getTeamStats(f.awayId, f.leagueId),
@@ -2275,49 +2561,77 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 6000));
   }
 
+  // Construir enriched con probabilidades extendidas (HT + corners)
   const enriched = selected.map((f, i) => {
-    const homeStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
-    const awayStats = statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
-    const probBlock = buildProbBlock(homeStats, awayStats, [], f.leagueId);
+    const hStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
+    const aStats = statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
+
+    const hFor  = parseFloat(hStats?.golesAnotadosHome) || 0;
+    const hAgt  = parseFloat(hStats?.golesRecibidosHome) || 0;
+    const aFor  = parseFloat(aStats?.golesAnotadosAway) || 0;
+    const aAgt  = parseFloat(aStats?.golesRecibidosAway) || 0;
+    const extProbs = (hFor > 0 || aFor > 0) ? calcExtendedProbs(hFor, hAgt, aFor, aAgt) : null;
+
     return {
       fixtureId:      f.fixtureId,
       liga:           f.leagueName,
+      country:        f.country,
       local:          f.homeTeam,
       visitante:      f.awayTeam,
       hora:           formatHour(f.date),
       fechaPartido:   f.date,
-      statsLocal:     homeStats,
-      statsVisitante: awayStats,
-      ...(probBlock && { probabilidadesCalculadas: probBlock }),
+      statsLocal:     hStats,
+      statsVisitante: aStats,
+      _extendedProbs: extProbs,
     };
   });
 
-  // Fetch real odds + API predictions for selected fixtures (batched to save API calls)
-  await bot.sendMessage(chatId, `📈 Consultando cuotas reales y predicciones...`);
-  const oddsResults = await Promise.allSettled(
-    selected.map(f => getRealOdds(f.fixtureId))
-  );
-  const predResults = await Promise.allSettled(
-    selected.map(f => getApiPrediction(f.fixtureId))
-  );
-  // Merge into enriched
+  // Fetch cuotas reales para todos los partidos
+  await bot.sendMessage(chatId, `📈 Consultando cuotas reales (goles, corners, tarjetas, HT...)...`);
+  const oddsResults = await Promise.allSettled(selected.map(f => getRealOdds(f.fixtureId)));
   for (let i = 0; i < enriched.length; i++) {
     const odds = oddsResults[i].status === 'fulfilled' ? oddsResults[i].value : null;
-    const pred = predResults[i].status === 'fulfilled' ? predResults[i].value : null;
     if (odds) enriched[i].cuotasReales = odds;
-    if (pred) enriched[i].prediccionAPI = pred;
   }
 
-  await bot.sendMessage(chatId, `🧠 Calculando picks de valor...`);
+  await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV por mercado...`);
 
-  const picksText = await sonnet(
-    PICKS_HOY_SYSTEM,
-    `Partidos del día ${today} (hora Colombia). DATOS REALES DE API-FOOTBALL:\n\n${JSON.stringify(enriched, null, 2)}\n\nEmite EXACTAMENTE 3 picks individuales + 1 combinada basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
-  );
+  // ── Selección matemática de picks ────────────────────────────────────────
+  const candidates = buildPickCandidates(enriched);
+  const topPicks   = selectDiversePicks(candidates, 3);
 
-  // Guardar en caché para evitar re-análisis y picks contradictorios
+  console.log(`🎯 Candidatos con EV+: ${candidates.length} | Picks seleccionados: ${topPicks.length}`);
+
+  let picksText;
+
+  if (topPicks.length >= 2) {
+    // ── NUEVO: LLM solo formatea picks ya elegidos matemáticamente
+    picksText = await sonnet(
+      PICKS_HOY_FORMATTER_SYSTEM,
+      `Fecha: ${today} (hora Colombia)\n\nPICKS SELECCIONADOS POR EL MOTOR MATEMÁTICO — NO añadas ni elimines ninguno:\n\n${JSON.stringify(topPicks, null, 2)}`
+    );
+  } else {
+    // ── FALLBACK: si no hay suficientes picks con EV positivo, usar análisis LLM clásico
+    // (ocurre cuando no hay cuotas disponibles o el mercado no tiene valor)
+    console.log(`⚠️ Insuficientes picks con EV+ (${topPicks.length}) — fallback a análisis LLM`);
+    const enrichedForLLM = enriched.map(e => ({
+      ...e,
+      _extendedProbs: undefined, // no enviar al LLM — es interno
+      probabilidadesCalculadas: e._extendedProbs ? buildProbBlock(e.statsLocal, e.statsVisitante, [], selected.find(f => f.fixtureId === e.fixtureId)?.leagueId) : null,
+    }));
+    const predResults = await Promise.allSettled(selected.map(f => getApiPrediction(f.fixtureId)));
+    for (let i = 0; i < enrichedForLLM.length; i++) {
+      const pred = predResults[i].status === 'fulfilled' ? predResults[i].value : null;
+      if (pred) enrichedForLLM[i].prediccionAPI = pred;
+    }
+    picksText = await sonnet(
+      PICKS_HOY_SYSTEM,
+      `Partidos del día ${today} (hora Colombia). DATOS REALES:\n\n${JSON.stringify(enrichedForLLM, null, 2)}\n\nEmite 3 picks individuales + 1 combinada. PROHIBIDO DNB. Prioriza corners, goles 1T, BTTS con datos reales, Over 3.5 si ambos son goleadores.`
+    );
+  }
+
+  // Guardar en caché
   setPicksCache('all', picksText, enriched.map(f => f.fixtureId));
-
   await sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
   recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
 }
@@ -2485,9 +2799,9 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
     return bot.sendMessage(chatId, `😔 No hay partidos de *${displayName}* programados para hoy.`, { parse_mode: 'Markdown' });
   }
 
-  await bot.sendMessage(chatId, `📊 ${fixtures.length} partido(s) de *${displayName}* encontrados. Recopilando estadísticas de equipos...`, { parse_mode: 'Markdown' });
+  await bot.sendMessage(chatId, `📊 ${fixtures.length} partido(s) de *${displayName}* encontrados. Recopilando estadísticas...`, { parse_mode: 'Markdown' });
 
-  // Fetch team stats in batches of 4 to avoid rate limit
+  // Fetch team stats en batches de 4
   const statsPairs = fixtures.flatMap(f => [
     getTeamStats(f.homeId, f.leagueId),
     getTeamStats(f.awayId, f.leagueId),
@@ -2499,33 +2813,59 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
     if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 6000));
   }
 
+  // Enriquecer con probabilidades extendidas
   const enriched = fixtures.map((f, i) => {
-    const homeStats = statsResults[i * 2]?.status === 'fulfilled' ? statsResults[i * 2].value : null;
-    const awayStats = statsResults[i * 2 + 1]?.status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
-    const probBlock = buildProbBlock(homeStats, awayStats, []);
+    const hStats = statsResults[i * 2]?.status === 'fulfilled' ? statsResults[i * 2].value : null;
+    const aStats = statsResults[i * 2 + 1]?.status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
+    const hFor   = parseFloat(hStats?.golesAnotadosHome) || 0;
+    const hAgt   = parseFloat(hStats?.golesRecibidosHome) || 0;
+    const aFor   = parseFloat(aStats?.golesAnotadosAway) || 0;
+    const aAgt   = parseFloat(aStats?.golesRecibidosAway) || 0;
+    const extProbs = (hFor > 0 || aFor > 0) ? calcExtendedProbs(hFor, hAgt, aFor, aAgt) : null;
     return {
       fixtureId:      f.fixtureId,
       liga:           f.leagueName,
+      country:        f.country,
       local:          f.homeTeam,
       visitante:      f.awayTeam,
       hora:           formatHour(f.date),
       fechaPartido:   f.date,
-      statsLocal:     homeStats,
-      statsVisitante: awayStats,
-      ...(probBlock && { probabilidadesCalculadas: probBlock }),
+      statsLocal:     hStats,
+      statsVisitante: aStats,
+      _extendedProbs: extProbs,
     };
   });
 
-  await bot.sendMessage(chatId, `🧠 Calculando picks de valor...`);
+  // Cuotas reales
+  await bot.sendMessage(chatId, `📈 Consultando cuotas (goles, corners, tarjetas, HT)...`);
+  const oddsResultsL = await Promise.allSettled(fixtures.map(f => getRealOdds(f.fixtureId)));
+  for (let i = 0; i < enriched.length; i++) {
+    const odds = oddsResultsL[i].status === 'fulfilled' ? oddsResultsL[i].value : null;
+    if (odds) enriched[i].cuotasReales = odds;
+  }
 
-  const picksText = await sonnet(
-    PICKS_HOY_SYSTEM,
-    `Partidos de ${displayName} del día ${today}. DATOS REALES DE API:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y emite picks de valor basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
-  );
+  await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV...`);
 
-  // Guardar en caché para evitar re-análisis y picks contradictorios
+  // Selección matemática de picks
+  const candidatesL = buildPickCandidates(enriched);
+  const topPicksL   = selectDiversePicks(candidatesL, 3);
+  console.log(`🎯 ${displayName} — candidatos EV+: ${candidatesL.length} | seleccionados: ${topPicksL.length}`);
+
+  let picksText;
+  if (topPicksL.length >= 2) {
+    picksText = await sonnet(
+      PICKS_HOY_FORMATTER_SYSTEM,
+      `Fecha: ${today} | Liga: ${displayName}\n\nPICKS SELECCIONADOS — NO añadas ni elimines:\n\n${JSON.stringify(topPicksL, null, 2)}`
+    );
+  } else {
+    picksText = await sonnet(
+      PICKS_HOY_SYSTEM,
+      `Partidos de ${displayName} del día ${today}. DATOS REALES:\n\n${JSON.stringify(enriched.map(e => ({ ...e, _extendedProbs: undefined })), null, 2)}\n\nEmite picks de valor. PROHIBIDO DNB. Prioriza corners, goles 1T, BTTS con datos reales.`
+    );
+  }
+
+  // Guardar en caché
   setPicksCache(cacheScope, picksText, enriched.map(f => f.fixtureId));
-
   await sendLong(chatId, `📅 *${displayName} — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
   recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
 }
