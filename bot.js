@@ -3066,18 +3066,24 @@ FORMATO: usa *texto* para negritas (un solo asterisco, estilo Telegram). Nunca u
 
 async function handleVerPlanes(chatId) {
   await bot.sendMessage(chatId,
-    `🏆 *PLANES TIPSTERAI MASTER PRO*\n\n` +
+    `🏆 *TIPSTERAI MASTER PRO*\n` +
+    `_El bot de apuestas deportivas con IA más avanzado_\n\n` +
     `━━━━━━━━━━━━━━━━━━━\n` +
-    `🆓 *FREEMIUM* — Prueba gratuita\n` +
-    `▸ 1 consulta gratis al día\n` +
-    `▸ Válido por 3 días\n\n` +
-    `⚡ *VIP*\n` +
+    `🆓 *FREEMIUM* — Gratis\n` +
+    `▸ 1 consulta al día\n` +
+    `▸ 3 días de prueba\n` +
+    `▸ Picks básicos del día\n\n` +
+    `⚡ *BASIC — $29 USD/mes*\n` +
     `▸ 10 consultas diarias\n` +
-    `▸ Análisis completo de partidos y picks\n\n` +
-    `🏆 *PRO*\n` +
-    `▸ 50 consultas diarias\n` +
+    `▸ Picks del día + análisis de partidos\n` +
+    `▸ Picks en vivo\n` +
+    `▸ Análisis por liga y equipo\n\n` +
+    `🏆 *PRO — $49 USD/mes*\n` +
+    `▸ Consultas ilimitadas\n` +
+    `▸ Todo lo del plan Basic\n` +
     `▸ Análisis de imágenes en vivo\n` +
-    `▸ Acceso completo a todas las funciones\n` +
+    `▸ Sistema del Día (picks optimizados)\n` +
+    `▸ Acceso a todas las ligas del mundo\n` +
     `━━━━━━━━━━━━━━━━━━━\n\n` +
     `🔗 [Suscríbete aquí](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
     { parse_mode: 'Markdown' }
