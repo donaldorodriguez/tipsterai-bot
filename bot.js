@@ -434,7 +434,13 @@ const FINISHED_STATUSES = new Set(['FT', 'AET', 'PEN', 'AWD', 'WO']);
 async function getFixturesByDate(date) {
   const all = await fetchFixturesByDate(date);
   return all
-    .filter(f => LEAGUE_IDS.has(f.league.id) && !FINISHED_STATUSES.has(f.fixture.status.short))
+    .filter(f => {
+      if (!LEAGUE_IDS.has(f.league.id)) return false;
+      if (FINISHED_STATUSES.has(f.fixture.status.short)) return false;
+      // Verificar que la fecha real del partido (en hora Bogotá) sea hoy
+      const fixtureDate = new Date(f.fixture.date).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+      return fixtureDate === date;
+    })
     .map(parseFixture);
 }
 
@@ -991,6 +997,44 @@ async function getRealOdds(fixtureId) {
       }
     }
     return Object.keys(odds).length > 0 ? odds : null;
+  } catch { return null; }
+}
+
+async function getLiveOdds(fixtureId) {
+  try {
+    const { data } = await API.get('/odds/live', { params: { fixture: fixtureId } });
+    const bets = data.response?.[0]?.odds || [];
+    const odds = {};
+    for (const bet of bets) {
+      if (bet.name === 'Match Winner') {
+        odds.homeWin = parseFloat(bet.values.find(v => v.value === 'Home')?.odd) || null;
+        odds.draw    = parseFloat(bet.values.find(v => v.value === 'Draw')?.odd) || null;
+        odds.awayWin = parseFloat(bet.values.find(v => v.value === 'Away')?.odd) || null;
+      }
+      if (bet.name === 'Both Teams Score') {
+        odds.bttsYes = parseFloat(bet.values.find(v => v.value === 'Yes')?.odd) || null;
+        odds.bttsNo  = parseFloat(bet.values.find(v => v.value === 'No')?.odd) || null;
+      }
+      if (bet.name === 'Goals Over/Under') {
+        odds.over05  = parseFloat(bet.values.find(v => v.value === 'Over 0.5')?.odd)  || null;
+        odds.over15  = parseFloat(bet.values.find(v => v.value === 'Over 1.5')?.odd)  || null;
+        odds.over25  = parseFloat(bet.values.find(v => v.value === 'Over 2.5')?.odd)  || null;
+        odds.over35  = parseFloat(bet.values.find(v => v.value === 'Over 3.5')?.odd)  || null;
+      }
+      if (bet.name === 'Cards Over/Under') {
+        odds.cardsOver35 = parseFloat(bet.values.find(v => v.value === 'Over 3.5')?.odd) || null;
+        odds.cardsOver45 = parseFloat(bet.values.find(v => v.value === 'Over 4.5')?.odd) || null;
+        odds.cardsOver55 = parseFloat(bet.values.find(v => v.value === 'Over 5.5')?.odd) || null;
+      }
+      if (bet.name === 'Corners Over/Under') {
+        odds.cornersOver85  = parseFloat(bet.values.find(v => v.value === 'Over 8.5')?.odd)  || null;
+        odds.cornersOver95  = parseFloat(bet.values.find(v => v.value === 'Over 9.5')?.odd)  || null;
+        odds.cornersOver105 = parseFloat(bet.values.find(v => v.value === 'Over 10.5')?.odd) || null;
+        odds.cornersOver115 = parseFloat(bet.values.find(v => v.value === 'Over 11.5')?.odd) || null;
+        odds.cornersOver125 = parseFloat(bet.values.find(v => v.value === 'Over 12.5')?.odd) || null;
+      }
+    }
+    return Object.keys(odds).length > 0 ? { source: 'live', ...odds } : null;
   } catch { return null; }
 }
 
@@ -1657,6 +1701,7 @@ Para HT: % local gana 1T en casa. Solo si supera 60%.
 Para Tarjetas: suma promedios. Solo si supera línea en +1.
 Para Over/Under goles: usa probOver25 y probOver35 del modelo. Si probOver25 > 65% con EV positivo, considera pick.
 Para DNB: usa probDNB_Local o probDNB_Visitante. Solo si supera 72% para stake 7+.
+  REGLA DNB OBLIGATORIA: DNB solo tiene valor cuando la cuota de victoria directa (1X2) del equipo es ≥ 2.00. Si el equipo gana a 1.30-1.70, el DNB queda en ~1.10-1.45 — SIN NINGÚN VALOR. En esos casos BUSCA OTRO MERCADO (goles, corners, BTTS, AH). Si la cuota de victoria directa es ≥ 2.00 y con DNB queda en ~1.65-1.85, ahí sí tiene sentido.
 Para AH: solo -0.5. Solo si prob de victoria supera 70%. Nunca -1 ni -1.5.
 
 INSTRUCCIONES PARA USAR LAS PROBABILIDADES CALCULADAS:
@@ -1698,6 +1743,12 @@ Si hay 2+ goles de diferencia en el marcador:
 - PROHIBIDO: resultado final (gana X, DNB, 1X2)
 - PROHIBIDO: Over goles totales si ya hay 3+ goles y queda poco
 - PERMITIDO: Corners Over/Under, Tarjetas Over, BTTS, Next Goal del perdedor, Over goles 2T si va 2-0 al HT
+
+REGLA DNB GLOBAL — APLICA PRE-PARTIDO Y EN VIVO:
+- DNB solo cuando cuota victoria directa del equipo ≥ 2.00 (así el DNB queda ~1.65-1.85 y tiene valor real).
+- Si el equipo favorito gana a 1.30-1.75, el DNB no tiene valor — busca BTTS, Over goles, corners u otro mercado.
+- NUNCA recomendar DNB de un equipo que ya va ganando en el marcador (la cuota sería 1.05-1.20, sin ningún valor).
+- NUNCA recomendar Match Winner (1X2) de un favorito que ya va ganando en el entretiempo — la cuota no tiene valor.
 
 CRITERIO DE STAKE:
 10/10: +80% probabilidad, cuota mín 1.90
@@ -1797,16 +1848,27 @@ ANÁLISIS DE MOMENTUM (campo "momentumEnVivo"):
 
 PROYECCIONES EN TIEMPO REAL:
 - CORNERS EN VIVO: proyeccionCorners tiene {current, projected, remaining, confidence}.
-  Regla crítica: la línea que recomiendes debe ser > current + 1.5 para tener valor real.
-  Si current=8 y projected=13 → recomienda Over 11.5 o 12.5, NUNCA Over 9.5 (ya casi se alcanzó).
+  Regla crítica: la línea mínima válida es current + 4. Si ya van 9 corners → línea mínima Over 13.5.
+  Si current=8 y projected=13 → recomienda Over 12.5 o 13.5, NUNCA Over 9.5 ni Over 10.5 (ya casi se alcanzaron).
   Solo con confidence "alta" (min 30 min jugados) para picks de stake 7+.
-- TARJETAS: misma regla. proyeccionTarjetas.current ya ocurridas → línea recomendada > current + 1.
+  Si la línea válida (current+4) no tiene cuota atractiva (≥ 1.65), DESCARTA el mercado de corners.
+- TARJETAS EN VIVO: línea mínima válida es current + 3. Si ya van 4 tarjetas → línea mínima Over 7.5.
+  Si ya van 4 tarjetas al HT y proyecta 7 al final → recomienda Over 6.5 máximo, NUNCA Over 4.5 (ya casi garantizado).
+  Si la línea válida (current+3) no tiene cuota ≥ 1.65, DESCARTA el mercado de tarjetas.
 - Solo usa proyecciones con confidence "alta" para picks de stake 7+.
+- CUOTAS EN VIVO: el campo cuotasVivo contiene cuotas reales del mercado en ese momento. USA ESAS cuotas, no inventes. Si cuotasVivo es null, indica la cuota como "verificar en casa de apuestas" en lugar de inventar un número.
+
+PROHIBICIONES IN-PLAY ADICIONALES:
+- PROHIBIDO usar # ## ### en el formato de respuesta.
+- PROHIBIDO mostrar el valor numérico del score de momentum (solo el label: "Domina local", "Equilibrado", etc.).
+- PROHIBIDO mostrar xG, lambdaRem, EV% u otros valores técnicos internos.
+- PROHIBIDO recomendar DNB o Match Winner de un equipo que ya va ganando en el marcador.
+- PROHIBIDO recomendar Over corners/tarjetas con línea ≤ current + 2.
 
 FORMATO ADICIONAL IN-PLAY:
 ⏰ Actúa antes del min: [XX]
 📈 Ritmo corners: [proyeccionCorners.pace] corners/90min → proyectados [proyeccionCorners.projected] al final
-📊 Momentum: [momentumEnVivo.label] (score: [momentumEnVivo.score])`;
+📊 Momentum: [momentumEnVivo.label]`;
 
 // ─── Intent detection ─────────────────────────────────────────────────────────
 
@@ -2627,10 +2689,18 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
     };
   });
 
+  // Cuotas en vivo reales para cada partido
+  await bot.sendMessage(chatId, '📈 Consultando cuotas en vivo...');
+  const liveOddsResults = await Promise.allSettled(toAnalyze.map(f => getLiveOdds(f.fixtureId)));
+  for (let i = 0; i < enriched.length; i++) {
+    const lo = liveOddsResults[i].status === 'fulfilled' ? liveOddsResults[i].value : null;
+    if (lo) enriched[i].cuotasVivo = lo;
+  }
+
   await bot.sendMessage(chatId, '🎯 Identificando picks de valor...');
   const analysis = await sonnet(
     INPLAY_SYSTEM,
-    `DATOS REALES EN VIVO de API-Football:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y da picks de valor in-play para los mejores partidos.`
+    `DATOS REALES EN VIVO de API-Football:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y da picks de valor in-play. USA cuotasVivo para las cuotas reales. Si cuotasVivo es null para un partido, indica "verificar cuota en casa de apuestas".`
   );
   await sendLong(chatId, `🔴 *PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}*\n\n${analysis}`, { parse_mode: 'Markdown' });
   recordPicks(analysis, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.homeTeam, visitante: f.awayTeam, liga: f.leagueName, fechaPartido: f.date }))).catch(e => console.error('recordPicks:', e.message));
