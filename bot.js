@@ -1520,7 +1520,8 @@ function buildPickCandidates(enrichedFixtures) {
       // usamos prob heurística directamente (ya definida en cada tarjeta arriba)
 
       const ev = calcEV(m.prob, o);
-      if (ev === null || ev <= 0) continue;                // EV negativo → sin valor
+      // Permitimos hasta -3% de EV (el margen de las casas es ~5-8%, estar en -3% sigue siendo valor)
+      if (ev === null || ev < -3) continue;
 
       // DNB absolutamente prohibido
       if (m.key.includes('dnb')) continue;
@@ -2535,10 +2536,15 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   await bot.sendMessage(chatId, '🔍 Consultando nuestra base de datos estadística...');
   const allFixtures = await getFixturesByDate(today);
-  const fixtures = allFixtures.filter(f => !PICKS_EXCLUDE_LEAGUES.has(f.leagueId));
+  // Para picks del día: solo partidos NO iniciados (status NS) y no en ligas excluidas
+  const STARTED_STATUSES = new Set(['1H','HT','2H','ET','P','BT','LIVE','INT']);
+  const fixtures = allFixtures.filter(f =>
+    !PICKS_EXCLUDE_LEAGUES.has(f.leagueId) &&
+    !STARTED_STATUSES.has(f.status)
+  );
 
   if (fixtures.length === 0) {
-    return bot.sendMessage(chatId, `😔 No hay partidos en las ligas monitoreadas hoy (${today}).`);
+    return bot.sendMessage(chatId, `😔 No hay partidos no iniciados en las ligas monitoreadas hoy (${today}).`);
   }
 
   // Top 12 partidos por prioridad de liga
@@ -2626,7 +2632,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     }
     picksText = await sonnet(
       PICKS_HOY_SYSTEM,
-      `Partidos del día ${today} (hora Colombia). DATOS REALES:\n\n${JSON.stringify(enrichedForLLM, null, 2)}\n\nEmite 3 picks individuales + 1 combinada. PROHIBIDO DNB. Prioriza corners, goles 1T, BTTS con datos reales, Over 3.5 si ambos son goleadores.`
+      `Partidos del día ${today} (hora Colombia). DATOS REALES:\n\n${JSON.stringify(enrichedForLLM, null, 2)}\n\nEmite 3 picks individuales + 1 combinada. REGLAS IRROMPIBLES: (1) CUOTA MÍNIMA ABSOLUTA 1.70 — cualquier pick con cuota menor se DESCARTA SIN EXCEPCIÓN, (2) PROHIBIDO DNB, (3) PROHIBIDO 1X2 directo a cuota menor de 1.80, (4) Prioriza corners Over/Under, Over 1.5 goles 1T, BTTS con ambos marcando >65% en casa/fuera, Over 3.5 si ambos son goleadores. Si no hay picks que superen 1.70 de cuota con datos reales, responde SOLO: ⛔ Sin picks de valor real hoy.`
     );
   }
 
@@ -2786,11 +2792,12 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
   const today = todayDate();
   const all = await fetchFixturesByDate(today);
 
+  const STARTED_STATUSES_L = new Set(['1H','HT','2H','ET','P','BT','LIVE','INT']);
   let fixtures = leagueId
-    ? all.filter(f => f.league.id === leagueId).map(parseFixture)
+    ? all.filter(f => f.league.id === leagueId && !STARTED_STATUSES_L.has(f.fixture.status.short)).map(parseFixture)
     : all.filter(f => {
         const n = (f.league.name || '').toLowerCase();
-        return n.includes(leagueName.toLowerCase());
+        return n.includes(leagueName.toLowerCase()) && !STARTED_STATUSES_L.has(f.fixture.status.short);
       }).map(parseFixture);
 
   console.log(`📊 Partidos encontrados para ${displayName}: ${fixtures.length}`);
@@ -2860,7 +2867,7 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
   } else {
     picksText = await sonnet(
       PICKS_HOY_SYSTEM,
-      `Partidos de ${displayName} del día ${today}. DATOS REALES:\n\n${JSON.stringify(enriched.map(e => ({ ...e, _extendedProbs: undefined })), null, 2)}\n\nEmite picks de valor. PROHIBIDO DNB. Prioriza corners, goles 1T, BTTS con datos reales.`
+      `Partidos de ${displayName} del día ${today}. DATOS REALES:\n\n${JSON.stringify(enriched.map(e => ({ ...e, _extendedProbs: undefined })), null, 2)}\n\nEmite picks de valor. REGLAS IRROMPIBLES: (1) CUOTA MÍNIMA ABSOLUTA 1.70 — cualquier pick con cuota menor se DESCARTA, (2) PROHIBIDO DNB, (3) PROHIBIDO 1X2 a cuota menor de 1.80. Si no hay picks con cuota ≥1.70, responde solo: ⛔ Sin picks de valor real hoy.`
     );
   }
 
