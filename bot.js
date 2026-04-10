@@ -2971,8 +2971,8 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
     );
   } else {
     picksText = await sonnet(
-      PICKS_HOY_SYSTEM,
-      `Partidos de ${displayName} del día ${today}. DATOS REALES:\n\n${JSON.stringify(enriched.map(e => ({ ...e, _extendedProbs: undefined })), null, 2)}\n\nEmite picks de valor. REGLAS IRROMPIBLES: (1) CUOTA MÍNIMA ABSOLUTA 1.70 — cualquier pick con cuota menor se DESCARTA, (2) PROHIBIDO DNB, (3) PROHIBIDO 1X2 a cuota menor de 1.80. Si no hay picks con cuota ≥1.70, responde solo: ⛔ Sin picks de valor real hoy.`
+      TIPSTER_SYSTEM,
+      `Partidos de ${displayName} del día ${today}. DATOS REALES:\n\n${JSON.stringify(enriched.map(e => ({ ...e, _extendedProbs: undefined })), null, 2)}\n\nEmite picks de valor para esta liga. REGLAS IRROMPIBLES: (1) CUOTA MÍNIMA ABSOLUTA 1.65 — cualquier pick con cuota menor se DESCARTA, (2) PROHIBIDO DNB, (3) PROHIBIDO Over 1.5 FT, (4) PROHIBIDO mostrar EV%, probabilidades internas o razones de exclusión. Si no hay picks con valor real, responde SOLO: ⛔ Sin picks de valor real hoy.`
     );
   }
 
