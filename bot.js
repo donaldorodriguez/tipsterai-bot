@@ -3004,13 +3004,63 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     ...(cardsProj   && { proyeccionTarjetas: cardsProj }),
   };
 
-  await bot.sendMessage(chatId, '⚡ Procesando análisis profesional...');
-  const system = isLive ? INPLAY_SYSTEM : TIPSTER_SYSTEM;
-  const season = LEAGUE_SEASONS[leagueId] || 2025;
-  const analysis = await sonnet(
-    system,
-    `Analiza este partido con DATOS REALES de API-Football (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}`
-  );
+  await bot.sendMessage(chatId, '⚡ Procesando análisis...');
+
+  // ── En vivo → INPLAY_SYSTEM (necesita contexto del partido activo) ──────────
+  if (isLive) {
+    const liveOdds = await getLiveOdds(nextRaw.fixture.id).catch(() => null);
+    if (liveOdds) analysisData.cuotasVivo = liveOdds;
+    const analysis = await sonnet(
+      INPLAY_SYSTEM,
+      `Analiza este partido EN VIVO:\n\n${JSON.stringify(analysisData, null, 2)}`
+    );
+    await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
+    recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]).catch(e => console.error('recordPicks:', e.message));
+    return;
+  }
+
+  // ── Pre-partido → motor JS selecciona, LLM solo formatea ────────────────────
+  const realOdds = await getRealOdds(nextRaw.fixture.id).catch(() => null);
+
+  const hFor = parseFloat(homeStatsData?.golesAnotadosHome) || 1.3;
+  const hAgt = parseFloat(homeStatsData?.golesRecibidosHome) || 1.1;
+  const aFor = parseFloat(awayStatsData?.golesAnotadosAway) || 1.0;
+  const aAgt = parseFloat(awayStatsData?.golesRecibidosAway) || 1.3;
+  const extProbs = calcExtendedProbs(hFor, hAgt, aFor, aAgt);
+
+  const fixtureForEngine = {
+    fixtureId:      nextRaw.fixture.id,
+    liga:           nextRaw.league.name,
+    country:        nextRaw.league.country,
+    local:          homeTeam,
+    visitante:      awayTeam,
+    hora:           formatHour(nextRaw.fixture.date),
+    statsLocal:     homeStatsData,
+    statsVisitante: awayStatsData,
+    _extendedProbs: extProbs,
+    cuotasReales:   realOdds || undefined,
+  };
+
+  const partidoCandidates = buildPickCandidates([fixtureForEngine]);
+  const partidoPicks      = selectDiversePicks(partidoCandidates, 2);
+  console.log(`🎯 handlePartido — candidatos JS: ${partidoCandidates.length} | picks: ${partidoPicks.length} | cuotas: ${realOdds ? 'sí' : 'no'}`);
+
+  let analysis;
+  if (partidoPicks.length >= 1 && realOdds) {
+    // Motor JS encontró valor → LLM formatea
+    analysis = await sonnet(
+      PICKS_HOY_FORMATTER_SYSTEM,
+      `Partido: ${homeTeam} vs ${awayTeam} | ${nextRaw.league.name}\n\nPICKS SELECCIONADOS — NO cambies ni añadas:\n\n${JSON.stringify(partidoPicks, null, 2)}\n\nH2H reciente:\n${JSON.stringify(h2hData.slice(0, 5), null, 2)}`
+    );
+  } else {
+    // Sin cuotas o sin picks → LLM con restricciones duras
+    const season = LEAGUE_SEASONS[leagueId] || 2025;
+    analysis = await sonnet(
+      TIPSTER_SYSTEM,
+      `Analiza este partido (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}\n\nREGLAS DE SALIDA IRROMPIBLES:\n- CUOTA MÍNIMA 1.65 para cualquier pick. Si la cuota es menor, NO incluyas ese pick.\n- PROHIBIDO DNB bajo cualquier circunstancia.\n- PROHIBIDO Over 1.5 goles FT — cuota siempre es menor a 1.50, no tiene valor.\n- PROHIBIDO mostrar EV%, probabilidades en % ni ningún valor técnico interno.\n- Si no hay picks con cuota real ≥ 1.65, escribe solo: ⛔ Sin picks de valor real para este partido.`
+    );
+  }
+
   await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
   recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]).catch(e => console.error('recordPicks:', e.message));
 }
