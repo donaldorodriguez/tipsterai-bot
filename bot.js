@@ -2743,7 +2743,11 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   // Guardar en caché
   setPicksCache('all', picksText, enriched.map(f => f.fixtureId));
-  await sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
+  try {
+    await sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
+  } catch {
+    await sendLong(chatId, `📅 PICKS DEL DÍA — ${today}\n\n${picksText.replace(/[*_`]/g, '')}`);
+  }
   recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
 }
 
@@ -3079,7 +3083,11 @@ async function handlePartido(chatId, teamName, countryHint = '') {
       INPLAY_SYSTEM,
       `Analiza este partido EN VIVO:\n\n${JSON.stringify(analysisData, null, 2)}`
     );
-    await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
+    try {
+      await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
+    } catch {
+      await sendLong(chatId, `🎯 ${homeTeam} vs ${awayTeam}\n\n${analysis.replace(/[*_`]/g, '')}`);
+    }
     recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]).catch(e => console.error('recordPicks:', e.message));
     return;
   }
@@ -3126,7 +3134,11 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     );
   }
 
-  await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
+  try {
+    await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
+  } catch {
+    await sendLong(chatId, `🎯 ${homeTeam} vs ${awayTeam}\n\n${analysis.replace(/[*_`]/g, '')}`);
+  }
   recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]).catch(e => console.error('recordPicks:', e.message));
 }
 
@@ -3204,7 +3216,11 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
     INPLAY_SYSTEM,
     `DATOS REALES EN VIVO de API-Football:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y da picks de valor in-play. USA cuotasVivo para las cuotas reales. Si cuotasVivo es null para un partido, indica "verificar cuota en casa de apuestas".`
   );
-  await sendLong(chatId, `🔴 *PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}*\n\n${analysis}`, { parse_mode: 'Markdown' });
+  try {
+    await sendLong(chatId, `🔴 *PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}*\n\n${analysis}`, { parse_mode: 'Markdown' });
+  } catch {
+    await sendLong(chatId, `🔴 PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}\n\n${analysis.replace(/[*_`]/g, '')}`);
+  }
   recordPicks(analysis, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.homeTeam, visitante: f.awayTeam, liga: f.leagueName, fechaPartido: f.date }))).catch(e => console.error('recordPicks:', e.message));
 }
 
@@ -4117,7 +4133,11 @@ async function handlePartidoConTeam(chatId, teamData, intent = {}) {
   const system   = isLive ? INPLAY_SYSTEM : TIPSTER_SYSTEM;
   const season   = LEAGUE_SEASONS[leagueId] || 2025;
   const analysis = await sonnet(system, `Analiza este partido (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}`);
-  await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
+  try {
+    await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
+  } catch {
+    await sendLong(chatId, `🎯 ${homeTeam} vs ${awayTeam}\n\n${analysis.replace(/[*_`]/g, '')}`);
+  }
   recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]).catch(() => {});
 }
 
