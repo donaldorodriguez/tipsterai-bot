@@ -621,6 +621,77 @@ function calcLiveProjection(current, elapsed, total = 90) {
 }
 
 /**
+ * Calcula qué líneas de goles totales tienen valor dado el marcador actual en vivo.
+ * Evita recomendar líneas triviales (ya casi seguras o casi imposibles).
+ *
+ * @param {number} currentGoals  - Goles totales ya marcados en el partido
+ * @param {number} elapsed       - Minutos transcurridos
+ * @param {number} homeFor       - Promedio histórico goles anotados local
+ * @param {number} awayFor       - Promedio histórico goles anotados visitante
+ * @returns {object} líneas evaluadas con probabilidades y recomendación
+ */
+function calcLiveGoalLines(currentGoals, elapsed, homeFor = 1.3, awayFor = 1.0) {
+  if (!elapsed || elapsed <= 0) return null;
+
+  const minutesRemaining = Math.max(1, 90 - elapsed);
+  const currentPace = currentGoals / elapsed;                     // goles/min actuales
+  const historicalRate = (homeFor + awayFor) / 90;               // goles/min históricos
+
+  // Blend: a más minutos jugados, más peso al ritmo actual del partido
+  const blendWeight = Math.min(elapsed / 70, 0.65);
+  const blendedRate = currentPace * blendWeight + historicalRate * (1 - blendWeight);
+  const lambda = blendedRate * minutesRemaining;                  // goles esperados restantes
+
+  // P(X >= k) con distribución Poisson para los goles restantes
+  const probAtLeast = (k) => {
+    if (lambda <= 0) return k <= 0 ? 1 : 0;
+    let cumul = 0;
+    for (let i = 0; i < k; i++) cumul += poissonPMF(lambda, i);
+    return 1 - cumul;
+  };
+
+  const lines = [];
+  // Evaluar Over/Under para +0.5, +1.5, +2.5, +3.5 goles restantes
+  for (const extra of [0.5, 1.5, 2.5, 3.5]) {
+    const totalLine = currentGoals + extra;
+    const goalsNeeded = Math.ceil(extra); // cuántos goles más necesita la línea Over
+    const pOver  = +(probAtLeast(goalsNeeded) * 100).toFixed(1);
+    const pUnder = +(100 - pOver).toFixed(1);
+
+    // Zona de valor: probabilidad entre 20% y 80% → odds entre 1.25 y 5.0
+    const overHasValue  = pOver  >= 20 && pOver  <= 80;
+    const underHasValue = pUnder >= 20 && pUnder <= 80;
+
+    lines.push({
+      linea:        `${totalLine}`,
+      overProb:     pOver,
+      underProb:    pUnder,
+      overValor:    overHasValue,
+      underValor:   underHasValue,
+      nota:         pOver > 85
+        ? `Over ${totalLine} casi garantizado — sin valor en cuota`
+        : pOver < 10
+        ? `Over ${totalLine} casi imposible — sin valor`
+        : `Over ${totalLine} (${pOver}%) | Under ${totalLine} (${pUnder}%)`,
+    });
+  }
+
+  const lineasConValor = lines.filter(l => l.overValor || l.underValor);
+
+  return {
+    golesActuales:      currentGoals,
+    minutosJugados:     elapsed,
+    minutosRestantes:   minutesRemaining,
+    golesEsperadosRest: +lambda.toFixed(2),
+    proyeccionTotal:    +(currentGoals + lambda).toFixed(1),
+    lineas:             lines,
+    lineasConValor:     lineasConValor.length > 0
+      ? lineasConValor
+      : [{ nota: 'Sin líneas de goles con valor claro en este momento' }],
+  };
+}
+
+/**
  * Enriquece los datos de un partido con probabilidades calculadas.
  * Se añade el bloque `probabilidades` al objeto de análisis.
  *
@@ -1076,6 +1147,15 @@ PROYECCIONES EN TIEMPO REAL:
 - proyeccionCorners.remaining: cuántos corners faltan (para saber si vale apostar ahora)
 - proyeccionTarjetas.projected: si > 4.5 con confidence "alta" → considera Over 3.5/4.5
 - Solo usa proyecciones con confidence "alta" (min 30 minutos jugados) para picks de stake 7+
+
+MERCADO DE GOLES EN VIVO — REGLA CRÍTICA:
+NUNCA descartes el mercado de goles completo por "ya hay N goles". Lo que debes hacer:
+1. Usar el campo "proyeccionGolesLineas" (o "lineasGolesVivo") que viene en los datos.
+2. Ese campo ya calcula qué líneas tienen valor real (probabilidad entre 20-80%).
+3. Si hay 2 goles al min 45 → Over 2.5 es trivial (sin valor). Pero Over 3.5 o Under 3.5 PUEDEN tener valor.
+4. Siempre evalúa: Over (golesActuales+1.5), Over (golesActuales+2.5), Under (golesActuales+1.5).
+5. Usa el campo "lineasConValor" para saber cuáles recomendar — solo propón mercados listados ahí.
+6. Si "lineasConValor" está vacío → no fuerces picks de goles, enfócate en corners/tarjetas.
 
 FORMATO ADICIONAL IN-PLAY:
 ⏰ Actúa antes del min: [XX]
@@ -1658,6 +1738,14 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     ? calcLiveProjection(homeCards + awayCards, elapsed)
     : null;
 
+  // Líneas de goles con valor real dado el marcador actual (solo en vivo)
+  const currentGoalsTotal = isLive
+    ? (nextRaw.goals?.home ?? 0) + (nextRaw.goals?.away ?? 0)
+    : 0;
+  const goalLinesProj = isLive && elapsed > 0
+    ? calcLiveGoalLines(currentGoalsTotal, elapsed)
+    : null;
+
   const analysisData = {
     partido: {
       liga:      nextRaw.league.name,
@@ -1675,10 +1763,11 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     statsLocal:     homeStatsData,
     statsVisitante: awayStatsData,
     estadisticasVivo: liveStatsData,
-    ...(probBlock   && { probabilidadesCalculadas: probBlock }),
-    ...(momentum    && { momentumEnVivo: momentum }),
-    ...(cornersProj && { proyeccionCorners: cornersProj }),
-    ...(cardsProj   && { proyeccionTarjetas: cardsProj }),
+    ...(probBlock     && { probabilidadesCalculadas: probBlock }),
+    ...(momentum      && { momentumEnVivo: momentum }),
+    ...(cornersProj   && { proyeccionCorners: cornersProj }),
+    ...(cardsProj     && { proyeccionTarjetas: cardsProj }),
+    ...(goalLinesProj && { lineasGolesVivo: goalLinesProj }),
   };
 
   await bot.sendMessage(chatId, '⚡ Procesando análisis profesional...');
@@ -1739,13 +1828,20 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
       ? calcLiveProjection(homeCards + awayCards, elapsed)
       : null;
 
+    // Líneas de goles con valor real dado el marcador actual
+    const currentGoals = (f.homeGoals ?? 0) + (f.awayGoals ?? 0);
+    const goalLinesProj = elapsed > 0
+      ? calcLiveGoalLines(currentGoals, elapsed)
+      : null;
+
     return {
       ...f,
       marcador: `${f.homeGoals ?? 0}-${f.awayGoals ?? 0}`,
       estadisticasVivo: liveStats,
-      ...(momentum    && { momentumEnVivo: momentum }),
-      ...(cornersProj && { proyeccionCorners: cornersProj }),
-      ...(cardsProj   && { proyeccionTarjetas: cardsProj }),
+      ...(momentum      && { momentumEnVivo: momentum }),
+      ...(cornersProj   && { proyeccionCorners: cornersProj }),
+      ...(cardsProj     && { proyeccionTarjetas: cardsProj }),
+      ...(goalLinesProj && { lineasGolesVivo: goalLinesProj }),
     };
   });
 
