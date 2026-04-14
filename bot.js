@@ -2232,6 +2232,98 @@ FORMATO ADICIONAL IN-PLAY:
 📈 Ritmo corners: [proyeccionCorners.pace] corners/90min → proyectados [proyeccionCorners.projected] al final
 📊 Momentum: [momentumEnVivo.label]`;
 
+// ─── Sistema de análisis profundo para partido específico ────────────────────
+
+const PARTIDO_DEEP_SYSTEM = `Eres un analista deportivo profesional de élite. Cuando alguien pide analizar un partido específico, haces un análisis PROFUNDO y MULTI-MERCADO, no un pick simple.
+
+ANÁLISIS OBLIGATORIO — debes cubrir TODOS estos mercados:
+1. Resultado FT (con probabilidades claras, no solo "gana X")
+2. Goles 1er Tiempo: Over/Under 0.5, Over/Under 1.5
+3. Goles 2do Tiempo: Over/Under 1.5, Over/Under 2.5
+4. Goles Totales: Over/Under 2.5, Over/Under 3.5
+5. BTTS (ambos marcan): Sí / No
+6. Corners totales (Over/Under línea más probable)
+7. Tarjetas totales (Over/Under línea más probable)
+8. Hándicap Asiático si aplica
+
+DETECCIÓN DE CONTEXTO ELIMINATORIA:
+Si el JSON incluye "contextoEliminatoria", es una fase final (Champions, Europa League, etc.):
+- Lee el campo marcadorGlobal y golesNecesitados
+- Si el visitante necesita 2+ goles para pasar → atacará full press
+- Si el local está 2 arriba en el global → defenderá profundo
+- Esto CAMBIA las probabilidades: ajusta lambdas tácticos, no uses solo promedios históricos
+- Ejemplo: si Barça necesita 3 goles → Over corners casi seguro, Barça genera corners masivos
+
+USO DE ESTADÍSTICAS:
+- Usa golesAnotadosHome/Away de AMBAS fuentes (CL stats y liga doméstica si ambas están disponibles)
+- Si hay statsLigaDomestica, úsalas como referencia de volumen de goles real (más partidos = más representativo)
+- Para corners: toma el promedio de goles totales y proyecta: 8 + (xGTotal - 2.0) × 3.0 = lambda corners
+- Para tarjetas: suma de amarillas totales de ambos equipos / partidos jugados
+
+USO DE PROBABILIDADES CALCULADAS:
+Si el JSON incluye "probabilidadesCalculadas":
+- probHomeWin / probDraw / probAwayWin → úsalos directamente para resultado
+- probOver25 / probOver35 → para mercado de goles
+- probBTTS_Combinada → para BTTS
+- xGLocal / xGVisitante → para ajustar la lambda táctica
+
+USO DE CUOTAS REALES:
+Si el JSON incluye "cuotasReales":
+- USA EXACTAMENTE esas cuotas +0.15 como "Cuota mínima" del pick (nunca inventes cuotas)
+- Calcula EV implícito: si tu probabilidad > 1/cuota → hay valor positivo
+
+FORMATO OBLIGATORIO — SIEMPRE usa este estructura:
+
+🌍 [País] — [Liga]
+⚽ [Local] vs [Visitante] | ⏰ [Hora]
+━━━━━━━━━━━━━━━━━━━
+
+🔬 CONTEXTO CRÍTICO
+[Si eliminatoria: marcador global, quién necesita qué, táctica esperada]
+[Árbitro si está disponible — su perfil de tarjetas]
+[Lesionados/rotaciones si hay indicios en los datos]
+
+📊 ESTADÍSTICAS CLAVE (3-5 líneas máximo)
+▸ [stat más relevante local]
+▸ [stat más relevante visitante]
+▸ [H2H más relevante — últimos 3 partidos]
+▸ [Forma reciente de ambos]
+
+📐 ANÁLISIS DE MERCADOS
+▸ Resultado FT: [Local X%] [Empate X%] [Visitante X%]
+▸ Over 2.5 goles: X% | Over 3.5: X%
+▸ BTTS: X%
+▸ Corners proyectados: ~X | Over 10.5 válido: sí/no
+▸ Tarjetas proyectadas: ~X | Over 4.5 válido: sí/no
+▸ Goles 1T: Over 0.5 (X%) | Over 1.5 (X%)
+
+🎯 PICKS (mínimo 3, de mercados DISTINTOS — nunca 3 picks del mismo mercado):
+
+🎯 PICK 1: [nombre del mercado]
+┌ Selección: [selección exacta]
+├ Razonamiento: [2-3 líneas de contexto real, usa los datos del JSON]
+├ Probabilidad: X%
+├ 🏆 Stake: X/10
+├ 💡 Cuota mínima: X.XX
+└ ⚠️ Riesgo: [factor de fallo principal]
+
+[repetir para PICK 2, PICK 3]
+
+━━━━━━━━━━━━━━━━━━━
+⛔ MERCADOS DESCARTADOS (menciona 2-3 que evaluaste pero no recomiendas y por qué)
+
+REGLAS IRROMPIBLES:
+- Cuota mínima 1.65 para cualquier pick
+- PROHIBIDO DNB bajo ninguna circunstancia
+- PROHIBIDO Over 1.5 FT (cuota siempre < 1.50)
+- PROHIBIDO mostrar EV%, lambdas, campos técnicos internos
+- PROHIBIDO usar # ## ### (se ven mal en Telegram)
+- Para picks de resultado (1X2): SOLO si la probabilidad de ese resultado supera 60% Y la cuota es ≥ 1.75
+- Si la victoria del favorito es a 1.30-1.70: BUSCA OTRO MERCADO (corners, tarjetas, BTTS, goles 2T)
+- Usa *texto* para negritas (un solo asterisco, estilo Telegram)
+
+Responde en español. Sé analítico pero directo.`;
+
 // ─── Intent detection ─────────────────────────────────────────────────────────
 
 const INTENT_SYSTEM = `Eres un clasificador de intenciones para un bot tipster de fútbol. Responde ÚNICAMENTE con JSON válido.
@@ -3015,22 +3107,81 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     { parse_mode: 'Markdown' }
   );
 
+  // Ligas europeas (CL/EL/ECL): también buscar stats de liga doméstica para mejor baseline
+  const DOMESTIC_LEAGUE = { 2: 140, 3: 140, 135: 135, 78: 78, 61: 61, 94: 94 }; // CL/EL → LaLiga, etc.
+  // Para CL/EL buscamos league doméstica del equipo local (heurística: usamos homeId)
+  const isEuropean = [2, 3, 848].includes(leagueId);
+  const domLeagueId = isEuropean ? null : null; // no necesitamos hardcodear, lo hacemos con ambos equipos
+
   const requests = [
     getH2H(homeId, awayId),
     getTeamStats(homeId, leagueId),
     getTeamStats(awayId, leagueId),
   ];
   if (isLive) requests.push(getFixtureStatistics(nextRaw.fixture.id));
+  // Para ligas europeas (CL/EL): buscar también stats de LaLiga/Bundesliga del home team
+  // Detectamos la liga doméstica probable buscando stats en las ligas más comunes
+  if (isEuropean) {
+    requests.push(
+      // Intenta LaLiga(140), Bundesliga(78), PremierLeague(39), SerieA(135), Ligue1(61), Eredivisie(88), Liga NOS(94)
+      Promise.any([140,78,39,135,61,88,94].map(lid => getTeamStats(homeId, lid).then(s => s ? s : Promise.reject()))).catch(() => null),
+      Promise.any([140,78,39,135,61,88,94].map(lid => getTeamStats(awayId, lid).then(s => s ? s : Promise.reject()))).catch(() => null)
+    );
+  }
 
-  const [h2hRes, homeStatsRes, awayStatsRes, liveStatsRes] = await Promise.allSettled(requests);
+  const [h2hRes, homeStatsRes, awayStatsRes, liveStatsRes, homedomRes, awaydomRes] = await Promise.allSettled(requests);
 
-  const h2hData      = h2hRes.status === 'fulfilled'      ? h2hRes.value      : [];
-  const homeStatsData= homeStatsRes.status === 'fulfilled' ? homeStatsRes.value : null;
-  const awayStatsData= awayStatsRes.status === 'fulfilled' ? awayStatsRes.value : null;
-  const liveStatsData= (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
+  const h2hData         = h2hRes.status === 'fulfilled'       ? h2hRes.value       : [];
+  const homeStatsData   = homeStatsRes.status === 'fulfilled'  ? homeStatsRes.value  : null;
+  const awayStatsData   = awayStatsRes.status === 'fulfilled'  ? awayStatsRes.value  : null;
+  const liveStatsData   = (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
+  const homeDomStats    = isEuropean && homedomRes?.status === 'fulfilled' ? homedomRes.value : null;
+  const awayDomStats    = isEuropean && awaydomRes?.status === 'fulfilled' ? awaydomRes.value : null;
+
+  // Detectar contexto de eliminatoria (CL/EL Knockout o ronda específica)
+  const round = nextRaw.league?.round || '';
+  const isKnockout = /quarter|semi|final|round of|octavos|cuartos|semis|knockout/i.test(round);
+  let contextoEliminatoria = null;
+  if (isKnockout) {
+    // Buscar la ida en el H2H (partido reciente de la misma competición entre estos equipos)
+    const primeraPata = h2hData.find(m =>
+      m.liga === nextRaw.league.name &&
+      new Date(m.fecha) < new Date(nextRaw.fixture.date)
+    );
+    if (primeraPata) {
+      const golesHome1 = primeraPata.local === homeTeam ? primeraPata.golesLocal : primeraPata.golesVisitante;
+      const golesAway1 = primeraPata.local === homeTeam ? primeraPata.golesVisitante : primeraPata.golesLocal;
+      const globalHome = (golesHome1 || 0);
+      const globalAway = (golesAway1 || 0);
+      const ventajaGlobal = globalHome > globalAway
+        ? `${homeTeam} gana el global ${globalHome}-${globalAway}`
+        : globalAway > globalHome
+        ? `${awayTeam} gana el global ${globalAway}-${globalHome}`
+        : `Global empatado ${globalHome}-${globalAway}`;
+      const necesita = globalHome > globalAway
+        ? `${awayTeam} necesita al menos ${globalHome - globalAway + 1} goles sin respuesta (o ${globalHome - globalAway} para prórroga)`
+        : globalAway > globalHome
+        ? `${homeTeam} necesita al menos ${globalAway - globalHome + 1} goles sin respuesta`
+        : 'Cualquier victoria directa clasifica';
+      contextoEliminatoria = {
+        ronda: round,
+        primeraPata: `${primeraPata.local} ${primeraPata.golesLocal}-${primeraPata.golesVisitante} ${primeraPata.visitante}`,
+        marcadorGlobal: ventajaGlobal,
+        golesNecesitados: necesita,
+        implicacionTactica: globalHome > globalAway
+          ? `${homeTeam} puede cerrarse atrás y vivir del contragolpe. ${awayTeam} presiona al máximo desde min 1.`
+          : globalAway > globalHome
+          ? `${awayTeam} puede cerrarse atrás. ${homeTeam} presiona al máximo.`
+          : `Partido abierto — cualquier gol cambia la táctica.`,
+      };
+    }
+  }
 
   // Calcular probabilidades con modelo de Poisson
-  const probBlock = buildProbBlock(homeStatsData, awayStatsData, h2hData, leagueId);
+  // Para europeas: usar stats domésticas si hay (más representativas)
+  const homeBase = homeDomStats || homeStatsData;
+  const awayBase = awayDomStats || awayStatsData;
+  const probBlock = buildProbBlock(homeBase, awayBase, h2hData, leagueId);
 
   // Momentum y proyecciones en vivo
   const momentum   = isLive ? calcLiveMomentum(liveStatsData, homeTeam, awayTeam) : null;
@@ -3053,6 +3204,7 @@ async function handlePartido(chatId, teamName, countryHint = '') {
   const analysisData = {
     partido: {
       liga:      nextRaw.league.name,
+      ronda:     round || null,
       pais:      nextRaw.league.country,
       fecha:     nextRaw.fixture.date.split('T')[0],
       hora:      formatHour(nextRaw.fixture.date),
@@ -3066,14 +3218,17 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     bttsEnH2H:      h2hData.filter(m => m.btts).length,
     statsLocal:     homeStatsData,
     statsVisitante: awayStatsData,
+    ...(homeDomStats && { statsLocalLigaDomestica:   homeDomStats }),
+    ...(awayDomStats && { statsVisitanteLigaDomestica: awayDomStats }),
     estadisticasVivo: liveStatsData,
+    ...(contextoEliminatoria && { contextoEliminatoria }),
     ...(probBlock   && { probabilidadesCalculadas: probBlock }),
     ...(momentum    && { momentumEnVivo: momentum }),
     ...(cornersProj && { proyeccionCorners: cornersProj }),
     ...(cardsProj   && { proyeccionTarjetas: cardsProj }),
   };
 
-  await bot.sendMessage(chatId, '⚡ Procesando análisis...');
+  await bot.sendMessage(chatId, '⚡ Procesando análisis profundo...');
 
   // ── En vivo → INPLAY_SYSTEM (necesita contexto del partido activo) ──────────
   if (isLive) {
@@ -3092,13 +3247,15 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     return;
   }
 
-  // ── Pre-partido → motor JS selecciona, LLM solo formatea ────────────────────
+  // ── Pre-partido → motor JS selecciona picks de valor, luego análisis profundo ─
   const realOdds = await getRealOdds(nextRaw.fixture.id).catch(() => null);
+  if (realOdds) analysisData.cuotasReales = realOdds;
 
-  const hFor = parseFloat(homeStatsData?.golesAnotadosHome) || 1.3;
-  const hAgt = parseFloat(homeStatsData?.golesRecibidosHome) || 1.1;
-  const aFor = parseFloat(awayStatsData?.golesAnotadosAway) || 1.0;
-  const aAgt = parseFloat(awayStatsData?.golesRecibidosAway) || 1.3;
+  // Usar stats domésticas para el motor si están disponibles (más partidos = más fiable)
+  const hFor = parseFloat((homeDomStats || homeStatsData)?.golesAnotadosHome) || 1.3;
+  const hAgt = parseFloat((homeDomStats || homeStatsData)?.golesRecibidosHome) || 1.1;
+  const aFor = parseFloat((awayDomStats || awayStatsData)?.golesAnotadosAway) || 1.0;
+  const aAgt = parseFloat((awayDomStats || awayStatsData)?.golesRecibidosAway) || 1.3;
   const extProbs = calcExtendedProbs(hFor, hAgt, aFor, aAgt);
 
   const fixtureForEngine = {
@@ -3108,29 +3265,29 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     local:          homeTeam,
     visitante:      awayTeam,
     hora:           formatHour(nextRaw.fixture.date),
-    statsLocal:     homeStatsData,
-    statsVisitante: awayStatsData,
+    statsLocal:     homeDomStats || homeStatsData,
+    statsVisitante: awayDomStats || awayStatsData,
     _extendedProbs: extProbs,
     cuotasReales:   realOdds || undefined,
   };
 
   const partidoCandidates = buildPickCandidates([fixtureForEngine]);
   const partidoPicks      = selectDiversePicks(partidoCandidates, 2);
-  console.log(`🎯 handlePartido — candidatos JS: ${partidoCandidates.length} | picks: ${partidoPicks.length} | cuotas: ${realOdds ? 'sí' : 'no'}`);
+  console.log(`🎯 handlePartido — candidatos JS: ${partidoCandidates.length} | picks: ${partidoPicks.length} | cuotas: ${realOdds ? 'sí' : 'no'} | knockout: ${isKnockout}`);
 
+  const season = LEAGUE_SEASONS[leagueId] || 2025;
   let analysis;
-  if (partidoPicks.length >= 1 && realOdds) {
-    // Motor JS encontró valor → LLM formatea
+  if (partidoPicks.length >= 1 && realOdds && !isKnockout) {
+    // Motor JS encontró valor en partido normal → LLM solo formatea
     analysis = await sonnet(
       PICKS_HOY_FORMATTER_SYSTEM,
-      `Partido: ${homeTeam} vs ${awayTeam} | ${nextRaw.league.name}\n\nPICKS SELECCIONADOS — NO cambies ni añadas:\n\n${JSON.stringify(partidoPicks, null, 2)}\n\nH2H reciente:\n${JSON.stringify(h2hData.slice(0, 5), null, 2)}`
+      `Partido: ${homeTeam} vs ${awayTeam} | ${nextRaw.league.name}\n\nPICKS SELECCIONADOS — NO cambies ni añadas:\n\n${JSON.stringify(partidoPicks, null, 2)}\n\nH2H reciente:\n${JSON.stringify(h2hData.slice(0, 5), null, 2)}\n\n${contextoEliminatoria ? 'CONTEXTO ELIMINATORIA:\n'+JSON.stringify(contextoEliminatoria) : ''}`
     );
   } else {
-    // Sin cuotas o sin picks → LLM con restricciones duras
-    const season = LEAGUE_SEASONS[leagueId] || 2025;
+    // Análisis profundo completo (partido especial, eliminatoria, o sin picks automáticos)
     analysis = await sonnet(
-      TIPSTER_SYSTEM,
-      `Analiza este partido (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}\n\nREGLAS DE SALIDA IRROMPIBLES:\n- CUOTA MÍNIMA 1.65 para cualquier pick. Si la cuota es menor, NO incluyas ese pick.\n- PROHIBIDO DNB bajo cualquier circunstancia.\n- PROHIBIDO Over 1.5 goles FT — cuota siempre es menor a 1.50, no tiene valor.\n- PROHIBIDO mostrar EV%, probabilidades en % ni ningún valor técnico interno.\n- Si no hay picks con cuota real ≥ 1.65, escribe solo: ⛔ Sin picks de valor real para este partido.`
+      PARTIDO_DEEP_SYSTEM,
+      `Analiza este partido en profundidad (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}`
     );
   }
 
