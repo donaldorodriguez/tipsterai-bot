@@ -346,6 +346,12 @@ const PLANES = {
     dias_prueba: 0,
     puede_imagen: false,
   },
+  vip15: {
+    nombre: 'VIP 15 días',
+    consultas_diarias: 10,
+    dias_prueba: 0,
+    puede_imagen: false,
+  },
   pro: {
     nombre: 'PRO',
     consultas_diarias: 50,
@@ -353,6 +359,19 @@ const PLANES = {
     puede_imagen: true,
   },
 };
+
+// ─── Wompi payment links ──────────────────────────────────────────────────────
+
+const WOMPI_LINKS = {
+  vip15: 'https://checkout.wompi.co/l/3ZBvRL',  // $59.900 COP — VIP 15 días
+  vip30: 'https://checkout.wompi.co/l/LWfu76',  // $99.900 COP — VIP 30 días
+  pro30: 'https://checkout.wompi.co/l/7t9pfC',  // $179.900 COP — PRO 30 días
+};
+
+// Genera link personalizado con referencia TELEGRAMID_plan
+function wompiLink(baseLink, telegramId, plan) {
+  return `${baseLink}?reference=${telegramId}_${plan}`;
+}
 
 // ─── Cache ────────────────────────────────────────────────────────────────────
 
@@ -3739,28 +3758,37 @@ FORMATO: usa *texto* para negritas (un solo asterisco, estilo Telegram). Nunca u
   await bot.sendMessage(chatId, normalizeMd(response), { parse_mode: 'Markdown' });
 }
 
-async function handleVerPlanes(chatId) {
+async function handleVerPlanes(chatId, telegramId) {
+  const tid = telegramId || chatId;
+  const linkVip15 = wompiLink(WOMPI_LINKS.vip15, tid, 'vip15');
+  const linkVip30 = wompiLink(WOMPI_LINKS.vip30, tid, 'vip30');
+  const linkPro30 = wompiLink(WOMPI_LINKS.pro30, tid, 'pro30');
+
   await bot.sendMessage(chatId,
     `🏆 *TIPSTERAI MASTER PRO*\n` +
     `_El bot de apuestas deportivas con IA más avanzado_\n\n` +
     `━━━━━━━━━━━━━━━━━━━\n` +
     `🆓 *FREEMIUM* — Gratis\n` +
-    `▸ 1 consulta al día\n` +
-    `▸ 3 días de prueba\n` +
-    `▸ Picks básicos del día\n\n` +
-    `⚡ *BASIC — $29 USD/mes*\n` +
+    `▸ 1 consulta al día · 3 días de prueba\n\n` +
+    `⚡ *VIP 15 días — $59.900 COP*\n` +
     `▸ 10 consultas diarias\n` +
     `▸ Picks del día + análisis de partidos\n` +
-    `▸ Picks en vivo\n` +
-    `▸ Análisis por liga y equipo\n\n` +
-    `🏆 *PRO — $49 USD/mes*\n` +
-    `▸ Consultas ilimitadas\n` +
-    `▸ Todo lo del plan Basic\n` +
-    `▸ Análisis de imágenes en vivo\n` +
-    `▸ Sistema del Día (picks optimizados)\n` +
+    `▸ Picks en vivo por liga y equipo\n` +
+    `💳 [Pagar con Wompi](${linkVip15})\n\n` +
+    `⚡ *VIP 30 días — $99.900 COP*\n` +
+    `▸ 10 consultas diarias\n` +
+    `▸ Picks del día + análisis de partidos\n` +
+    `▸ Picks en vivo por liga y equipo\n` +
+    `💳 [Pagar con Wompi](${linkVip30})\n\n` +
+    `🏆 *PRO 30 días — $179.900 COP*\n` +
+    `▸ 50 consultas diarias\n` +
+    `▸ Todo lo del plan VIP\n` +
+    `▸ Análisis de imágenes en vivo 📸\n` +
     `▸ Acceso a todas las ligas del mundo\n` +
+    `💳 [Pagar con Wompi](${linkPro30})\n` +
     `━━━━━━━━━━━━━━━━━━━\n\n` +
-    `🔗 [Suscríbete aquí](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
+    `🇨🇴 Paga con Nequi, Bancolombia, tarjeta o PSE.\n` +
+    `🌎 También disponible en: [Whop \\(USD\\)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
     { parse_mode: 'Markdown' }
   );
 }
@@ -3959,8 +3987,11 @@ async function checkAccess(chatId, telegramId, isImage = false) {
 
   // Imagen: solo PRO
   if (isImage && !planConfig.puede_imagen) {
+    const linkPro = wompiLink(WOMPI_LINKS.pro30, telegramId, 'pro30');
     await bot.sendMessage(chatId,
-      `📸 El análisis de imágenes en vivo está disponible solo en el plan *PRO*.\n\n🔗 [Ver planes y suscribirte](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
+      `📸 El análisis de imágenes en vivo está disponible solo en el plan *PRO*.\n\n` +
+      `💳 [Suscribirse PRO — $179.900 COP](${linkPro})\n` +
+      `🌎 [Ver en Whop \\(USD\\)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
       { parse_mode: 'Markdown' }
     );
     return { allowed: false };
@@ -3969,34 +4000,43 @@ async function checkAccess(chatId, telegramId, isImage = false) {
   // Free: verificar período de prueba
   if (plan === 'free' && record.fields.trial_expira) {
     if (today > record.fields.trial_expira) {
+      const linkVip15 = wompiLink(WOMPI_LINKS.vip15, telegramId, 'vip15');
+      const linkVip30 = wompiLink(WOMPI_LINKS.vip30, telegramId, 'vip30');
+      const linkPro30 = wompiLink(WOMPI_LINKS.pro30, telegramId, 'pro30');
       await bot.sendMessage(chatId,
         `Tu período de prueba gratuito ha terminado 🏁\n\n` +
-        `Esperamos que hayas disfrutado TipsterAI.\n` +
-        `Para continuar con análisis profesionales:\n\n` +
-        `⚡ *VIP*: 10 consultas/día\n` +
-        `🏆 *PRO*: 50 consultas/día + análisis de imágenes en vivo\n\n` +
-        `🔗 [Ver planes y suscribirte](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
+        `Para continuar con análisis profesionales elige tu plan:\n\n` +
+        `⚡ *VIP 15 días* — $59.900 COP\n` +
+        `💳 [Pagar con Wompi](${linkVip15})\n\n` +
+        `⚡ *VIP 30 días* — $99.900 COP\n` +
+        `💳 [Pagar con Wompi](${linkVip30})\n\n` +
+        `🏆 *PRO 30 días* — $179.900 COP \\(+ imágenes\\)\n` +
+        `💳 [Pagar con Wompi](${linkPro30})\n\n` +
+        `🌎 También en: [Whop \\(USD\\)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
         { parse_mode: 'Markdown' }
       );
       return { allowed: false };
     }
   }
 
-  // VIP / PRO: verificar que la suscripción de 30 días no haya expirado
-  if ((plan === 'vip' || plan === 'pro') && record.fields.expires_at) {
+  // VIP / PRO: verificar que la suscripción no haya expirado
+  if ((plan === 'vip' || plan === 'vip15' || plan === 'pro') && record.fields.expires_at) {
     if (today > record.fields.expires_at) {
       // Degradar a free automáticamente
       try {
         const base = getAirtableBase();
         await base(AIRTABLE_TABLE).update(record.id, { plan: 'free' });
       } catch (e) { console.error('downgrade error:', e.message); }
+      const linkVip30 = wompiLink(WOMPI_LINKS.vip30, telegramId, 'vip30');
+      const linkPro30 = wompiLink(WOMPI_LINKS.pro30, telegramId, 'pro30');
       await bot.sendMessage(chatId,
         `⚠️ *Tu suscripción ${plan.toUpperCase()} ha expirado.*\n\n` +
         `Tu acceso ha cambiado al plan gratuito.\n\n` +
-        `Para renovar:\n` +
-        `⚡ *VIP*: 10 consultas/día\n` +
-        `🏆 *PRO*: 50 consultas/día + análisis de imágenes\n\n` +
-        `Escribe *"ver planes"* para más información.`,
+        `Para renovar escribe *"ver planes"* o elige aquí:\n\n` +
+        `⚡ *VIP 30 días* — $99.900 COP\n` +
+        `💳 [Renovar con Wompi](${linkVip30})\n\n` +
+        `🏆 *PRO 30 días* — $179.900 COP\n` +
+        `💳 [Renovar con Wompi](${linkPro30})`,
         { parse_mode: 'Markdown' }
       );
       return { allowed: false };
@@ -4007,19 +4047,25 @@ async function checkAccess(chatId, telegramId, isImage = false) {
   if (consultasHoy >= planConfig.consultas_diarias) {
     let msg;
     if (plan === 'free') {
+      const linkVip15 = wompiLink(WOMPI_LINKS.vip15, telegramId, 'vip15');
+      const linkVip30 = wompiLink(WOMPI_LINKS.vip30, telegramId, 'vip30');
       msg =
         `Has usado tu consulta gratuita de hoy 🎯\n\n` +
-        `Vuelve mañana por tu consulta diaria gratis, o accede a más análisis:\n\n` +
-        `⚡ *VIP*: 10 consultas/día\n` +
-        `🏆 *PRO*: 50 consultas/día + análisis de imágenes\n\n` +
-        `🔗 [Ver planes y suscribirte](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`;
-    } else if (plan === 'vip') {
+        `Vuelve mañana por tu consulta gratis, o accede sin límites:\n\n` +
+        `⚡ *VIP 15 días* — $59.900 COP\n` +
+        `💳 [Pagar con Wompi](${linkVip15})\n\n` +
+        `⚡ *VIP 30 días* — $99.900 COP\n` +
+        `💳 [Pagar con Wompi](${linkVip30})\n\n` +
+        `🌎 [Ver todos los planes](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`;
+    } else if (plan === 'vip' || plan === 'vip15') {
+      const linkPro30 = wompiLink(WOMPI_LINKS.pro30, telegramId, 'pro30');
       msg =
         `Has alcanzado tus 10 consultas de hoy ⚡\n\n` +
         `Tus consultas se renuevan a medianoche.\n` +
         `¿Quieres más? Upgrade a PRO:\n\n` +
-        `🏆 *PRO*: 50 consultas/día + análisis de imágenes en vivo\n\n` +
-        `🔗 [Upgrade a PRO aquí](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`;
+        `🏆 *PRO 30 días* — $179.900 COP\n` +
+        `50 consultas/día + análisis de imágenes en vivo 📸\n\n` +
+        `💳 [Upgrade a PRO con Wompi](${linkPro30})`;
     } else {
       msg = `Has alcanzado tus 50 consultas de hoy.\nTus consultas se renuevan a medianoche. ⏰`;
     }
@@ -4151,7 +4197,7 @@ bot.on('message', async (msg) => {
 
     // ver_planes nunca consume cuota ni requiere acceso
     if (intencion === 'ver_planes') {
-      return handleVerPlanes(chatId);
+      return handleVerPlanes(chatId, telegramId);
     }
 
     // Verificar acceso para TODOS los demás intents (incluyendo chat_general)
@@ -4461,10 +4507,35 @@ function expiresAt30Days() {
   return d.toISOString().split('T')[0];
 }
 
+function expiresAt15Days() {
+  const d = new Date();
+  d.setDate(d.getDate() + 15);
+  return d.toISOString().split('T')[0];
+}
+
+// Wompi: verifica checksum del evento usando WOMPI_EVENTS_SECRET
+// Spec: SHA256( signature.properties values concat + eventsKey )
+function verifyWompiSignature(payload, eventsKey) {
+  try {
+    const { signature, data } = payload;
+    if (!eventsKey) return true;   // sin clave configurada: permisivo (solo desarrollo)
+    if (!signature?.checksum || !signature?.properties) return false;
+    const getValue = (obj, dotPath) =>
+      dotPath.split('.').reduce((acc, k) => (acc != null ? acc[k] : undefined), obj);
+    const concat = signature.properties.map(p => String(getValue(data, p) ?? '')).join('') + eventsKey;
+    const expected = crypto.createHash('sha256').update(concat).digest('hex');
+    return crypto.timingSafeEqual(Buffer.from(signature.checksum), Buffer.from(expected));
+  } catch (e) {
+    console.error('verifyWompiSignature error:', e.message);
+    return false;
+  }
+}
+
 const app = express();
 
 // Parse raw body for signature verification before JSON parsing
-app.use('/webhook/whop', express.raw({ type: 'application/json' }));
+app.use('/webhook/whop',  express.raw({ type: 'application/json' }));
+app.use('/webhook/wompi', express.raw({ type: 'application/json' }));
 app.use(express.json());
 
 app.post('/webhook/whop', async (req, res) => {
@@ -4530,9 +4601,92 @@ app.post('/webhook/whop', async (req, res) => {
   }
 });
 
+// ─── Wompi Webhook ────────────────────────────────────────────────────────────
+
+const WOMPI_EVENTS_SECRET = process.env.WOMPI_EVENTS_SECRET;
+
+// Mapeo: referencia sufijo → plan interno + días
+const WOMPI_PLAN_MAP = {
+  vip15: { plan: 'vip15', expires: expiresAt15Days },
+  vip30: { plan: 'vip',   expires: expiresAt30Days },
+  pro30: { plan: 'pro',   expires: expiresAt30Days },
+};
+
+app.post('/webhook/wompi', async (req, res) => {
+  const rawBody = req.body.toString('utf8');
+
+  let payload;
+  try { payload = JSON.parse(rawBody); }
+  catch { return res.status(400).json({ error: 'Invalid JSON' }); }
+
+  if (!verifyWompiSignature(payload, WOMPI_EVENTS_SECRET)) {
+    console.warn('⚠️  Wompi webhook: firma inválida');
+    return res.status(401).json({ error: 'Invalid signature' });
+  }
+
+  const event = payload.event;
+  const tx    = payload?.data?.transaction;
+
+  console.log(`📨 Wompi event: ${event} | ref=${tx?.reference} | status=${tx?.status}`);
+
+  // Solo procesar transacciones aprobadas
+  if (event !== 'transaction.updated' || tx?.status !== 'APPROVED') {
+    return res.status(200).json({ received: true, skipped: true });
+  }
+
+  try {
+    // reference = "TELEGRAMID_plan" (ej: 123456789_vip15)
+    const reference = tx.reference || '';
+    const underscoreIdx = reference.indexOf('_');
+    if (underscoreIdx === -1) {
+      console.warn('⚠️  Wompi: referencia sin guión bajo:', reference);
+      return res.status(200).json({ received: true, error: 'Bad reference format' });
+    }
+
+    const telegramId  = reference.substring(0, underscoreIdx);
+    const planSuffix  = reference.substring(underscoreIdx + 1); // vip15 | vip30 | pro30
+    const planConfig  = WOMPI_PLAN_MAP[planSuffix];
+
+    if (!planConfig) {
+      console.warn('⚠️  Wompi: plan desconocido en referencia:', planSuffix);
+      return res.status(200).json({ received: true, error: 'Unknown plan' });
+    }
+
+    const internalPlan = planConfig.plan;
+    const expires      = planConfig.expires();
+
+    await upsertAirtableUser(telegramId, { plan: internalPlan, expires_at: expires });
+    console.log(`✅ Wompi: activado plan=${internalPlan} para telegram_id=${telegramId} hasta ${expires}`);
+
+    // Mensaje de bienvenida según plan
+    const planNombre = PLANES[internalPlan]?.nombre || internalPlan.toUpperCase();
+    const consultasDia = PLANES[internalPlan]?.consultas_diarias || 10;
+    const puedeImagen  = PLANES[internalPlan]?.puede_imagen || false;
+
+    await bot.sendMessage(telegramId,
+      `🎉 *¡Pago confirmado! Bienvenido a ${planNombre}*\n\n` +
+      `Tu suscripción está activa hasta el *${expires}*.\n\n` +
+      `Ahora tienes acceso a:\n` +
+      `• 🎯 *${consultasDia} consultas diarias*\n` +
+      `• 📡 Picks en vivo con estadísticas en tiempo real\n` +
+      `• 🔍 Análisis de cualquier equipo o partido\n` +
+      `• 🏆 Picks del día con análisis estadístico real\n` +
+      (puedeImagen ? `• 📸 Análisis de imágenes en vivo\n` : '') +
+      `\nEscríbeme lo que necesitas para empezar. ¡Buena suerte! ⚽`,
+      { parse_mode: 'Markdown' }
+    );
+
+    res.status(200).json({ received: true });
+  } catch (err) {
+    console.error('Wompi webhook handler error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 
 app.listen(WEBHOOK_PORT, () => {
   console.log(`🌐 Webhook server escuchando en puerto ${WEBHOOK_PORT}`);
   console.log(`   POST http://localhost:${WEBHOOK_PORT}/webhook/whop`);
+  console.log(`   POST http://localhost:${WEBHOOK_PORT}/webhook/wompi`);
 });
