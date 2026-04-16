@@ -4685,7 +4685,7 @@ app.post('/webhook/wompi', async (req, res) => {
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 
-app.listen(WEBHOOK_PORT, () => {
+app.listen(WEBHOOK_PORT, '0.0.0.0', () => {
   console.log(`🌐 Webhook server escuchando en puerto ${WEBHOOK_PORT}`);
   console.log(`   POST http://localhost:${WEBHOOK_PORT}/webhook/whop`);
   console.log(`   POST http://localhost:${WEBHOOK_PORT}/webhook/wompi`);
