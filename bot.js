@@ -4488,13 +4488,29 @@ bot.getMe().then(me => {
 });
 
 // Salida limpia — PM2 reinicia automáticamente
-function exitBot(reason) {
+function exitBot(reason, delayMs = 0) {
   console.error(`💥 Reiniciando proceso: ${reason}`);
-  process.exit(1);
+  if (delayMs > 0) {
+    console.log(`⏳ Esperando ${delayMs / 1000}s antes de reiniciar...`);
+    setTimeout(() => process.exit(1), delayMs);
+  } else {
+    process.exit(1);
+  }
 }
 
-// Cualquier error de polling → reinicio inmediato
-bot.on('polling_error', err => exitBot(`polling_error: ${err.message}`));
+// Polling errors: 429 espera el retry_after antes de reiniciar
+bot.on('polling_error', err => {
+  const msg = err.message || '';
+  // Telegram 429: "retry after N" — extraer N y esperar
+  const retryMatch = msg.match(/retry after (\d+)/i);
+  if (retryMatch) {
+    const retrySecs = Math.max(parseInt(retryMatch[1], 10), 10);
+    console.warn(`⚠️  Telegram 429 — esperando ${retrySecs}s antes de reiniciar`);
+    exitBot(`polling_error: ${msg}`, retrySecs * 1000);
+  } else {
+    exitBot(`polling_error: ${msg}`);
+  }
+});
 
 // Errores no capturados → reinicio
 process.on('uncaughtException',  err => exitBot(`uncaughtException: ${err.message}`));
