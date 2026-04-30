@@ -2423,7 +2423,7 @@ Intenciones disponibles:
 - "alerta_gol": alerta de probabilidad de gol en vivo — detecta partidos con mayor prob de gol próximo y buena cuota. Se activa con palabras como "alerta gol", "alerta de gol", "probabilidad gol", "donde puede haber gol", "gol en vivo", "partido con gol", "cuota gol"
 - "estadisticas": rendimiento/historial de picks que el bot ha emitido
 - "chat_general": saludos, preguntas generales de fútbol, conversación
-- "ver_planes": usuario pregunta por precios, planes, suscripción, VIP, PRO
+- "ver_planes": usuario pregunta por precios, planes, suscripción, VIP, PRO, qué incluye, cómo funciona, cuánto cuesta, cómo me suscribo, qué tiene cada plan
 - "rachas": buscar equipos con rachas activas (5+ partidos consecutivos con una estadística). Se activa con palabras como "rachas", "racha", "racha de", "equipos que llevan", "equipos con racha"
 
 Estructura JSON SIEMPRE completa:
@@ -2463,6 +2463,10 @@ Ejemplos:
 - "ver planes" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"ver planes","mercado":null,"tiempo":null,"contexto":null,"period":null}
 - "quiero PRO" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"quiero PRO","mercado":null,"tiempo":null,"contexto":null,"period":null}
 - "precios" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"precios","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"all"}
+- "que incluye" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"que incluye","mercado":null,"tiempo":null,"contexto":null,"period":null}
+- "cuanto cuesta" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"cuanto cuesta","mercado":null,"tiempo":null,"contexto":null,"period":null}
+- "como me suscribo" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"como me suscribo","mercado":null,"tiempo":null,"contexto":null,"period":null}
+- "como funciona" → {"intencion":"ver_planes","equipo":null,"liga":null,"pregunta_especifica":"como funciona","mercado":null,"tiempo":null,"contexto":null,"period":null}
 - "alerta gol" → {"intencion":"alerta_gol","equipo":null,"liga":null,"pregunta_especifica":"alerta gol","mercado":"goles","tiempo":null,"contexto":"en_vivo","period":null,"venue":"all"}
 - "gol en vivo" → {"intencion":"alerta_gol","equipo":null,"liga":null,"pregunta_especifica":"gol en vivo","mercado":"goles","tiempo":null,"contexto":"en_vivo","period":null,"venue":"all"}
 - "donde puede haber gol" → {"intencion":"alerta_gol","equipo":null,"liga":null,"pregunta_especifica":"donde puede haber gol","mercado":"goles","tiempo":null,"contexto":"en_vivo","period":null,"venue":"all"}
@@ -3834,29 +3838,33 @@ async function handleVerPlanes(chatId, telegramId) {
 
   await bot.sendMessage(chatId,
     `🏆 *TIPSTERAI MASTER PRO*\n` +
-    `_El bot de apuestas deportivas con IA más avanzado_\n\n` +
+    `_El bot de análisis deportivo con IA más avanzado_\n\n` +
     `━━━━━━━━━━━━━━━━━━━\n` +
-    `🆓 *FREEMIUM* — Gratis\n` +
-    `▸ 1 consulta al día · 3 días de prueba\n\n` +
+    `🆓 *FREEMIUM — Gratis*\n` +
+    `▸ 1 consulta al día · 3 días de prueba\n` +
+    `▸ Picks básicos del día\n\n` +
     `⚡ *VIP 15 días — $59.900 COP*\n` +
     `▸ 10 consultas diarias\n` +
-    `▸ Picks del día + análisis de partidos\n` +
-    `▸ Picks en vivo por liga y equipo\n` +
+    `▸ Picks del día con estadísticas reales\n` +
+    `▸ Análisis profundo de cualquier partido\n` +
+    `▸ Picks en vivo con datos en tiempo real\n` +
+    `▸ Filtros por liga y equipo\n` +
+    `▸ Alertas de gol en vivo\n` +
     `💳 [Pagar con Wompi](${linkVip15})\n\n` +
     `⚡ *VIP 30 días — $99.900 COP*\n` +
-    `▸ 10 consultas diarias\n` +
-    `▸ Picks del día + análisis de partidos\n` +
-    `▸ Picks en vivo por liga y equipo\n` +
+    `▸ Todo lo del VIP 15 días\n` +
+    `▸ Mejor precio por día ($3.330/día)\n` +
     `💳 [Pagar con Wompi](${linkVip30})\n\n` +
     `🏆 *PRO 30 días — $179.900 COP*\n` +
     `▸ 50 consultas diarias\n` +
     `▸ Todo lo del plan VIP\n` +
     `▸ Análisis de imágenes en vivo 📸\n` +
+    `▸ Sube foto del partido y recibe análisis\n` +
     `▸ Acceso a todas las ligas del mundo\n` +
     `💳 [Pagar con Wompi](${linkPro30})\n` +
     `━━━━━━━━━━━━━━━━━━━\n\n` +
     `🇨🇴 Paga con Nequi, Bancolombia, tarjeta o PSE.\n` +
-    `🌎 También disponible en: [Whop \\(USD\\)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
+    `🌎 También en: [Whop (USD)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
     { parse_mode: 'Markdown' }
   );
 }
@@ -4058,8 +4066,9 @@ async function checkAccess(chatId, telegramId, isImage = false) {
     const linkPro = wompiLink(WOMPI_LINKS.pro30, telegramId, 'pro30');
     await bot.sendMessage(chatId,
       `📸 El análisis de imágenes en vivo está disponible solo en el plan *PRO*.\n\n` +
+      `▸ 50 consultas/día · análisis de imágenes 📸 · todas las ligas\n` +
       `💳 [Suscribirse PRO — $179.900 COP](${linkPro})\n` +
-      `🌎 [Ver en Whop \\(USD\\)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
+      `🌎 [También en Whop (USD)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
       { parse_mode: 'Markdown' }
     );
     return { allowed: false };
@@ -4073,14 +4082,18 @@ async function checkAccess(chatId, telegramId, isImage = false) {
       const linkPro30 = wompiLink(WOMPI_LINKS.pro30, telegramId, 'pro30');
       await bot.sendMessage(chatId,
         `Tu período de prueba gratuito ha terminado 🏁\n\n` +
-        `Para continuar con análisis profesionales elige tu plan:\n\n` +
-        `⚡ *VIP 15 días* — $59.900 COP\n` +
+        `Espero que hayas visto el nivel del análisis. Para continuar elige tu plan:\n\n` +
+        `⚡ *VIP 15 días — $59.900 COP*\n` +
+        `▸ 10 consultas/día · picks · análisis · en vivo · alertas\n` +
         `💳 [Pagar con Wompi](${linkVip15})\n\n` +
-        `⚡ *VIP 30 días* — $99.900 COP\n` +
+        `⚡ *VIP 30 días — $99.900 COP*\n` +
+        `▸ 10 consultas/día · todo lo del VIP · mejor precio\n` +
         `💳 [Pagar con Wompi](${linkVip30})\n\n` +
-        `🏆 *PRO 30 días* — $179.900 COP \\(+ imágenes\\)\n` +
+        `🏆 *PRO 30 días — $179.900 COP*\n` +
+        `▸ 50 consultas/día · análisis de imágenes 📸 · todas las ligas\n` +
         `💳 [Pagar con Wompi](${linkPro30})\n\n` +
-        `🌎 También en: [Whop \\(USD\\)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
+        `🇨🇴 Paga con Nequi, Bancolombia, tarjeta o PSE.\n` +
+        `🌎 También en: [Whop (USD)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
         { parse_mode: 'Markdown' }
       );
       return { allowed: false };
