@@ -3849,22 +3849,25 @@ async function handleVerPlanes(chatId, telegramId) {
     `▸ Análisis profundo de cualquier partido\n` +
     `▸ Picks en vivo con datos en tiempo real\n` +
     `▸ Filtros por liga y equipo\n` +
-    `▸ Alertas de gol en vivo\n` +
-    `💳 [Pagar con Wompi](${linkVip15})\n\n` +
+    `▸ Alertas de gol en vivo\n\n` +
     `⚡ *VIP 30 días — $99.900 COP*\n` +
     `▸ Todo lo del VIP 15 días\n` +
-    `▸ Mejor precio por día ($3.330/día)\n` +
-    `💳 [Pagar con Wompi](${linkVip30})\n\n` +
+    `▸ Mejor precio por día ($3.330/día)\n\n` +
     `🏆 *PRO 30 días — $179.900 COP*\n` +
     `▸ 50 consultas diarias\n` +
     `▸ Todo lo del plan VIP\n` +
     `▸ Análisis de imágenes en vivo 📸\n` +
-    `▸ Sube foto del partido y recibe análisis\n` +
+    `▸ Sube foto del partido y recibe análisis al instante\n` +
     `▸ Acceso a todas las ligas del mundo\n` +
-    `💳 [Pagar con Wompi](${linkPro30})\n` +
     `━━━━━━━━━━━━━━━━━━━\n\n` +
-    `🇨🇴 Paga con Nequi, Bancolombia, tarjeta o PSE.\n` +
-    `🌎 También en: [Whop (USD)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
+    `🇨🇴 *Si estás en Colombia:*\n` +
+    `Paga con Nequi, Daviplata, PSE o Bancolombia:\n` +
+    `💳 [VIP 15 días — $59.900](${linkVip15})\n` +
+    `💳 [VIP 30 días — $99.900](${linkVip30})\n` +
+    `💳 [PRO 30 días — $179.900](${linkPro30})\n\n` +
+    `🌎 *Para el resto del mundo:*\n` +
+    `Paga con tarjeta internacional:\n` +
+    `🔗 [Suscribirse en Whop (USD)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
     { parse_mode: 'Markdown' }
   );
 }
@@ -4128,16 +4131,21 @@ async function checkAccess(chatId, telegramId, isImage = false) {
   if (consultasHoy >= planConfig.consultas_diarias) {
     let msg;
     if (plan === 'free') {
-      const linkVip15 = wompiLink(WOMPI_LINKS.vip15, telegramId, 'vip15');
-      const linkVip30 = wompiLink(WOMPI_LINKS.vip30, telegramId, 'vip30');
-      msg =
+      await bot.sendMessage(chatId,
         `Has usado tu consulta gratuita de hoy 🎯\n\n` +
-        `Vuelve mañana por tu consulta gratis, o accede sin límites:\n\n` +
-        `⚡ *VIP 15 días* — $59.900 COP\n` +
-        `💳 [Pagar con Wompi](${linkVip15})\n\n` +
-        `⚡ *VIP 30 días* — $99.900 COP\n` +
-        `💳 [Pagar con Wompi](${linkVip30})\n\n` +
-        `🌎 [Ver todos los planes](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`;
+        `Vuelve mañana para tu próxima consulta gratis 📅\n\n` +
+        `¿Quieres acceso ilimitado sin esperar? Tenemos planes desde *$59.900 COP*`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [[
+              { text: '🚀 Ver planes disponibles', callback_data: 'show_planes' }
+            ]]
+          }
+        }
+      );
+      console.log('CHECK ACCESS - resultado: bloqueado por límite diario (free)');
+      return { allowed: false };
     } else if (plan === 'vip' || plan === 'vip15') {
       const linkPro30 = wompiLink(WOMPI_LINKS.pro30, telegramId, 'pro30');
       msg =
@@ -4445,6 +4453,17 @@ bot.on('callback_query', async (query) => {
   console.log(`[callback_query] chatId=${chatId} data="${data}"`);
 
   try {
+    // Ver planes (botón desde límite diario free)
+    if (data === 'show_planes') {
+      const telegramId = query.from?.id || chatId;
+      await bot.editMessageText(
+        `✅ Aquí están los planes disponibles:`,
+        { chat_id: chatId, message_id: query.message.message_id }
+      ).catch(() => {});
+      await handleVerPlanes(chatId, telegramId);
+      return;
+    }
+
     // Cancelar
     if (data === 'tm_cancel') {
       await bot.editMessageText('❌ Selección cancelada.',
