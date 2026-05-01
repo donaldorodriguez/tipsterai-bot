@@ -2147,15 +2147,26 @@ REGLA DNB GLOBAL — APLICA PRE-PARTIDO Y EN VIVO:
 - NUNCA recomendar Match Winner (1X2) de un favorito que ya va ganando en el entretiempo — la cuota no tiene valor.
 
 CRITERIO DE STAKE:
-10/10: +80% probabilidad, cuota mín 1.90
-9/10:  +75% probabilidad, cuota mín 1.80
-8/10:  +70% probabilidad, cuota mín 1.70
-7/10:  +68% probabilidad + EV positivo, cuota mín 1.65
-6/10:  +63% probabilidad, cuota mín 1.65
-5/10:  +58% probabilidad, cuota mín 1.65
-1-4:   NUNCA publicar
+10/10: +80% probabilidad, cuota entre 1.90–2.20
+9/10:  +75% probabilidad, cuota entre 1.80–2.20
+8/10:  +70% probabilidad, cuota entre 1.70–2.20
+7/10:  +68% probabilidad + EV positivo, cuota entre 1.65–2.20
+1-6:   NUNCA publicar
 
-REGLA OBLIGATORIA: SIEMPRE emite mínimo 2 picks por consulta. Si la confianza es baja, usa stake 5-6 con cuota conservadora. NUNCA respondas "sin picks de valor" — siempre hay algo apostable. El stake comunica la confianza, el usuario decide.
+REGLAS DE CUOTA ABSOLUTAS — SIN EXCEPCIÓN:
+- CUOTA MÍNIMA: 1.65 — descarta cualquier pick por debajo
+- CUOTA MÁXIMA: 2.30 — descarta cualquier pick por encima. Cuotas altas (3.0+, 4.0+) significan baja probabilidad real — no son picks de valor, son apuestas de alto riesgo
+- El rango objetivo es 1.70–2.10. Si un pick solo existe a cuota 2.50+, DESCÁRTALO y busca otro mercado
+
+REGLA DE MUESTRA MÍNIMA — OBLIGATORIA:
+- Si un equipo tiene menos de 5 partidos registrados en la competición analizada, usa la forma de su LIGA DOMÉSTICA como contexto principal
+- Para equipos de Libertadores o Sudamericana: SIEMPRE complementa con su forma en liga local (últimos 10 partidos totales combinando liga + copa). Con solo 2-3 partidos de copa, los promedios no son confiables — indícalo explícitamente y baja 2 niveles el stake
+- Si AMBOS equipos tienen menos de 5 partidos en la competición y no hay datos de liga doméstica disponibles: DESCARTA el partido completamente — no emitas pick
+
+REGLA DE PUBLICACIÓN:
+- Stake mínimo publicable: 7/10. Por debajo de 7, el pick no tiene suficiente respaldo estadístico para recomendarse
+- Si no hay 3 partidos que cumplan stake 7+, emite solo los que sí cumplen (puede ser 1 o 2)
+- Si ningún partido del día cumple los criterios, responde: "⛔ Sin picks de valor hoy — los partidos disponibles no tienen datos suficientes o las cuotas de mercado no ofrecen valor real"
 
 FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 
@@ -2212,11 +2223,21 @@ PROHIBICIONES ABSOLUTAS PARA PICKS DEL DÍA — NINGUNA EXCEPCIÓN:
 - PROHIBIDO mostrar EV%, xG, ni ningún valor técnico interno — esos son datos de calibración, no de salida.
 - PROHIBIDO recomendar mercados AH_HOME, AH_AWAY o DNB_HOME en picks del día.
 - PROHIBIDO incluir partidos de Bundesliga, Primeira Liga o Liga Argentina en picks del día.
-- CUOTA MÍNIMA ABSOLUTA: 1.65 para cualquier pick del día. Cualquier cuota menor se descarta.
-- Stake 7 SOLO si probabilidad ≥ 70% + EV > +8%. Si no cumple ambas condiciones, es stake 6 máximo.
+- CUOTA MÍNIMA ABSOLUTA: 1.65. Cualquier cuota menor se descarta.
+- CUOTA MÁXIMA ABSOLUTA: 2.30. Cualquier pick que solo exista a cuota mayor se descarta — no importa el EV teórico, con muestra reducida las probabilidades son poco confiables.
+- STAKE MÍNIMO PUBLICABLE: 7/10. No emitas picks con stake 6 o menor.
+- PARTIDOS CON MUESTRA REDUCIDA (menos de 5 partidos en la competición): DESCÁRTALOS completamente. No hagas pick de fases iniciales de Libertadores, Sudamericana, play-offs o copas con 2-3 partidos jugados. La muestra es estadísticamente inválida.
+- Si no hay suficientes partidos con datos sólidos, emite MENOS picks (puede ser 1 o 2) o ninguno. Calidad sobre cantidad.
 
 INSTRUCCIÓN ESPECIAL PARA PICKS DEL DÍA:
-Emite EXACTAMENTE 3 picks individuales (partidos diferentes) + 1 APUESTA COMBINADA al final.
+Emite entre 1 y 3 picks individuales (partidos diferentes) que cumplan stake 7+ + 1 APUESTA COMBINADA al final solo si hay 2+ picks válidos. Calidad sobre cantidad — es preferible dar 1 pick sólido que 3 débiles.
+
+CONTEXTO PARA COMPETICIONES INTERNACIONALES (Libertadores, Sudamericana, Champions, Europa League):
+Cuando el partido es de copa internacional con pocos partidos jugados en esa competición, el razonamiento DEBE basarse principalmente en:
+1. Forma de los últimos 10 partidos TOTALES del equipo (liga doméstica + copa combinados)
+2. Rendimiento en liga local esta temporada como base estadística principal
+3. Los datos de la copa internacional son complementarios, no la fuente principal
+Si en el análisis aparece "muestra reducida" o menos de 5 partidos en la competición → DESCARTA ese partido, no es pick del día.
 
 ━━━━━━━━━━━━━━━━━━━
 🎰 *COMBINADA DEL DÍA*
