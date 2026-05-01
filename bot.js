@@ -2227,9 +2227,10 @@ PROHIBICIONES ABSOLUTAS PARA PICKS DEL DÍA — NINGUNA EXCEPCIÓN:
 - PROHIBIDO mostrar EV%, xG, ni ningún valor técnico interno — esos son datos de calibración, no de salida.
 - PROHIBIDO recomendar mercados AH_HOME, AH_AWAY o DNB_HOME en picks del día.
 - PROHIBIDO incluir partidos de Bundesliga, Primeira Liga o Liga Argentina en picks del día.
-- CUOTA MÍNIMA ABSOLUTA: 1.65. Cualquier cuota menor se descarta.
+- CUOTA MÍNIMA ABSOLUTA: 1.65. Cualquier cuota menor se descarta sin excepción.
 - CUOTA MÁXIMA ABSOLUTA: 2.30. Cualquier pick que solo exista a cuota mayor se descarta — no importa el EV teórico, con muestra reducida las probabilidades son poco confiables.
-- STAKE MÍNIMO PUBLICABLE: 7/10. No emitas picks con stake 6 o menor.
+- STAKE MÍNIMO PUBLICABLE: 7/10. NUNCA emitas picks con stake 5 o 6 — si tu confianza no llega a 7, es que no hay pick.
+- PROHIBIDO dar picks de partidos donde statsLocal y statsVisitante son null o muestran datos limitados en más de 3 de los 5 indicadores clave (goles anotados, goles recibidos, forma reciente, porcentaje BTTS, porcentaje Over 2.5). Si no hay base estadística real, DESCARTA el partido completamente.
 - PARTIDOS CON MUESTRA REDUCIDA EN LA COMPETICIÓN ACTUAL: Si un equipo tiene menos de 5 partidos en esa copa/torneo específico, usa su liga doméstica como fuente principal de estadísticas. Si no hay NINGÚN dato adicional (ni liga doméstica ni H2H), descarta ese partido de los picks automáticos del día — el usuario puede preguntar por él directamente y el bot lo analiza con todos los factores disponibles.
 - Calidad sobre cantidad: es mejor dar 1 pick sólido que 3 mediocres.
 
@@ -2934,20 +2935,34 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     // ── FALLBACK: si no hay suficientes picks con EV positivo, usar análisis LLM clásico
     // (ocurre cuando no hay cuotas disponibles o el mercado no tiene valor)
     console.log(`⚠️ Insuficientes picks con EV+ (${topPicks.length}) — fallback a análisis LLM`);
-    const enrichedForLLM = enriched.map(e => ({
-      ...e,
-      _extendedProbs: undefined, // no enviar al LLM — es interno
-      probabilidadesCalculadas: e._extendedProbs ? buildProbBlock(e.statsLocal, e.statsVisitante, [], selected.find(f => f.fixtureId === e.fixtureId)?.leagueId) : null,
-    }));
-    const predResults = await Promise.allSettled(selected.map(f => getApiPrediction(f.fixtureId)));
-    for (let i = 0; i < enrichedForLLM.length; i++) {
-      const pred = predResults[i].status === 'fulfilled' ? predResults[i].value : null;
-      if (pred) enrichedForLLM[i].prediccionAPI = pred;
+
+    // Filtrar partidos sin ningún dato real — no los enviamos al LLM para que no invente picks
+    const enrichedConDatos = enriched.filter(e => e._statsSource !== 'fallback');
+    const descartadosSinDatos = enriched.length - enrichedConDatos.length;
+    if (descartadosSinDatos > 0) {
+      console.log(`🚫 Descartados ${descartadosSinDatos} partidos sin stats reales (no se envían al LLM)`);
     }
-    picksText = await sonnet(
-      PICKS_HOY_SYSTEM,
-      `Partidos del día ${today} (hora Colombia). DATOS REALES:\n\n${JSON.stringify(enrichedForLLM, null, 2)}\n\nEmite 3 picks individuales + 1 combinada. REGLAS IRROMPIBLES: (1) CUOTA MÍNIMA ABSOLUTA 1.65 (cuota real de mercado) — cualquier pick con cuota real menor se DESCARTA SIN EXCEPCIÓN. Al mostrar la cuota al usuario, súmale 0.15 (ejemplo: cuota real 1.80 → muestra 1.95). (2) PROHIBIDO DNB, (3) PROHIBIDO 1X2 directo a cuota real menor de 1.70. (4) Prioriza corners Over/Under, Over 1.5 goles 1T, BTTS con ambos marcando >65% en casa/fuera, Over 3.5 si ambos son goleadores. Si no hay picks con cuota real ≥1.65, responde SOLO: ⛔ Sin picks de valor real hoy.`
-    );
+
+    if (enrichedConDatos.length === 0) {
+      picksText = '⛔ Sin picks de valor real hoy. No hay estadísticas confiables disponibles.';
+    } else {
+      const fixtureIdsConDatos = enrichedConDatos.map(e => e.fixtureId);
+      const enrichedForLLM = enrichedConDatos.map(e => ({
+        ...e,
+        _extendedProbs: undefined, // no enviar al LLM — es interno
+        _statsSource: undefined,
+        probabilidadesCalculadas: e._extendedProbs ? buildProbBlock(e.statsLocal, e.statsVisitante, [], selected.find(f => f.fixtureId === e.fixtureId)?.leagueId) : null,
+      }));
+      const predResults = await Promise.allSettled(fixtureIdsConDatos.map(id => getApiPrediction(id)));
+      for (let i = 0; i < enrichedForLLM.length; i++) {
+        const pred = predResults[i].status === 'fulfilled' ? predResults[i].value : null;
+        if (pred) enrichedForLLM[i].prediccionAPI = pred;
+      }
+      picksText = await sonnet(
+        PICKS_HOY_SYSTEM,
+        `Partidos del día ${today} (hora Colombia). DATOS REALES:\n\n${JSON.stringify(enrichedForLLM, null, 2)}\n\nREGLAS IRROMPIBLES:\n(1) STAKE MÍNIMO PUBLICABLE: 7/10 — NUNCA publiques picks con stake 5 o 6. Si un pick no llega a stake 7, descártalo.\n(2) CUOTA MÍNIMA ABSOLUTA: 1.65. Cualquier cuota menor se descarta.\n(3) CUOTA MÁXIMA ABSOLUTA: 2.30. Cualquier cuota mayor se descarta.\n(4) PROHIBIDO dar picks de partidos donde statsLocal Y statsVisitante tienen datos insuficientes en más de 3 indicadores — sin datos reales no hay base estadística.\n(5) PROHIBIDO DNB. PROHIBIDO 1X2 directo.\n(6) Si no hay picks válidos con stake 7+ y cuota 1.65–2.30, responde SOLO: ⛔ Sin picks de valor real hoy.`
+      );
+    }
   }
 
   // Guardar en caché
