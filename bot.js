@@ -4040,6 +4040,65 @@ async function registerUser(telegramId, username) {
   }
 }
 
+// ─── Remarketing ─────────────────────────────────────────────────────────────
+
+async function getUsersByFecha(fecha) {
+  try {
+    const base = getAirtableBase();
+    const records = await base(AIRTABLE_TABLE)
+      .select({
+        filterByFormula: `AND({fecha_registro} = "${fecha}", {plan} = "free")`,
+        fields: ['telegram_id', 'plan', 'fecha_registro'],
+      })
+      .all();
+    return records.map(r => r.fields.telegram_id).filter(Boolean);
+  } catch (e) {
+    console.error('getUsersByFecha error:', e.message);
+    return [];
+  }
+}
+
+async function enviarRemarketingTelegram(adminChatId, fecha, mensajeCustom) {
+  const ids = await getUsersByFecha(fecha);
+  if (!ids.length) {
+    await bot.sendMessage(adminChatId, `ℹ️ No hay usuarios free registrados el ${fecha}.`);
+    return;
+  }
+
+  const mensaje = mensajeCustom ||
+`⚽ *¡Hola! TipsterAI aquí.*
+
+Los picks de hoy ya están listos — análisis con datos reales de las principales ligas 📊
+
+Escríbeme *"picks de hoy"* y te los entrego ahora mismo.
+
+O si tienes un partido específico en mente: *"analiza [equipo] vs [equipo]"* y hago el análisis completo.
+
+━━━━━━━━━━━━━━━━━━━
+💡 ¿Quieres acceso ilimitado? Escribe *"ver planes"*`;
+
+  await bot.sendMessage(adminChatId, `📤 Enviando a *${ids.length}* usuarios free del ${fecha}...`, { parse_mode: 'Markdown' });
+
+  let enviados = 0;
+  let fallidos = 0;
+
+  for (const telegramId of ids) {
+    try {
+      await bot.sendMessage(telegramId, mensaje, { parse_mode: 'Markdown' });
+      enviados++;
+      await new Promise(r => setTimeout(r, 500)); // 500ms entre mensajes para evitar flood
+    } catch (e) {
+      fallidos++;
+      console.error(`❌ Remarketing fallido ${telegramId}:`, e.message);
+    }
+  }
+
+  await bot.sendMessage(adminChatId,
+    `✅ *Remarketing completado*\n\n📤 Enviados: ${enviados}\n❌ Fallidos: ${fallidos}\n👥 Total: ${ids.length}`,
+    { parse_mode: 'Markdown' }
+  );
+}
+
 async function checkAndResetIfNeeded(record) {
   const today = todayBogota();
   if (record.fields.ultimo_reset !== today) {
@@ -4205,6 +4264,34 @@ async function incrementConsultas(telegramId) {
   }
 }
 
+// ─── Command: /remarketing ────────────────────────────────────────────────────
+// Uso: /remarketing YYYY-MM-DD [mensaje personalizado]
+// Solo el admin puede ejecutarlo
+
+bot.onText(/\/remarketing(?:\s+(.+))?/, async (msg, match) => {
+  const chatId     = msg.chat.id;
+  const telegramId = String(msg.from.id);
+
+  if (!ADMIN_IDS.has(telegramId)) return; // silencioso para no-admins
+
+  const args = (match[1] || '').trim();
+
+  // Extraer fecha (primer token) y mensaje opcional (resto)
+  const [fechaArg, ...restoArr] = args.split(' ');
+  const mensajeCustom = restoArr.length ? restoArr.join(' ') : null;
+
+  // Si no se pasa fecha, usar ayer en Bogotá
+  let fecha = fechaArg;
+  if (!fecha || !/^\d{4}-\d{2}-\d{2}$/.test(fecha)) {
+    const ayer = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bogota' }));
+    ayer.setDate(ayer.getDate() - 1);
+    fecha = ayer.toISOString().slice(0, 10);
+  }
+
+  await bot.sendMessage(chatId, `🔍 Buscando usuarios free del *${fecha}*...`, { parse_mode: 'Markdown' });
+  await enviarRemarketingTelegram(chatId, fecha, mensajeCustom || null);
+});
+
 // ─── Command: /start ──────────────────────────────────────────────────────────
 
 bot.onText(/\/start/, async (msg) => {
@@ -4218,21 +4305,21 @@ bot.onText(/\/start/, async (msg) => {
     registerUser(telegramId, username).catch(e => console.error('register on start:', e.message));
   }
 
-  bot.sendMessage(chatId, `⚽ *TipsterAi Master PRO — Servicio Exclusivo de Apuestas*
+  bot.sendMessage(chatId, `⚽ *TipsterAI — Análisis deportivo con IA*
 
-Bienvenido. Tengo acceso a estadísticas en tiempo real, historial de enfrentamientos y datos exclusivos de las principales ligas del mundo.
+Hola${username ? ' ' + username : ''}. Tengo acceso a estadísticas en tiempo real, historial de enfrentamientos y datos de las principales ligas del mundo.
 
-Dime lo que necesitas en lenguaje natural:
+Dime lo que necesitas:
 
-• *"picks de hoy"* → mis mejores picks del día con análisis completo
-• *"bundesliga en vivo"* → partidos en curso con picks in-play
-• *"analiza al Real Madrid"* → análisis táctico con historial y estadísticas
-• *"que hay en vivo"* → todos los partidos en curso ahora mismo
-• 📸 Envía una captura de un partido → análisis in-play inmediato
+▸ *"picks de hoy"* → mejores análisis del día (stake 7+, cuota 1.70–2.20)
+▸ *"analiza Real Madrid vs Arsenal"* → análisis profundo del partido
+▸ *"en vivo"* → partidos en curso con picks in-play
+▸ *"estadísticas del Barcelona"* → forma, goles, rendimiento
+▸ 📸 Envía captura de un partido → análisis instantáneo
 
 ━━━━━━━━━━━━━━━━━━━
-⚠️ Solo emito picks con STAKE 6+/10 y cuota mínima 1.50
-🎯 Apuesta siempre con responsabilidad.`, { parse_mode: 'Markdown' });
+🆓 Tienes *3 días de prueba gratis* — 1 consulta diaria
+💡 Escribe *"ver planes"* para acceso ilimitado`, { parse_mode: 'Markdown' });
 });
 
 // ─── Main message handler ─────────────────────────────────────────────────────
