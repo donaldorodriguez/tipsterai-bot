@@ -435,6 +435,8 @@ function parseFixture(f) {
     leagueId:   f.league.id,
     leagueName: LEAGUE_MAP[f.league.id]?.name || f.league.name,
     country:    LEAGUE_MAP[f.league.id]?.country || f.league.country,
+    round:      f.league.round || null,
+    venue:      f.fixture.venue?.name || null,
     homeId:     f.teams.home.id,
     awayId:     f.teams.away.id,
     homeTeam:   f.teams.home.name,
@@ -1229,13 +1231,17 @@ async function getTeamStats(teamId, leagueId) {
     const { data } = await API.get('/teams/statistics', { params: { team: teamId, league: leagueId, season } });
     const stats = parseStats(data.response);
     if (stats) return stats;
-  } catch {}
+    console.warn(`⚠️  getTeamStats(team=${teamId}, liga=${leagueId}): respuesta OK pero sin juegos registrados (season=${season})`);
+  } catch (e) {
+    console.error(`❌ getTeamStats(team=${teamId}, liga=${leagueId}, season=${season}): ${e?.response?.status ?? e.message}`);
+  }
 
-  // 2. Fallback ligero: máximo 2 intentos adicionales para no agotar la API
-  // Solo aplica cuando la liga actual no tiene datos (ej: amistosos sin historial)
+  // 2. Fallback — temporada anterior de la misma liga primero, luego ligas de referencia
+  const prevSeason = season - 1;
   const FALLBACK_LEAGUES = [
-    { league: 10, season: 2025 }, // Amistosos Int. temporada anterior
-    { league: 5,  season: 2024 }, // Nations League 2024
+    { league: leagueId, season: prevSeason }, // temporada anterior, misma competición
+    { league: 10, season: 2025 },             // Amistosos Int. temporada anterior
+    { league: 5,  season: 2024 },             // Nations League 2024
   ];
 
   for (const fb of FALLBACK_LEAGUES) {
@@ -1244,9 +1250,12 @@ async function getTeamStats(teamId, leagueId) {
       const { data } = await API.get('/teams/statistics', { params: { team: teamId, league: fb.league, season: fb.season } });
       const stats = parseStats(data.response);
       if (stats) return { ...stats, nota: `Referencia: ${stats.liga} ${stats.temporada}` };
-    } catch {}
+    } catch (e) {
+      console.warn(`⚠️  getTeamStats fallback(team=${teamId}, liga=${fb.league}, season=${fb.season}): ${e?.response?.status ?? e.message}`);
+    }
   }
 
+  console.warn(`🚨 getTeamStats(team=${teamId}, liga=${leagueId}): sin datos en ningún intento`);
   return null;
 }
 
@@ -1557,6 +1566,10 @@ function buildPickCandidates(enrichedFixtures) {
   const candidates = [];
 
   for (const f of enrichedFixtures) {
+    // Solo generar picks cuando AMBOS equipos tienen estadísticas reales.
+    // Con stats parciales el modelo Poisson usa promedios genéricos → picks poco confiables.
+    if (f._statsSource !== 'real') continue;
+
     const probs = f._extendedProbs;
     const odds  = f.cuotasReales || {};
     if (!probs) continue;
@@ -1626,9 +1639,13 @@ function buildPickCandidates(enrichedFixtures) {
       else if (m.prob >= 0.63)               stake = 6;
       else                                   stake = 5;
 
+      // FILTRO DE CALIDAD: nunca publicamos picks con stake bajo o cuota demasiado alta
+      if (stake < 7) continue; // Stake mínimo publicable: 7/10
+
       // La cuota mostrada al usuario lleva el buffer (+0.15).
       // La cuota real (o) se usó para el cálculo de EV — es correcta internamente.
       const oddsDisplayed = +Math.round((o + ODDS_DISPLAY_BUFFER) * 20) / 20; // redondea a 0.05
+      if (oddsDisplayed > 2.30) continue; // Cuota máxima publicable: 2.30
 
       candidates.push({
         fixtureId:    f.fixtureId,
@@ -2060,20 +2077,18 @@ MERCADOS RECOMENDADOS POR LIGA:
 
 const TIPSTER_SYSTEM = `Eres el mejor tipster profesional del mundo especializado en mercados de VALOR REAL.
 
-PICKS ABSOLUTAMENTE PROHIBIDAS - NUNCA las des:
+PICKS QUE NUNCA DAS — aplica estos criterios internamente, sin mencionarlos al usuario:
 - Gana el favorito obvio a cuota menor de 1.80 (gana Bayern, gana Madrid, gana City, gana Barcelona, gana PSG etc)
 - Over 2.5 o Over 3.5 de equipos muy ofensivos (Madrid, Barcelona, Bayern, City, PSG) en casa vs rivales débiles — todo el mundo lo sabe, no hay valor
 - 1X2 simple a cuota menor de 1.75 - no es tipster, es obvio
 - Picks que cualquier persona sin conocimiento daría
 - BTTS No cuando un equipo ya marcó 2+ goles en el HT
-- PICKS YA RESUELTOS: si el mercado ya se cumplió (ej: BTTS cuando ya hay goles de ambos), NO lo incluyas como pick apostable — omítelo completamente
-- MÁXIMO 2 PICKS POR PARTIDO — nunca más de 2 mercados distintos sobre el mismo partido. Si tienes 3 ideas para un partido, elige las 2 mejores y descarta la tercera. Esto es innegociable.
-- BTTS en derbis o clásicos de alta tensión táctica (Milan vs Inter, Real Madrid vs Atlético, Arsenal vs Tottenham, Celtic vs Rangers, etc.) — estos partidos se cierran defensivamente, el BTTS falla sistemáticamente
-- Asian Handicap de -1 o mayor (-1, -1.5, -2) — falla con frecuencia. Máximo permitido: AH -0.5, y solo si el equipo promedia más de 2.0 goles en su contexto
+- PICKS YA RESUELTOS: si el mercado ya se cumplió (ej: BTTS cuando ya hay goles de ambos), omítelo completamente
+- MÁXIMO 2 PICKS POR PARTIDO — nunca más de 2 mercados distintos sobre el mismo partido. Si tienes 3 ideas para un partido, elige las 2 mejores y descarta la tercera
+- BTTS en derbis o clásicos de alta tensión táctica (Milan vs Inter, Real Madrid vs Atlético, Arsenal vs Tottenham, Celtic vs Rangers, etc.) — se cierran defensivamente, BTTS falla sistemáticamente
+- Asian Handicap de -1 o mayor (-1, -1.5, -2). Máximo permitido: AH -0.5, y solo si el equipo promedia más de 2.0 goles en su contexto
 - BTTS cuando un equipo tiene más del 35% de partidos sin marcar en su contexto (casa o fuera)
-- Asian Handicap (AH) y Draw No Bet local (DNB_HOME) en picks automáticos del día — mercados con historial de 10-22% win rate. Solo usar DNB_AWAY si la probabilidad supera 75%
-- Asian Handicap en Bundesliga — historial negativo. En Bundesliga usar EXCLUSIVAMENTE Over 2.5 o BTTS (65% y 58% base esta temporada)
-- Cualquier pick en Primeira Liga o Liga Argentina para picks automáticos del día — historial negativo en este sistema
+- Asian Handicap (AH) y Draw No Bet local (DNB_HOME) en picks automáticos del día. Solo usar DNB_AWAY si la probabilidad supera 75%
 - BTTS en La Liga cuando no son equipos ofensivos — la liga tiene solo 40% BTTS base, muy por debajo del umbral
 
 MERCADOS DONDE ESTÁ EL VALOR REAL:
@@ -2135,10 +2150,15 @@ TRADUCCIÓN OBLIGATORIA DE TÉRMINOS TÉCNICOS — SIEMPRE en español:
 - FT → "al final del partido"
 NUNCA escribas nombres de campos técnicos en inglés en la respuesta al usuario.
 
+GOLES EN VIVO — LÍNEA MÍNIMA CON VALOR:
+La línea de goles solo tiene valor apuestable cuando faltan al menos 2 goles para alcanzarla.
+- Si van 2 goles y la línea es Over 2.5 (solo falta 1 gol) → cuota mínima, sin valor — descártala
+- Si van 2 goles y la línea es Over 3.5 (faltan 2 goles) → puede tener valor si el contexto lo apoya (partido abierto, presión táctica, atacan ambos)
+- Si van 2-2 en el 60' y la línea es Over 4.5 (faltan 1 gol) → sin valor. Over 5.5 (faltan 2) → evalúa el ritmo real
+- Regla directa: línea válida mínima = goles actuales + 2. Por debajo de eso, la cuota es insuficiente.
 Si hay 2+ goles de diferencia en el marcador:
-- PROHIBIDO: resultado final (gana X, DNB, 1X2)
-- PROHIBIDO: Over goles totales si ya hay 3+ goles y queda poco
-- PERMITIDO: Corners Over/Under, Tarjetas Over, BTTS, Next Goal del perdedor, Over goles 2T si va 2-0 al HT
+- Descarta: resultado final (gana X, DNB, 1X2)
+- Evalúa: Corners Over/Under, Tarjetas Over, BTTS, Next Goal del perdedor, Over goles 2T si va 2-0 al HT
 
 REGLA DNB GLOBAL — APLICA PRE-PARTIDO Y EN VIVO:
 - DNB solo cuando cuota victoria directa del equipo ≥ 2.00 (así el DNB queda ~1.65-1.85 y tiene valor real).
@@ -2204,29 +2224,31 @@ REGLAS DE FORMATO — OBLIGATORIAS SIN EXCEPCIÓN:
 - ⛔ NUNCA uses | columnas | ni tablas HTML
 - ⛔ NUNCA menciones fuentes de datos, APIs, plataformas ni herramientas
 - ⛔ NUNCA escribas disclaimers ni advertencias de responsabilidad al final
-- ⛔ NUNCA muestres valores técnicos: xG, lambdaRem, EV%, score de momentum, pases — son internos
+- ⛔ NUNCA muestres valores técnicos internos: xG, lambdaRem, EV%, score numérico de momentum, probBTTS_Combinada, probabilidadesCalculadas, pases — son calibración interna, no salida al usuario
 - ⛔ NUNCA muestres conteos de pases en los primeros minutos del partido
+- ⛔ NUNCA uses la palabra "PROHIBIDO" en tu respuesta — esos son criterios internos. Aplícalos en silencio
+- ⛔ NUNCA expliques por qué descartaste un mercado, partido o liga — el usuario no necesita ver el proceso interno
+- ⛔ NUNCA menciones ligas específicas como "prohibidas", "en lista negra" o con "historial negativo en este sistema" — eso es información interna de administración
 - La forma reciente SIEMPRE con guiones: *G-G-P-E-G* (máximo 6 resultados, nunca más)
 - Si la muestra de partidos es menor a 5, NO uses ese promedio como argumento principal — menciónalo como "datos limitados (N partidos)"
-- Si no hay picks válidos: escribe solo "⛔ Sin picks de valor. Mejor no apostar."
+- CUANDO NO HAY PICKS VÁLIDOS: escribe solo "⛔ Sin picks de valor. Mejor no apostar." — sin listar mercados descartados, sin mostrar cálculos, sin análisis de los partidos revisados
 
 REGLAS DE PICKS — OBLIGATORIAS:
 - MÁXIMO 2 picks por partido. Si ya diste 2 picks de un mismo partido, NO agregues más de ese partido
 - BTTS Solo si: % local marcó en casa ≥65% Y % visitante marcó fuera ≥65% Y H2H BTTS ≥65%. Si alguno no llega, NO dar BTTS
 - Asian Handicap MÁXIMO -0.5. NUNCA recomendar -1, -1.5 ni más — el riesgo no justifica el stake
-- Stake 7: requiere probabilidad ≥68% + EV >+5%. Si no cumple ambas, bajar a stake 6 o no dar
+- Stake MÍNIMO PUBLICABLE: 7/10. Si la probabilidad no supera 68% o el EV no supera +5%, NO das pick — el pick no existe. NUNCA bajes a stake 6 ni 5.
 - PROHIBIDO analizar partidos que ya empezaron hace más de 10 minutos (evitar picks sobre partidos en curso sin datos en vivo)
 
 Responde en español. NUNCA inventes estadísticas. Usa SOLO los datos que recibes.`;
 
 const PICKS_HOY_SYSTEM = `${TIPSTER_SYSTEM}
 
-PROHIBICIONES ABSOLUTAS PARA PICKS DEL DÍA — NINGUNA EXCEPCIÓN:
-- PROHIBIDO escribir análisis previo, lista de partidos descartados, razonamiento de por qué se descartó algo, o cualquier texto antes del primer pick. Ve DIRECTO al formato de pick.
-- PROHIBIDO escribir frases como "Voy a analizar...", "ANÁLISIS PREVIO:", "descartado", "datos nulos", "EV positivo/negativo" o cualquier meta-comentario sobre el proceso de selección.
-- PROHIBIDO mostrar EV%, xG, ni ningún valor técnico interno — esos son datos de calibración, no de salida.
-- PROHIBIDO recomendar mercados AH_HOME, AH_AWAY o DNB_HOME en picks del día.
-- PROHIBIDO incluir partidos de Bundesliga, Primeira Liga o Liga Argentina en picks del día.
+INSTRUCCIONES ESPECIALES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
+- NO escribas análisis previo, lista de partidos revisados ni razonamiento de por qué descartaste algo — ve directo al primer pick
+- NO escribas frases como "Voy a analizar...", "ANÁLISIS PREVIO:", "EV positivo/negativo" ni ningún meta-comentario del proceso
+- NO muestres EV%, xG ni valores técnicos internos
+- NO recomendes mercados AH_HOME, AH_AWAY ni DNB_HOME en picks del día
 - CUOTA MÍNIMA ABSOLUTA: 1.65. Cualquier cuota menor se descarta sin excepción.
 - CUOTA MÁXIMA ABSOLUTA: 2.30. Cualquier pick que solo exista a cuota mayor se descarta — no importa el EV teórico, con muestra reducida las probabilidades son poco confiables.
 - STAKE MÍNIMO PUBLICABLE: 7/10. NUNCA emitas picks con stake 5 o 6 — si tu confianza no llega a 7, es que no hay pick.
@@ -2236,6 +2258,13 @@ PROHIBICIONES ABSOLUTAS PARA PICKS DEL DÍA — NINGUNA EXCEPCIÓN:
 
 INSTRUCCIÓN ESPECIAL PARA PICKS DEL DÍA:
 Emite entre 1 y 3 picks individuales (partidos diferentes) que cumplan stake 7+ + 1 APUESTA COMBINADA al final solo si hay 2+ picks válidos. Calidad sobre cantidad — es preferible dar 1 pick sólido que 3 débiles.
+
+USO DE DATOS CONTEXTUALES (cuando están disponibles en los datos):
+- h2h: array de últimos 5 enfrentamientos directos. Usa para identificar tendencias de goles, si hay equipos que casi siempre marcan, patrones de resultado histórico.
+- posicionLocal / posicionVisitante: posición actual en la tabla de la liga. Un equipo en top 3 vs uno en zona de descenso cambia completamente la lectura. Úsalo en el razonamiento.
+- jornada: contexto de en qué momento de la temporada están (inicio, mitad, final, eliminatoria).
+- estadio: el nombre del estadio puede ayudar a contextualizar (estadios grandes de equipos históricos tienden a presionar más al visitante).
+Integra estos datos en el razonamiento de cada pick — no los ignores.
 
 CONTEXTO PARA COMPETICIONES INTERNACIONALES (Libertadores, Sudamericana, Champions, Europa League, Copa del Mundo):
 Cuando el partido es de copa con pocos juegos en esa competición, el razonamiento DEBE basarse en:
@@ -2271,20 +2300,21 @@ REGLAS ABSOLUTAS — SIN EXCEPCIÓN:
 - Si statsLocal o statsVisitante son null, escribe "datos limitados" en lugar de inventar.
 
 FORMATO OBLIGATORIO para cada pick:
-🌍 [country] — [liga]
-⚽ [local] vs [visitante] | ⏰ [hora]
+🌍 [country] — [liga] | [jornada si está disponible]
+⚽ [local] vs [visitante] | ⏰ [hora] | 🏟️ [estadio si está disponible]
 ━━━━━━━━━━━━━━━━━━━
 
 📊 *ESTADÍSTICAS CLAVE*
-▸ [local] anota en casa: *[golesAnotadosHome]* por partido
-▸ [visitante] anota fuera: *[golesAnotadosAway]* por partido
-▸ [local] recibe en casa: *[golesRecibidosHome]* por partido
-▸ Forma reciente [local]: *[forma5.forma]*
-▸ Forma reciente [visitante]: *[forma5.forma]*
+▸ [local] (pos. [posicionLocal]°) anota en casa: *[golesAnotadosHome]* goles/partido
+▸ [visitante] (pos. [posicionVisitante]°) anota fuera: *[golesAnotadosAway]* goles/partido
+▸ [local] recibe en casa: *[golesRecibidosHome]* goles/partido
+▸ Forma reciente [local]: *[forma5.forma]* ([forma5.nota])
+▸ Forma reciente [visitante]: *[forma5.forma]* ([forma5.nota])
+[Si h2h disponible con ≥3 partidos, añade: ▸ H2H últimos [N]: [X] victorias [local] / [Y] empates / [Z] victorias [visitante] — [resumen de tendencia goles]]
 
 🎯 *PICK: [marketLabel]*
 ┌ Selección: [descripción exacta del pick]
-├ Razonamiento: [1-2 líneas con el dato concreto de las estadísticas que lo justifica]
+├ Razonamiento: [1-2 líneas con el dato concreto de las estadísticas que lo justifica; si hay H2H o posición en tabla relevante, úsalos]
 ├ Probabilidad: *[prob]%*
 ├ 🏆 Stake: *[stake]/10*
 ├ 💡 Cuota mínima: *[odds]*
@@ -2320,23 +2350,24 @@ ANÁLISIS DE MOMENTUM (campo "momentumEnVivo"):
 ${LEAGUE_STATS_CONTEXT}
 
 PROYECCIONES EN TIEMPO REAL:
-- CORNERS EN VIVO: proyeccionCorners tiene {current, projected, remaining, confidence}.
-  Regla crítica: la línea mínima válida es current + 4. Si ya van 9 corners → línea mínima Over 13.5.
-  Si current=8 y projected=13 → recomienda Over 12.5 o 13.5, NUNCA Over 9.5 ni Over 10.5 (ya casi se alcanzaron).
-  Solo con confidence "alta" (min 30 min jugados) para picks de stake 7+.
-  Si la línea válida (current+4) no tiene cuota atractiva (≥ 1.65), DESCARTA el mercado de corners.
-- TARJETAS EN VIVO: línea mínima válida es current + 3. Si ya van 4 tarjetas → línea mínima Over 7.5.
-  Si ya van 4 tarjetas al HT y proyecta 7 al final → recomienda Over 6.5 máximo, NUNCA Over 4.5 (ya casi garantizado).
-  Si la línea válida (current+3) no tiene cuota ≥ 1.65, DESCARTA el mercado de tarjetas.
+- GOLES EN VIVO: línea mínima con valor = currentGoals + 2. Si ya van 2 goles y la línea es Over 2.5, solo falta 1 gol → cuota mínima, sin valor → descártala. Si la línea es Over 3.5 (faltan 2 goles) → evalúa según ritmo real del partido y contexto. Ejemplo: Liverpool 2-2 en el 60' → Over 4.5 (falta 1) sin valor, Over 5.5 (faltan 2) → evalúa si el ritmo lo justifica.
+- CORNERS EN VIVO: línea mínima válida = current + 4. Si ya van 9 corners → mínimo Over 13.5.
+  Si current=8 y projected=13 → recomienda Over 12.5 o 13.5, nunca Over 9.5 ni 10.5 (ya casi alcanzadas).
+  Solo con confidence "alta" (mín 30 min jugados) para picks de stake 7+.
+  Si la línea válida (current+4) no tiene cuota ≥ 1.65 → descarta corners.
+- TARJETAS EN VIVO: línea mínima válida = current + 3. Si ya van 4 tarjetas → mínimo Over 7.5.
+  Si ya van 4 tarjetas al HT y proyecta 7 al final → Over 6.5 máximo, nunca Over 4.5 (ya casi garantizado).
+  Si la línea válida (current+3) no tiene cuota ≥ 1.65 → descarta tarjetas.
 - Solo usa proyecciones con confidence "alta" para picks de stake 7+.
-- CUOTAS EN VIVO: el campo cuotasVivo contiene cuotas reales del mercado en ese momento. USA ESAS cuotas, no inventes. Si cuotasVivo es null, indica la cuota como "verificar en casa de apuestas" en lugar de inventar un número.
+- CUOTAS EN VIVO: usa cuotasVivo cuando estén disponibles. Si cuotasVivo es null, escribe "verificar cuota en casa de apuestas" — nunca inventes un número.
 
-PROHIBICIONES IN-PLAY ADICIONALES:
-- PROHIBIDO usar # ## ### en el formato de respuesta.
-- PROHIBIDO mostrar el valor numérico del score de momentum (solo el label: "Domina local", "Equilibrado", etc.).
-- PROHIBIDO mostrar xG, lambdaRem, EV% u otros valores técnicos internos.
-- PROHIBIDO recomendar DNB o Match Winner de un equipo que ya va ganando en el marcador.
-- PROHIBIDO recomendar Over corners/tarjetas con línea ≤ current + 2.
+REGLAS IN-PLAY (aplícalas en silencio — no las menciones al usuario):
+- No uses # ## ### en el formato de respuesta
+- No muestres el número del score de momentum — solo el label ("Domina local", "Equilibrado", etc.)
+- No muestres xG, lambdaRem, EV%, probBTTS ni ningún valor técnico interno
+- No recomiendes DNB ni Match Winner de un equipo que ya va ganando en el marcador
+- No recomiendes Over corners/tarjetas con línea ≤ current + 2
+- Cuando no hay picks válidos: escribe solo "⛔ Sin picks de valor. Mejor no apostar." — sin listar mercados revisados ni razonamiento
 
 FORMATO ADICIONAL IN-PLAY:
 ⏰ Actúa antes del min: [XX]
@@ -2882,13 +2913,38 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     };
   });
 
-  // Fetch cuotas reales para todos los partidos
-  await bot.sendMessage(chatId, `📈 Consultando cuotas reales (goles, corners, tarjetas, HT...)...`);
-  const oddsResults = await Promise.allSettled(selected.map(f => getRealOdds(f.fixtureId)));
+  // Fetch cuotas, H2H y standings en paralelo
+  await bot.sendMessage(chatId, `📈 Consultando cuotas, H2H y tabla de posiciones...`);
+  const uniqueLeagueIds = [...new Set(selected.map(f => f.leagueId))];
+  const [oddsResults, h2hResults, standingsArray] = await Promise.all([
+    Promise.allSettled(selected.map(f => getRealOdds(f.fixtureId))),
+    Promise.allSettled(selected.map(f => getH2H(f.homeId, f.awayId))),
+    Promise.allSettled(uniqueLeagueIds.map(lid => getLeagueStandings(lid))),
+  ]);
+
+  // Construir mapa de standings por leagueId
+  const standingsMap = {};
+  uniqueLeagueIds.forEach((lid, i) => {
+    if (standingsArray[i].status === 'fulfilled') standingsMap[lid] = standingsArray[i].value;
+  });
+
+  // Enriquecer con cuotas, H2H, posición en tabla, jornada y estadio
   let conOdds = 0;
   for (let i = 0; i < enriched.length; i++) {
     const odds = oddsResults[i].status === 'fulfilled' ? oddsResults[i].value : null;
     if (odds) { enriched[i].cuotasReales = odds; conOdds++; }
+
+    const h2h = h2hResults[i].status === 'fulfilled' ? h2hResults[i].value : [];
+    if (h2h && h2h.length > 0) enriched[i].h2h = h2h.slice(0, 5);
+
+    enriched[i].jornada = selected[i].round;
+    enriched[i].estadio = selected[i].venue;
+
+    const standings = standingsMap[selected[i].leagueId] || [];
+    const posLocal = standings.find(s => s.teamId === selected[i].homeId);
+    const posVisit = standings.find(s => s.teamId === selected[i].awayId);
+    if (posLocal) enriched[i].posicionLocal = posLocal.rank;
+    if (posVisit) enriched[i].posicionVisitante = posVisit.rank;
   }
 
   await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV por mercado...`);
@@ -2897,8 +2953,8 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   console.log(`📊 DEBUG picks motor:`);
   console.log(`   Partidos analizados: ${enriched.length}`);
   console.log(`   Con cuotas reales: ${conOdds}/${enriched.length}`);
-  const sinStats = enriched.filter(e => e._statsSource === 'fallback').length;
-  console.log(`   Sin stats reales (usando fallback): ${sinStats}`);
+  const sinStats = enriched.filter(e => e._statsSource !== 'real').length;
+  console.log(`   Con stats incompletas/nulas (excluidos del motor): ${sinStats}`);
 
   // ── Selección matemática de picks ────────────────────────────────────────
   const candidates = buildPickCandidates(enriched);
@@ -2936,11 +2992,12 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     // (ocurre cuando no hay cuotas disponibles o el mercado no tiene valor)
     console.log(`⚠️ Insuficientes picks con EV+ (${topPicks.length}) — fallback a análisis LLM`);
 
-    // Filtrar partidos sin ningún dato real — no los enviamos al LLM para que no invente picks
-    const enrichedConDatos = enriched.filter(e => e._statsSource !== 'fallback');
+    // Solo enviamos al LLM partidos donde AMBOS equipos tienen stats reales.
+    // Parciales (local_only / away_only) o sin datos (fallback) generan picks "datos limitados" — se descartan.
+    const enrichedConDatos = enriched.filter(e => e._statsSource === 'real');
     const descartadosSinDatos = enriched.length - enrichedConDatos.length;
     if (descartadosSinDatos > 0) {
-      console.log(`🚫 Descartados ${descartadosSinDatos} partidos sin stats reales (no se envían al LLM)`);
+      console.log(`🚫 Descartados ${descartadosSinDatos} partidos con stats incompletas o nulas (no se envían al LLM)`);
     }
 
     if (enrichedConDatos.length === 0) {
@@ -2960,9 +3017,20 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       }
       picksText = await sonnet(
         PICKS_HOY_SYSTEM,
-        `Partidos del día ${today} (hora Colombia). DATOS REALES:\n\n${JSON.stringify(enrichedForLLM, null, 2)}\n\nREGLAS IRROMPIBLES:\n(1) STAKE MÍNIMO PUBLICABLE: 7/10 — NUNCA publiques picks con stake 5 o 6. Si un pick no llega a stake 7, descártalo.\n(2) CUOTA MÍNIMA ABSOLUTA: 1.65. Cualquier cuota menor se descarta.\n(3) CUOTA MÁXIMA ABSOLUTA: 2.30. Cualquier cuota mayor se descarta.\n(4) PROHIBIDO dar picks de partidos donde statsLocal Y statsVisitante tienen datos insuficientes en más de 3 indicadores — sin datos reales no hay base estadística.\n(5) PROHIBIDO DNB. PROHIBIDO 1X2 directo.\n(6) Si no hay picks válidos con stake 7+ y cuota 1.65–2.30, responde SOLO: ⛔ Sin picks de valor real hoy.`
+        `Partidos del día ${today} (hora Colombia). DATOS REALES:\n\n${JSON.stringify(enrichedForLLM, null, 2)}\n\nREGLAS IRROMPIBLES — CUALQUIER VIOLACIÓN INVALIDA TU RESPUESTA COMPLETA:\n(1) STAKE: mínimo 7/10 sin excepción. Si un pick no cumple, NO LO DAS. Stake 5 o 6 = pick inválido = respuesta inválida.\n(2) CUOTA MÍNIMA: 1.65. Por debajo = descartado.\n(3) CUOTA MÁXIMA: 2.30 exacto. Cualquier cuota mayor (2.31, 2.40, 2.65, 3.35...) = pick inválido = respuesta inválida. Over 3.5 siempre tiene cuota >2.30 — NUNCA lo recomiendes.\n(4) SOLO picks que tengan estadísticas reales de AMBOS equipos en los datos recibidos. Si un equipo dice "datos limitados" → descarta todo el partido.\n(5) PROHIBIDO DNB. PROHIBIDO 1X2 directo.\n(6) Si no tienes picks que cumplan TODO lo anterior, devuelve EXACTAMENTE y SOLO esto: ⛔ Sin picks de valor real hoy.`
       );
     }
+  }
+
+  // ── Validador post-generación ──────────────────
+  // Escudo final: si el LLM ignoró las reglas de cuota/stake, descarta los picks
+  const cuotasEnTexto = [...picksText.matchAll(/[Cc]uota\s+m[íi]nima[:\s*]+(\d+[\.,]\d+)/g)].map(m => parseFloat(m[1].replace(',', '.')))
+  const stakesEnTexto = [...picksText.matchAll(/[Ss]take[:\s*]+(\d+)\/10/g)].map(m => parseInt(m[1]))
+  const cuotaInvalida = cuotasEnTexto.some(c => c > 2.30 || c < 1.65)
+  const stakeInvalido = stakesEnTexto.some(s => s < 7)
+  if (cuotaInvalida || stakeInvalido) {
+    console.warn(`⚠️ VALIDADOR: picks rechazados — cuotas=[${cuotasEnTexto}] stakes=[${stakesEnTexto}]`)
+    picksText = '⛔ Sin picks de valor real hoy. Los partidos disponibles no cumplen los criterios de cuota (1.65–2.30) y stake mínimo (7/10).'
   }
 
   // Guardar en caché
