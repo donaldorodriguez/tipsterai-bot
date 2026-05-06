@@ -1566,10 +1566,13 @@ function buildPickCandidates(enrichedFixtures) {
   const candidates = [];
 
   for (const f of enrichedFixtures) {
-    // Solo generar picks cuando AMBOS equipos tienen estadísticas reales.
-    // Con stats parciales el modelo Poisson usa promedios genéricos → picks poco confiables.
-    if (f._statsSource !== 'real') continue;
+    // Excluir solo fixtures donde NO hay stats de ninguno de los dos equipos.
+    // Con stats de al menos un equipo, el modelo Poisson tiene mejor base que el LLM.
+    // 'fallback' = ningún equipo tiene stats → promedios genéricos → menos confiable pero usable.
+    // Los picks igual pasan por EV real vs cuotas de mercado, que filtra lo que no tiene valor.
+    if (!f._extendedProbs) continue; // sin probs calculadas → skip
 
+    const partialStats = f._statsSource !== 'real'; // true si solo uno de los dos tiene stats
     const probs = f._extendedProbs;
     const odds  = f.cuotasReales || {};
     if (!probs) continue;
@@ -1630,20 +1633,26 @@ function buildPickCandidates(enrichedFixtures) {
       // DNB absolutamente prohibido
       if (m.key.includes('dnb')) continue;
 
-      // Stake basado en prob + EV
+      // Stake basado en prob + EV — calibrado a rangos reales de fútbol.
+      // En fútbol, bets con valor real suelen estar en el rango 52-68% de probabilidad.
+      // Pedir 63%+ (como antes) excluía prácticamente todos los partidos competitivos.
       let stake;
       if      (m.prob >= 0.80 && o >= 1.90) stake = 10;
       else if (m.prob >= 0.75 && o >= 1.80) stake = 9;
       else if (m.prob >= 0.70 && o >= 1.70) stake = 8;
-      else if (m.prob >= 0.68 && ev > 5)    stake = 7;
-      else if (m.prob >= 0.63)               stake = 6;
-      else                                   stake = 5;
+      else if (m.prob >= 0.65 && ev > 5)    stake = 7;
+      else if (m.prob >= 0.60)               stake = 6;  // antes: 0.63
+      else if (m.prob >= 0.54)               stake = 5;  // antes: filtrado
+      else                                   stake = 4;  // filtrado
+
+      // Si el partido tiene stats parciales (solo un equipo), bajar stake 1 nivel por confianza.
+      if (partialStats && stake > 4) stake = Math.max(4, stake - 1);
 
       // La cuota mostrada al usuario lleva el buffer (+0.15).
       // La cuota real (o) se usó para el cálculo de EV — es correcta internamente.
       const oddsDisplayed = +Math.round((o + ODDS_DISPLAY_BUFFER) * 20) / 20; // redondea a 0.05
-      if (oddsDisplayed > 2.45) continue; // Cuota máxima: 2.45 (permite más candidatos al motor)
-      if (stake < 6) continue;            // Stake mínimo para entrar al motor: 6/10
+      if (oddsDisplayed > 2.45) continue; // Cuota máxima: 2.45
+      if (stake < 5) continue;            // Stake mínimo publicable: 5/10
 
       candidates.push({
         fixtureId:    f.fixtureId,
@@ -2952,7 +2961,9 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   console.log(`   Partidos analizados: ${enriched.length}`);
   console.log(`   Con cuotas reales: ${conOdds}/${enriched.length}`);
   const sinStats = enriched.filter(e => e._statsSource !== 'real').length;
-  console.log(`   Con stats incompletas/nulas (excluidos del motor): ${sinStats}`);
+  const sinProbs = enriched.filter(e => !e._extendedProbs).length;
+  console.log(`   Stats parciales (un equipo sin datos): ${sinStats} — siguen al motor con penalización de stake`);
+  if (sinProbs > 0) console.log(`   Sin probs calculadas (excluidos): ${sinProbs}`);
 
   // ── Selección matemática de picks ────────────────────────────────────────
   const candidates = buildPickCandidates(enriched);
@@ -2996,11 +3007,11 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   // Escudo final: si el LLM ignoró las reglas de cuota/stake, descarta los picks
   const cuotasEnTexto = [...picksText.matchAll(/[Cc]uota\s+m[íi]nima[:\s*]+(\d+[\.,]\d+)/g)].map(m => parseFloat(m[1].replace(',', '.')))
   const stakesEnTexto = [...picksText.matchAll(/[Ss]take[:\s*]+(\d+)\/10/g)].map(m => parseInt(m[1]))
-  const cuotaInvalida = cuotasEnTexto.some(c => c > 2.45 || c < 1.65)
-  const stakeInvalido = stakesEnTexto.some(s => s < 6)
+  const cuotaInvalida = cuotasEnTexto.some(c => c > 2.45 || c < 1.50)
+  const stakeInvalido = stakesEnTexto.some(s => s < 5)
   if (cuotaInvalida || stakeInvalido) {
     console.warn(`⚠️ VALIDADOR: picks rechazados — cuotas=[${cuotasEnTexto}] stakes=[${stakesEnTexto}]`)
-    picksText = '⛔ Sin picks de valor real hoy. Los partidos disponibles no cumplen los criterios de cuota (1.65–2.45) y stake mínimo (6/10).'
+    picksText = '⛔ Sin picks de valor real hoy. Los partidos disponibles no cumplen los criterios de cuota (1.50–2.45) y stake mínimo (5/10).'
   }
 
   // Guardar en caché
