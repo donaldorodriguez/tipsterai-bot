@@ -1639,13 +1639,11 @@ function buildPickCandidates(enrichedFixtures) {
       else if (m.prob >= 0.63)               stake = 6;
       else                                   stake = 5;
 
-      // FILTRO DE CALIDAD: nunca publicamos picks con stake bajo o cuota demasiado alta
-      if (stake < 7) continue; // Stake mínimo publicable: 7/10
-
       // La cuota mostrada al usuario lleva el buffer (+0.15).
       // La cuota real (o) se usó para el cálculo de EV — es correcta internamente.
       const oddsDisplayed = +Math.round((o + ODDS_DISPLAY_BUFFER) * 20) / 20; // redondea a 0.05
-      if (oddsDisplayed > 2.30) continue; // Cuota máxima publicable: 2.30
+      if (oddsDisplayed > 2.45) continue; // Cuota máxima: 2.45 (permite más candidatos al motor)
+      if (stake < 6) continue;            // Stake mínimo para entrar al motor: 6/10
 
       candidates.push({
         fixtureId:    f.fixtureId,
@@ -2981,56 +2979,28 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   let picksText;
 
-  if (topPicks.length >= 2) {
-    // ── NUEVO: LLM solo formatea picks ya elegidos matemáticamente
+  if (topPicks.length >= 1) {
+    // ── Motor matemático: LLM solo formatea los picks ya seleccionados por Poisson+EV
     picksText = await sonnet(
       PICKS_HOY_FORMATTER_SYSTEM,
       `Fecha: ${today} (hora Colombia)\n\nPICKS SELECCIONADOS POR EL MOTOR MATEMÁTICO — NO añadas ni elimines ninguno:\n\n${JSON.stringify(topPicks, null, 2)}`
     );
   } else {
-    // ── FALLBACK: si no hay suficientes picks con EV positivo, usar análisis LLM clásico
-    // (ocurre cuando no hay cuotas disponibles o el mercado no tiene valor)
-    console.log(`⚠️ Insuficientes picks con EV+ (${topPicks.length}) — fallback a análisis LLM`);
-
-    // Solo enviamos al LLM partidos donde AMBOS equipos tienen stats reales.
-    // Parciales (local_only / away_only) o sin datos (fallback) generan picks "datos limitados" — se descartan.
-    const enrichedConDatos = enriched.filter(e => e._statsSource === 'real');
-    const descartadosSinDatos = enriched.length - enrichedConDatos.length;
-    if (descartadosSinDatos > 0) {
-      console.log(`🚫 Descartados ${descartadosSinDatos} partidos con stats incompletas o nulas (no se envían al LLM)`);
-    }
-
-    if (enrichedConDatos.length === 0) {
-      picksText = '⛔ Sin picks de valor real hoy. No hay estadísticas confiables disponibles.';
-    } else {
-      const fixtureIdsConDatos = enrichedConDatos.map(e => e.fixtureId);
-      const enrichedForLLM = enrichedConDatos.map(e => ({
-        ...e,
-        _extendedProbs: undefined, // no enviar al LLM — es interno
-        _statsSource: undefined,
-        probabilidadesCalculadas: e._extendedProbs ? buildProbBlock(e.statsLocal, e.statsVisitante, [], selected.find(f => f.fixtureId === e.fixtureId)?.leagueId) : null,
-      }));
-      const predResults = await Promise.allSettled(fixtureIdsConDatos.map(id => getApiPrediction(id)));
-      for (let i = 0; i < enrichedForLLM.length; i++) {
-        const pred = predResults[i].status === 'fulfilled' ? predResults[i].value : null;
-        if (pred) enrichedForLLM[i].prediccionAPI = pred;
-      }
-      picksText = await sonnet(
-        PICKS_HOY_SYSTEM,
-        `Partidos del día ${today} (hora Colombia). DATOS REALES:\n\n${JSON.stringify(enrichedForLLM, null, 2)}\n\nREGLAS IRROMPIBLES — CUALQUIER VIOLACIÓN INVALIDA TU RESPUESTA COMPLETA:\n(1) STAKE: mínimo 7/10 sin excepción. Si un pick no cumple, NO LO DAS. Stake 5 o 6 = pick inválido = respuesta inválida.\n(2) CUOTA MÍNIMA: 1.65. Por debajo = descartado.\n(3) CUOTA MÁXIMA: 2.30 exacto. Cualquier cuota mayor (2.31, 2.40, 2.65, 3.35...) = pick inválido = respuesta inválida. Over 3.5 siempre tiene cuota >2.30 — NUNCA lo recomiendes.\n(4) SOLO picks que tengan estadísticas reales de AMBOS equipos en los datos recibidos. Si un equipo dice "datos limitados" → descarta todo el partido.\n(5) PROHIBIDO DNB. PROHIBIDO 1X2 directo.\n(6) Si no tienes picks que cumplan TODO lo anterior, devuelve EXACTAMENTE y SOLO esto: ⛔ Sin picks de valor real hoy.`
-      );
-    }
+    // ── Sin picks válidos: el motor matemático no encontró valor real hoy
+    // NO se usa LLM para inventar picks — mejor no dar nada que dar algo mal.
+    console.log(`⛔ Motor matemático: 0 picks con EV+ y cuota válida — no se envía nada al LLM`);
+    picksText = '⛔ Sin picks de valor real hoy. Los partidos disponibles no presentan valor matemático suficiente (EV+ con cuota 1.65–2.45 y probabilidad ≥63%).';
   }
 
   // ── Validador post-generación ──────────────────
   // Escudo final: si el LLM ignoró las reglas de cuota/stake, descarta los picks
   const cuotasEnTexto = [...picksText.matchAll(/[Cc]uota\s+m[íi]nima[:\s*]+(\d+[\.,]\d+)/g)].map(m => parseFloat(m[1].replace(',', '.')))
   const stakesEnTexto = [...picksText.matchAll(/[Ss]take[:\s*]+(\d+)\/10/g)].map(m => parseInt(m[1]))
-  const cuotaInvalida = cuotasEnTexto.some(c => c > 2.30 || c < 1.65)
-  const stakeInvalido = stakesEnTexto.some(s => s < 7)
+  const cuotaInvalida = cuotasEnTexto.some(c => c > 2.45 || c < 1.65)
+  const stakeInvalido = stakesEnTexto.some(s => s < 6)
   if (cuotaInvalida || stakeInvalido) {
     console.warn(`⚠️ VALIDADOR: picks rechazados — cuotas=[${cuotasEnTexto}] stakes=[${stakesEnTexto}]`)
-    picksText = '⛔ Sin picks de valor real hoy. Los partidos disponibles no cumplen los criterios de cuota (1.65–2.30) y stake mínimo (7/10).'
+    picksText = '⛔ Sin picks de valor real hoy. Los partidos disponibles no cumplen los criterios de cuota (1.65–2.45) y stake mínimo (6/10).'
   }
 
   // Guardar en caché
