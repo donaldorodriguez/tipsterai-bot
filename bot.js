@@ -443,6 +443,7 @@ function parseFixture(f) {
     awayTeam:   f.teams.away.name,
     homeGoals:  f.goals.home,
     awayGoals:  f.goals.away,
+    referee:    f.fixture.referee || null,
   };
 }
 
@@ -1004,9 +1005,174 @@ async function getLeagueStandings(leagueId) {
   const season = LEAGUE_SEASONS[leagueId] || 2025;
   const { data } = await API.get('/standings', { params: { league: leagueId, season } });
   const standings = data.response?.[0]?.league?.standings;
-  if (!standings) return [];
+  if (!standings) return { teams: [], total: 0 };
   const group = Array.isArray(standings[0]) ? standings[0] : standings;
-  return group.map(s => ({ teamId: s.team.id, teamName: s.team.name, rank: s.rank }));
+  const teams = group.map(s => ({
+    teamId:      s.team.id,
+    teamName:    s.team.name,
+    rank:        s.rank,
+    points:      s.points,
+    goalDiff:    s.goalsDiff,
+    played:      s.all?.played || 0,
+    description: s.description || null,
+    form:        s.form || null,
+  }));
+  return { teams, total: group.length };
+}
+
+function getTeamMotivation(standing, totalTeams) {
+  if (!standing) return { estado: 'desconocido', texto: 'Sin datos de posición' };
+  const { rank, description, points, played, form } = standing;
+  const desc = (description || '').toLowerCase();
+  const remainingGames = Math.max(0, 38 - (played || 0));
+  const isEndOfSeason = remainingGames <= 5;
+
+  let estado, texto;
+  if (desc.includes('champion') && rank <= 2) {
+    estado = 'lucha_titulo'; texto = '🏆 Lucha por el campeonato — máxima motivación';
+  } else if (desc.includes('champion')) {
+    estado = 'clasifica_champions'; texto = '⭐ En zona Champions League — alta motivación';
+  } else if (desc.includes('europa league') || (desc.includes('europa') && !desc.includes('conference'))) {
+    estado = 'clasifica_europa'; texto = '🌍 Persigue plaza de Europa League';
+  } else if (desc.includes('conference')) {
+    estado = 'clasifica_conference'; texto = '🎯 Lucha por Conference League';
+  } else if (desc.includes('play-off') || desc.includes('playoff')) {
+    estado = 'play_off_descenso'; texto = '⚠️ En play-off de descenso — desesperación';
+  } else if (desc.includes('relegation')) {
+    estado = 'lucha_descenso'; texto = '🚨 ZONA DE DESCENSO — máxima presión, juega por sobrevivir';
+  } else if (rank <= 2) {
+    estado = 'lucha_titulo'; texto = '🏆 Candidato al título — máxima motivación';
+  } else if (rank <= 5) {
+    estado = 'clasifica_champions'; texto = '⭐ Pelea por Champions League';
+  } else if (rank <= 7) {
+    estado = 'clasifica_europa'; texto = '🌍 Persigue plazas europeas';
+  } else if (totalTeams > 0 && rank >= totalTeams - 2) {
+    estado = 'lucha_descenso'; texto = '🚨 Zona de descenso directa — desesperación';
+  } else if (totalTeams > 0 && rank >= totalTeams - 5) {
+    estado = 'riesgo_descenso'; texto = '⚠️ Cerca de zona de descenso — necesita puntos';
+  } else {
+    estado = 'nada_en_juego';
+    texto = isEndOfSeason
+      ? '😴 Sin nada en juego al final de temporada — ALERTA: posibles rotaciones o bajas motivación'
+      : '📊 Posición media, sin objetivo urgente';
+  }
+  return { estado, texto, rank, puntos: points, jugados: played, forma_api: form, jornadas_restantes: remainingGames };
+}
+
+// ─── SofaScore Unofficial API ─────────────────────────────────────────────────
+const sofaEventCache = new Map();
+
+async function fetchSofaScoreEvents(date) {
+  if (sofaEventCache.has(date)) return sofaEventCache.get(date);
+  try {
+    const { data } = await axios.get(
+      `https://api.sofascore.com/api/v1/sport/football/scheduled-events/${date}`,
+      {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          'Accept': 'application/json, text/plain, */*',
+          'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+          'Referer': 'https://www.sofascore.com/',
+          'Origin': 'https://www.sofascore.com',
+        },
+        timeout: 12000,
+      }
+    );
+    const events = data.events || [];
+    sofaEventCache.set(date, events);
+    return events;
+  } catch (e) {
+    console.warn('SofaScore events fetch error:', e.message);
+    return [];
+  }
+}
+
+function sofaNormalize(str) {
+  return (str || '').toLowerCase()
+    .replace(/\bfc\b|\baf\b|\bac\b|\bsc\b|\bsk\b|\bcf\b|\bfk\b|\bif\b|\bbk\b|\bcd\b|\bsd\b|\bud\b|\brcd\b|\bas\b|\bss\b|\bus\b|\bsv\b|\bbv\b/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+}
+
+function sofaTeamMatch(apiName, sofaName) {
+  const a = sofaNormalize(apiName);
+  const b = sofaNormalize(sofaName);
+  if (a === b) return true;
+  const minLen = Math.min(a.length, b.length);
+  if (minLen >= 4) {
+    return a.startsWith(b.substring(0, Math.min(5, b.length))) ||
+           b.startsWith(a.substring(0, Math.min(5, a.length)));
+  }
+  return false;
+}
+
+async function getSofaMatchContext(homeTeam, awayTeam, sofaEvents) {
+  try {
+    const event = sofaEvents.find(e =>
+      sofaTeamMatch(homeTeam, e.homeTeam?.name) && sofaTeamMatch(awayTeam, e.awayTeam?.name)
+    );
+    if (!event) return null;
+
+    const headers = {
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+      'Referer': 'https://www.sofascore.com/',
+    };
+
+    const [detailRes, homeFormRes, awayFormRes] = await Promise.allSettled([
+      axios.get(`https://api.sofascore.com/api/v1/event/${event.id}`, { headers, timeout: 8000 }),
+      axios.get(`https://api.sofascore.com/api/v1/team/${event.homeTeam.id}/last/0`, { headers, timeout: 8000 }),
+      axios.get(`https://api.sofascore.com/api/v1/team/${event.awayTeam.id}/last/0`, { headers, timeout: 8000 }),
+    ]);
+
+    const result = { fuente: 'sofascore' };
+
+    // Árbitro con estadísticas
+    if (detailRes.status === 'fulfilled') {
+      const ev = detailRes.value.data?.event;
+      const ref = ev?.referee;
+      if (ref) {
+        const games = ref.gamesCount || 1;
+        result.arbitro = {
+          nombre: ref.name,
+          partidos: games,
+          amarillas_por_partido: ref.yellowCards ? (ref.yellowCards / games).toFixed(2) : null,
+          rojas_por_partido:     ref.redCards    ? (ref.redCards    / games).toFixed(2) : null,
+          penaltis_por_partido:  ref.penaltyCount ? (ref.penaltyCount / games).toFixed(2) : null,
+        };
+      }
+    }
+
+    // Forma reciente del local
+    if (homeFormRes.status === 'fulfilled') {
+      const events = homeFormRes.value.data?.events || [];
+      const homeId  = event.homeTeam.id;
+      result.formaLocal = events.slice(0, 6).map(e => {
+        const esLocal = e.homeTeam?.id === homeId;
+        const mis     = esLocal ? e.homeScore?.current : e.awayScore?.current;
+        const opp     = esLocal ? e.awayScore?.current : e.homeScore?.current;
+        if (mis == null || opp == null) return '?';
+        return mis > opp ? 'G' : mis < opp ? 'P' : 'E';
+      }).join('-');
+    }
+
+    // Forma reciente del visitante
+    if (awayFormRes.status === 'fulfilled') {
+      const events = awayFormRes.value.data?.events || [];
+      const awayId  = event.awayTeam.id;
+      result.formaVisitante = events.slice(0, 6).map(e => {
+        const esLocal = e.homeTeam?.id === awayId;
+        const mis     = esLocal ? e.homeScore?.current : e.awayScore?.current;
+        const opp     = esLocal ? e.awayScore?.current : e.homeScore?.current;
+        if (mis == null || opp == null) return '?';
+        return mis > opp ? 'G' : mis < opp ? 'P' : 'E';
+      }).join('-');
+    }
+
+    return result;
+  } catch (e) {
+    console.warn('getSofaMatchContext error:', e.message);
+    return null;
+  }
 }
 
 async function getH2H(id1, id2) {
@@ -1992,7 +2158,7 @@ async function haiku(systemPrompt, userMessage) {
   const msg = await claudeWithRetry({
     model: 'claude-haiku-4-5-20251001',
     max_tokens: 800,
-    system: systemPrompt,
+    system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: userMessage }],
   });
   return msg.content[0].text;
@@ -2003,7 +2169,7 @@ async function sonnet(systemPrompt, userMessage) {
     const msg = await claudeWithRetry({
       model: 'claude-sonnet-4-6',
       max_tokens: 4000,
-      system: systemPrompt,
+      system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
       messages: [{ role: 'user', content: userMessage }],
     });
     return msg.content[0].text;
@@ -2013,7 +2179,7 @@ async function sonnet(systemPrompt, userMessage) {
       const msg = await claudeWithRetry({
         model: 'claude-haiku-4-5-20251001',
         max_tokens: 4000,
-        system: systemPrompt + '\n\nSé conciso pero mantén formato y calidad.',
+        system: [{ type: 'text', text: systemPrompt + '\n\nSé conciso pero mantén formato y calidad.', cache_control: { type: 'ephemeral' } }],
         messages: [{ role: 'user', content: userMessage }],
       });
       return msg.content[0].text;
@@ -2273,6 +2439,18 @@ USO DE DATOS CONTEXTUALES (cuando están disponibles en los datos):
 - estadio: el nombre del estadio puede ayudar a contextualizar (estadios grandes de equipos históricos tienden a presionar más al visitante).
 Integra estos datos en el razonamiento de cada pick — no los ignores.
 
+ANÁLISIS DE MOTIVACIÓN (CRÍTICO AL FINAL DE TEMPORADA):
+- motivacionLocal / motivacionVisitante: qué juega cada equipo. Si estado='nada_en_juego' con jornadas_restantes ≤ 5 → ALERTA ROJA: posibles reservas, baja motivación. Baja el stake 2 niveles o descarta.
+- Si estado='lucha_descenso' → equipo desesperado, busca pick en tarjetas, corners, partido intenso.
+- Si estado='lucha_titulo' → máxima motivación, favorece Over y victoria local/visitante.
+
+ÁRBITRO:
+- Si viene arbitroStats → usa las estadísticas concretas para reforzar mercados de tarjetas/penaltis.
+- Si viene solo el campo "arbitro" (nombre) → usa tu conocimiento del árbitro para el razonamiento.
+
+FORMA SOFASCORE:
+- formaSofaLocal / formaSofaVisitante: forma real de los últimos 6 partidos en TODAS las competiciones. Más fiable que forma solo de liga. Úsala como dato principal de forma reciente.
+
 CONTEXTO PARA COMPETICIONES INTERNACIONALES (Libertadores, Sudamericana, Champions, Europa League, Copa del Mundo):
 Cuando el partido es de copa con pocos juegos en esa competición, el razonamiento DEBE basarse en:
 1. Forma de los últimos 10 partidos TOTALES (liga doméstica + copa combinados)
@@ -2293,54 +2471,106 @@ Mínimo 3 selecciones, máximo 5. Mercados y partidos distintos.
 💡 Cuota combinada estimada: *~X.XX*
 ━━━━━━━━━━━━━━━━━━━`;
 
+// ─── Fallback prompt — análisis Claude sin cuotas reales ─────────────────────
+// Activado cuando la API de cuotas no está disponible.
+// Claude selecciona picks usando su conocimiento + stats disponibles.
+const PICKS_LLM_FALLBACK_SYSTEM = `${TIPSTER_SYSTEM}
+
+MODO ANÁLISIS ESTADÍSTICO — CUOTAS NO DISPONIBLES EN TIEMPO REAL:
+Las cuotas en vivo no están disponibles hoy. Cada partido viene con un campo "probabilidadesCalculadas" generado por el modelo Poisson Dixon-Coles del sistema. Úsalo como base principal — es matemáticamente más fiable que tu intuición.
+
+CÓMO USAR probabilidadesCalculadas:
+- homeWin / draw / awayWin: probabilidades de resultado FT. Úsalas para calibrar el stake.
+- over25 / over35 / under25 / btts: probabilidades de goles. Si over25 > 62%, considera pick Over 2.5.
+- htOver05 / htOver15: probabilidades de goles en 1er tiempo.
+- cornersOver85 / cornersOver95: probabilidades de corners.
+- homeLambda / awayLambda: goles esperados de cada equipo (xG implícito).
+- fuenteStats: 'real' = stats reales de la API; 'fallback' = promedios europeos de referencia. Con 'fallback' baja el stake 1 nivel adicional.
+
+INSTRUCCIONES PARA ESTIMAR CUOTAS DE MERCADO:
+Convierte la probabilidad Poisson en cuota justa y aplica margen de casa (~5%):
+- Cuota justa = 1 / probabilidad. Cuota mercado ≈ cuota justa × 0.95
+- Ejemplo: homeWin = 65% → cuota justa 1.54 → cuota mercado ~1.46 (sin valor, demasiado baja)
+- Ejemplo: over25 = 60% → cuota justa 1.67 → cuota mercado ~1.58 → pick válido si stake ≥7
+- Si la cuota estimada queda fuera de rango 1.65–2.30, descarta ese mercado.
+
+SELECCIONA 2–3 picks con stake mínimo 7/10.
+Si ningún partido presenta valor claro → responde solo: "⛔ Sin picks de valor hoy."
+
+INSTRUCCIONES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
+- NO escribas intro ni "Análisis del día". Comienza directamente con el primer partido.
+- NO uses # ni ## ni ###.
+- NO menciones que las cuotas son estimadas ni que no tienes datos en tiempo real.`;
+
 // ─── Formatter-only prompt ────────────────────────────────────────────────────
 // Usado cuando los picks ya fueron seleccionados matemáticamente.
 // El LLM SOLO formatea — no selecciona, no descarta, no agrega picks.
-const PICKS_HOY_FORMATTER_SYSTEM = `Eres el redactor del tipster profesional. Los picks ya fueron seleccionados por nuestro motor matemático de valor esperado. Tu función es ÚNICAMENTE escribir el texto final en español.
+const PICKS_HOY_FORMATTER_SYSTEM = `Eres el mejor tipster profesional del mundo. El motor matemático pre-seleccionó picks con Poisson+EV. Tu trabajo es VALIDARLOS con contexto real y escribir el resultado final.
 
-REGLAS ABSOLUTAS — SIN EXCEPCIÓN:
-- Escribe EXACTAMENTE los picks que recibes, en el orden dado. NO añadas ni elimines ningún pick.
-- NO cuestiones ni justifiques las selecciones.
-- NO menciones EV%, xG, lambda, cornersLambda ni ningún valor técnico — son internos.
-- NO uses # ## ### (se ven mal en Telegram).
-- NO inventes estadísticas — usa solo lo que viene en statsLocal / statsVisitante.
-- Si statsLocal o statsVisitante son null, escribe "datos limitados" en lugar de inventar.
+VALIDACIÓN OBLIGATORIA — antes de publicar cada pick, verifica:
 
-FORMATO OBLIGATORIO para cada pick:
-🌍 [country] — [liga] | [jornada si está disponible]
-⚽ [local] vs [visitante] | ⏰ [hora] | 🏟️ [estadio si está disponible]
+1. MOTIVACIÓN: Si el campo motivacionLocal o motivacionVisitante indica "nada_en_juego" y es final de temporada (jornadas_restantes ≤ 5), ese equipo puede alinear reservas. Si AMBOS equipos están sin motivación → DESCARTA ese partido.
+   Si UNO está sin motivación (el que juega de local o visitante) → baja el stake 1 nivel. Si el pick depende de ese equipo atacar/marcar, DESCARTA.
+
+2. ÁRBITRO: Si hay datos de árbitro (arbitroStats o arbitro), úsalos:
+   - amarillas_por_partido > 4.5 → árbitro permisivo con el juego físico, mayor probabilidad de Over tarjetas
+   - amarillas_por_partido < 2.5 → árbitro restrictivo, mercados de tarjetas tienen menos valor
+   - penaltis_por_partido > 0.4 → árbitro que pita muchos penaltis, favorece DNB de equipos que atacan
+   Menciona al árbitro en el razonamiento si sus stats refuerzan o debilitan el pick.
+
+3. CONTEXTO TEMPORAL: Si es final de temporada (jornadas_restantes ≤ 5):
+   - Equipos ya campeones o descendidos → rotaciones probables → evitar picks de goles de ese equipo
+   - Equipos en lucha extrema (descenso, título) → intensidad máxima → favorece mercados de tarjetas/corners
+   - Menciona el contexto en el razonamiento ("Equipo sin nada que jugarse al final de temporada")
+
+4. ÁRBITRO SIN DATOS: Si solo tienes el nombre del árbitro (campo "arbitro"), usa tu conocimiento sobre ese árbitro específico para el razonamiento si es conocido.
+
+REGLAS DE PICKS (idénticas al motor, no relajar):
+- CUOTA: 1.65–2.30 absoluto
+- STAKE MÍNIMO PUBLICABLE: 7/10
+- MÁXIMO 2 picks por partido
+- Si un pick no pasa la validación de motivación → descártalo y elige el siguiente candidato o di "Sin picks válidos"
+
+FORMATO EXACTO (Telegram Markdown):
+🌍 [País] — [Liga]
+⚽ [Local] vs [Visitante] | ⏰ [Hora Colombia]
+📍 [Estadio] | 🃏 Árbitro: [Nombre] ([amarillas_avg]/partido si disponible)
 ━━━━━━━━━━━━━━━━━━━
+
+🎯 *MOTIVACIÓN*
+▸ [Local]: [texto de motivacionLocal]
+▸ [Visitante]: [texto de motivacionVisitante]
 
 📊 *ESTADÍSTICAS CLAVE*
-▸ [local] (pos. [posicionLocal]°) anota en casa: *[golesAnotadosHome]* goles/partido
-▸ [visitante] (pos. [posicionVisitante]°) anota fuera: *[golesAnotadosAway]* goles/partido
-▸ [local] recibe en casa: *[golesRecibidosHome]* goles/partido
-▸ Forma reciente [local]: *[forma5.forma]* ([forma5.nota])
-▸ Forma reciente [visitante]: *[forma5.forma]* ([forma5.nota])
-[Si h2h disponible con ≥3 partidos, añade: ▸ H2H últimos [N]: [X] victorias [local] / [Y] empates / [Z] victorias [visitante] — [resumen de tendencia goles]]
+▸ [local] anota en casa: *X.X* goles/partido | Forma: *[forma]*
+▸ [visitante] anota fuera: *X.X* goles/partido | Forma: *[forma]*
+▸ [Si H2H ≥3 partidos: resumen H2H]
 
-🎯 *PICK: [marketLabel]*
-┌ Selección: [descripción exacta del pick]
-├ Razonamiento: [1-2 líneas con el dato concreto de las estadísticas que lo justifica; si hay H2H o posición en tabla relevante, úsalos]
-├ Probabilidad: *[prob]%*
-├ 🏆 Stake: *[stake]/10*
-├ 💡 Cuota mínima: *[odds]*
-└ ⚠️ Riesgo: [1 línea máximo]
+🎯 *PICK: [Mercado]*
+┌ Selección: [Qué apostar]
+├ Razonamiento: [Dato estadístico + contexto motivación/árbitro si aplica]
+├ Probabilidad: *[X]%*
+├ 🏆 Stake: *[X]/10*
+├ 💡 Cuota mínima: *[X.XX]*
+└ ⚠️ Riesgo: [1 línea]
 
 ━━━━━━━━━━━━━━━━━━━
 
-Después de todos los picks individuales, añade la combinada:
-
+[Después de todos los picks individuales, añade combinada si hay 2+:]
 ━━━━━━━━━━━━━━━━━━━
 🎰 *COMBINADA DEL DÍA*
-▸ [local] vs [visitante] → *[marketLabel]* | Cuota: *[odds]*
-[una línea por pick]
-
-🏆 Stake combinada: *3/10*
-💡 Cuota combinada: *~[producto de todas las cuotas redondeado a 2 decimales]*
+▸ [Local] vs [Visitante] → *[mercado]* | Cuota: *X.XX*
+...
+🏆 Stake combinada: *[X]/10*
+💡 Cuota combinada estimada: *~X.XX*
 ━━━━━━━━━━━━━━━━━━━
 
-Responde en español. Sé conciso y directo.`;
+REGLAS DE FORMATO:
+- NUNCA uses # ## ###
+- NUNCA menciones APIs, fuentes de datos, EV%, xG, lambda, probabilidadesCalculadas como términos técnicos
+- NUNCA inventes estadísticas — usa solo lo que viene en los datos
+- Si statsLocal/statsVisitante son null → escribe "datos limitados"
+- Responde en español`;
 
 const INPLAY_SYSTEM = `${TIPSTER_SYSTEM}
 
@@ -2353,8 +2583,6 @@ ANÁLISIS DE MOMENTUM (campo "momentumEnVivo"):
 - score < -15: el visitante domina → favorece apuestas al visitante
 - score entre -15 y 15: partido equilibrado → enfócate en corners y tarjetas
 - intensity > 30: dominio muy claro → stake más alto permitido
-
-${LEAGUE_STATS_CONTEXT}
 
 PROYECCIONES EN TIEMPO REAL:
 - GOLES EN VIVO: línea mínima con valor = currentGoals + 2. Si ya van 2 goles y la línea es Over 2.5, solo falta 1 gol → cuota mínima, sin valor → descártala. Si la línea es Over 3.5 (faltan 2 goles) → evalúa según ritmo real del partido y contexto. Ejemplo: Liverpool 2-2 en el 60' → Over 4.5 (falta 1) sin valor, Over 5.5 (faltan 2) → evalúa si el ritmo lo justifica.
@@ -2595,6 +2823,7 @@ async function extractPicksFromText(analysisText, matchesCtx) {
 
 async function recordPicks(analysisText, matchesCtx) {
   if (!analysisText || !matchesCtx.length) return;
+  if (analysisText.trimStart().startsWith('⛔')) return; // sin picks válidos, no gastar tokens
   try {
     const extracted = await extractPicksFromText(analysisText, matchesCtx);
     if (!extracted.length) { console.log('📝 No se extrajeron picks estructurados'); return; }
@@ -2931,8 +3160,12 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   // Construir mapa de standings por leagueId
   const standingsMap = {};
+  const standingsTotalMap = {};
   uniqueLeagueIds.forEach((lid, i) => {
-    if (standingsArray[i].status === 'fulfilled') standingsMap[lid] = standingsArray[i].value;
+    if (standingsArray[i].status === 'fulfilled') {
+      standingsMap[lid] = standingsArray[i].value.teams || standingsArray[i].value;
+      standingsTotalMap[lid] = standingsArray[i].value.total || (standingsArray[i].value.teams || standingsArray[i].value).length;
+    }
   });
 
   // Enriquecer con cuotas, H2H, posición en tabla, jornada y estadio
@@ -2948,10 +3181,37 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     enriched[i].estadio = selected[i].venue;
 
     const standings = standingsMap[selected[i].leagueId] || [];
-    const posLocal = standings.find(s => s.teamId === selected[i].homeId);
-    const posVisit = standings.find(s => s.teamId === selected[i].awayId);
-    if (posLocal) enriched[i].posicionLocal = posLocal.rank;
-    if (posVisit) enriched[i].posicionVisitante = posVisit.rank;
+    const totalEquipos = standingsTotalMap[selected[i].leagueId] || 20;
+    const standingLocal = standings.find(s => s.teamId === selected[i].homeId);
+    const standingVisit = standings.find(s => s.teamId === selected[i].awayId);
+    if (standingLocal) enriched[i].posicionLocal = standingLocal.rank;
+    if (standingVisit) enriched[i].posicionVisitante = standingVisit.rank;
+    enriched[i].motivacionLocal     = getTeamMotivation(standingLocal, totalEquipos);
+    enriched[i].motivacionVisitante = getTeamMotivation(standingVisit, totalEquipos);
+    enriched[i].arbitro = selected[i].referee || null;
+  }
+
+  // Enriquecer con SofaScore (árbitro con stats, forma reciente)
+  try {
+    await bot.sendMessage(chatId, '🔬 Enriqueciendo contexto con datos externos...');
+    const sofaEvents = await fetchSofaScoreEvents(today);
+    if (sofaEvents.length > 0) {
+      const sofaResults = await Promise.allSettled(
+        enriched.map(e => getSofaMatchContext(e.local, e.visitante, sofaEvents))
+      );
+      sofaResults.forEach((r, i) => {
+        if (r.status === 'fulfilled' && r.value) {
+          const s = r.value;
+          if (s.arbitro)        enriched[i].arbitroStats       = s.arbitro;
+          if (s.formaLocal)     enriched[i].formaSofaLocal     = s.formaLocal;
+          if (s.formaVisitante) enriched[i].formaSofaVisitante = s.formaVisitante;
+        }
+      });
+      const conArbitro = enriched.filter(e => e.arbitroStats).length;
+      console.log(`SofaScore: ${sofaEvents.length} eventos, ${conArbitro}/${enriched.length} con datos árbitro`);
+    }
+  } catch (e) {
+    console.warn('SofaScore enrich error:', e.message);
   }
 
   await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV por mercado...`);
@@ -2996,11 +3256,32 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       PICKS_HOY_FORMATTER_SYSTEM,
       `Fecha: ${today} (hora Colombia)\n\nPICKS SELECCIONADOS POR EL MOTOR MATEMÁTICO — NO añadas ni elimines ninguno:\n\n${JSON.stringify(topPicks, null, 2)}`
     );
+  } else if (conOdds === 0 && enriched.length >= 2) {
+    // ── Sin cuotas reales disponibles (rate limit o plan API) → fallback Claude
+    console.log(`📡 Sin cuotas reales (${enriched.length} partidos) — activando análisis Claude`);
+    await bot.sendMessage(chatId, '📡 Análisis estadístico en curso...');
+    const fixturesParaClaude = enriched.map(e => ({
+      local: e.local,
+      visitante: e.visitante,
+      liga: e.liga,
+      country: e.country,
+      hora: e.hora,
+      statsLocal: e.statsLocal,
+      statsVisitante: e.statsVisitante,
+      h2h: e.h2h,
+      posicionLocal: e.posicionLocal,
+      posicionVisitante: e.posicionVisitante,
+      fuenteStats: e._statsSource, // 'real' | 'local_only' | 'away_only' | 'fallback'
+      probabilidadesCalculadas: e._extendedProbs, // Poisson Dixon-Coles — usa como base principal
+    }));
+    picksText = await sonnet(
+      PICKS_LLM_FALLBACK_SYSTEM,
+      `Fecha: ${today} (hora Colombia)\n\nPartidos disponibles hoy (probabilidades calculadas con modelo Poisson):\n${JSON.stringify(fixturesParaClaude, null, 2)}`
+    );
   } else {
-    // ── Sin picks válidos: el motor matemático no encontró valor real hoy
-    // NO se usa LLM para inventar picks — mejor no dar nada que dar algo mal.
-    console.log(`⛔ Motor matemático: 0 picks con EV+ y cuota válida — no se envía nada al LLM`);
-    picksText = '⛔ Sin picks de valor real hoy. Los partidos disponibles no presentan valor matemático suficiente (EV+ con cuota 1.65–2.45 y probabilidad ≥63%).';
+    // ── Sin picks válidos y hay cuotas: el motor matemático no encontró EV positivo
+    console.log(`⛔ Motor matemático: 0 picks con EV+ y cuota válida`);
+    picksText = '⛔ Sin picks de valor real hoy. Los partidos disponibles no presentan valor matemático suficiente.';
   }
 
   // ── Validador post-generación ──────────────────
@@ -3856,7 +4137,8 @@ async function handleRachas(chatId, intent) {
   const leagueName = LEAGUE_MAP[leagueId]?.name || intent.liga;
   await bot.sendMessage(chatId, `🔍 Analizando rachas en *${leagueName}* ${venueLabel}...`, { parse_mode: 'Markdown' });
 
-  const teams = await getLeagueStandings(leagueId);
+  const standingsResult = await getLeagueStandings(leagueId);
+  const teams = standingsResult.teams || standingsResult;
   if (teams.length === 0) return bot.sendMessage(chatId, `😔 No encontré la tabla de *${leagueName}*.`, { parse_mode: 'Markdown' });
 
   const topTeams = teams.slice(0, 16);
@@ -3988,7 +4270,7 @@ async function handleImage(msg) {
 
     console.log(`🔍 Claude Vision: analizando imagen (${mime})`);
     const visionMsg = await claudeWithRetry({
-      model: 'claude-opus-4-6',
+      model: 'claude-sonnet-4-6',
       max_tokens: 1000,
       messages: [{
         role: 'user',
@@ -4707,30 +4989,59 @@ function exitBot(reason, delayMs = 0) {
   }
 }
 
-// Polling errors: 429 espera el retry_after antes de reiniciar
+// Polling errors: 429 espera, otros errores transitorios se ignoran
+let consecutivePollingErrors = 0;
 bot.on('polling_error', err => {
   const msg = err.message || '';
-  // Telegram 429: "retry after N" — extraer N y esperar
+  const code = err.code || '';
+
+  // 409 Conflict — otra instancia corriendo, reiniciar después de esperar
+  if (msg.includes('409') || code === 'ETELEGRAM') {
+    console.warn(`⚠️  Telegram 409 Conflict — esperando 15s`);
+    exitBot(`polling_error 409: ${msg}`, 15000);
+    return;
+  }
+
+  // 401 Unauthorized — token inválido, no tiene sentido reintentar
+  if (msg.includes('401')) {
+    exitBot(`polling_error 401 — token inválido: ${msg}`);
+    return;
+  }
+
+  // 429 Rate limit — esperar retry_after
   const retryMatch = msg.match(/retry after (\d+)/i);
   if (retryMatch) {
     const retrySecs = Math.max(parseInt(retryMatch[1], 10), 10);
-    console.warn(`⚠️  Telegram 429 — esperando ${retrySecs}s antes de reiniciar`);
-    exitBot(`polling_error: ${msg}`, retrySecs * 1000);
-  } else {
-    exitBot(`polling_error: ${msg}`);
+    console.warn(`⚠️  Telegram 429 — esperando ${retrySecs}s`);
+    consecutivePollingErrors = 0;
+    exitBot(`polling_error 429: ${msg}`, retrySecs * 1000);
+    return;
+  }
+
+  // Errores de red transitorios — tolerar hasta 5 consecutivos
+  consecutivePollingErrors++;
+  console.warn(`⚠️  polling_error (${consecutivePollingErrors}/5): ${msg}`);
+  if (consecutivePollingErrors >= 5) {
+    exitBot(`polling_error persistente: ${msg}`);
   }
 });
+bot.on('message',        () => { consecutivePollingErrors = 0; });
+bot.on('callback_query', () => { consecutivePollingErrors = 0; });
 
-// Errores no capturados → reinicio
-process.on('uncaughtException',  err => exitBot(`uncaughtException: ${err.message}`));
-process.on('unhandledRejection', err => exitBot(`unhandledRejection: ${err}`));
+// Errores no capturados — loguear siempre, solo reiniciar en uncaughtException
+process.on('uncaughtException', err => {
+  console.error(`💥 uncaughtException: ${err.message}\n${err.stack}`);
+  exitBot(`uncaughtException: ${err.message}`);
+});
+process.on('unhandledRejection', (err) => {
+  const msg = err instanceof Error ? err.message : String(err);
+  console.error(`⚠️  unhandledRejection (no fatal): ${msg}`);
+  // No crashear — solo loguear. Las promesas rechazadas no deben bajar el bot.
+});
 
 // Watchdog: cada 90 segundos verifica que el polling siga vivo
-// Lógica: si getMe() falla UNA vez → reinicio inmediato (no esperar 3)
-// Si getMe() funciona pero el polling lleva mucho tiempo sin recibir nada → reinicio
 let lastUpdateReceived = Date.now();
-bot.on('message',        () => { lastUpdateReceived = Date.now(); });
-bot.on('callback_query', () => { lastUpdateReceived = Date.now(); });
+let watchdogFailures = 0;
 
 setInterval(async () => {
   try {
@@ -4739,10 +5050,14 @@ setInterval(async () => {
     // Si llevamos más de 20 min sin ningún update Y getMe empieza a tener
     // fallos intermitentes, algo está mal. Pero getMe OK = polling OK aquí
     // solo logueamos para diagnóstico.
+    watchdogFailures = 0;
     console.log(`💓 OK ${new Date().toISOString()} | silencio: ${minutesSilent.toFixed(1)}min`);
   } catch (err) {
-    // getMe falló → red rota → reinicio inmediato sin esperar contador
-    exitBot(`keepalive getMe falló: ${err.message}`);
+    watchdogFailures++;
+    console.warn(`⚠️  keepalive getMe falló (${watchdogFailures}/3): ${err.message}`);
+    if (watchdogFailures >= 3) {
+      exitBot(`keepalive getMe falló 3 veces seguidas: ${err.message}`);
+    }
   }
 }, 90 * 1000);
 
