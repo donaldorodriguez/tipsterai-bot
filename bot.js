@@ -1817,7 +1817,7 @@ function buildPickCandidates(enrichedFixtures) {
       // La cuota mostrada al usuario lleva el buffer (+0.15).
       // La cuota real (o) se usó para el cálculo de EV — es correcta internamente.
       const oddsDisplayed = +Math.round((o + ODDS_DISPLAY_BUFFER) * 20) / 20; // redondea a 0.05
-      if (oddsDisplayed > 2.45) continue; // Cuota máxima: 2.45
+      if (oddsDisplayed > 2.65) continue; // Cuota máxima: 2.65
       if (stake < 5) continue;            // Stake mínimo publicable: 5/10
 
       candidates.push({
@@ -3256,43 +3256,50 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       PICKS_HOY_FORMATTER_SYSTEM,
       `Fecha: ${today} (hora Colombia)\n\nPICKS SELECCIONADOS POR EL MOTOR MATEMÁTICO — NO añadas ni elimines ninguno:\n\n${JSON.stringify(topPicks, null, 2)}`
     );
-  } else if (conOdds === 0 && enriched.length >= 2) {
-    // ── Sin cuotas reales disponibles (rate limit o plan API) → fallback Claude
-    console.log(`📡 Sin cuotas reales (${enriched.length} partidos) — activando análisis Claude`);
-    await bot.sendMessage(chatId, '📡 Análisis estadístico en curso...');
-    const fixturesParaClaude = enriched.map(e => ({
-      local: e.local,
-      visitante: e.visitante,
-      liga: e.liga,
-      country: e.country,
-      hora: e.hora,
-      statsLocal: e.statsLocal,
-      statsVisitante: e.statsVisitante,
-      h2h: e.h2h,
-      posicionLocal: e.posicionLocal,
-      posicionVisitante: e.posicionVisitante,
-      fuenteStats: e._statsSource, // 'real' | 'local_only' | 'away_only' | 'fallback'
-      probabilidadesCalculadas: e._extendedProbs, // Poisson Dixon-Coles — usa como base principal
-    }));
-    picksText = await sonnet(
-      PICKS_LLM_FALLBACK_SYSTEM,
-      `Fecha: ${today} (hora Colombia)\n\nPartidos disponibles hoy (probabilidades calculadas con modelo Poisson):\n${JSON.stringify(fixturesParaClaude, null, 2)}`
-    );
   } else {
-    // ── Sin picks válidos y hay cuotas: el motor matemático no encontró EV positivo
-    console.log(`⛔ Motor matemático: 0 picks con EV+ y cuota válida`);
-    picksText = '⛔ Sin picks de valor real hoy. Los partidos disponibles no presentan valor matemático suficiente.';
+    // ── Motor no encontró EV suficiente O sin cuotas → Claude analiza todo y decide
+    const sinCuotas = conOdds === 0;
+    console.log(`📡 Motor: 0 picks válidos (sinCuotas=${sinCuotas}, partidos=${enriched.length}) — Claude analiza`);
+    await bot.sendMessage(chatId, '🧠 Analizando opciones con IA...');
+    const fixturesParaClaude = enriched.map(e => ({
+      local:            e.local,
+      visitante:        e.visitante,
+      liga:             e.liga,
+      country:          e.country,
+      hora:             e.hora,
+      jornada:          e.jornada,
+      estadio:          e.estadio,
+      arbitro:          e.arbitro || null,
+      arbitroStats:     e.arbitroStats || null,
+      statsLocal:       e.statsLocal,
+      statsVisitante:   e.statsVisitante,
+      h2h:              e.h2h,
+      cuotasReales:     e.cuotasReales || null,
+      posicionLocal:    e.posicionLocal,
+      posicionVisitante:e.posicionVisitante,
+      motivacionLocal:  e.motivacionLocal,
+      motivacionVisitante: e.motivacionVisitante,
+      formaSofaLocal:   e.formaSofaLocal || null,
+      formaSofaVisitante: e.formaSofaVisitante || null,
+      fuenteStats:      e._statsSource,
+      probabilidadesCalculadas: e._extendedProbs,
+    }));
+    const systemPrompt = sinCuotas ? PICKS_LLM_FALLBACK_SYSTEM : PICKS_HOY_SYSTEM;
+    picksText = await sonnet(
+      systemPrompt,
+      `Fecha: ${today} (hora Colombia)\n\nNota: el motor matemático no encontró picks con EV alto. Analiza estos partidos con todos los datos disponibles (stats, cuotas, H2H, motivación, árbitro) y selecciona los mejores picks disponibles. Si genuinamente no hay nada con valor, dilo claramente.\n\n${JSON.stringify(fixturesParaClaude, null, 2)}`
+    );
   }
 
   // ── Validador post-generación ──────────────────
   // Escudo final: si el LLM ignoró las reglas de cuota/stake, descarta los picks
   const cuotasEnTexto = [...picksText.matchAll(/[Cc]uota\s+m[íi]nima[:\s*]+(\d+[\.,]\d+)/g)].map(m => parseFloat(m[1].replace(',', '.')))
   const stakesEnTexto = [...picksText.matchAll(/[Ss]take[:\s*]+(\d+)\/10/g)].map(m => parseInt(m[1]))
-  const cuotaInvalida = cuotasEnTexto.some(c => c > 2.45 || c < 1.50)
+  const cuotaInvalida = cuotasEnTexto.some(c => c > 2.70 || c < 1.40)
   const stakeInvalido = stakesEnTexto.some(s => s < 5)
   if (cuotaInvalida || stakeInvalido) {
     console.warn(`⚠️ VALIDADOR: picks rechazados — cuotas=[${cuotasEnTexto}] stakes=[${stakesEnTexto}]`)
-    picksText = '⛔ Sin picks de valor real hoy. Los partidos disponibles no cumplen los criterios de cuota (1.50–2.45) y stake mínimo (5/10).'
+    picksText = '⛔ Sin picks de valor real hoy.'
   }
 
   // Guardar en caché
@@ -3850,13 +3857,13 @@ async function handleAlertaGol(chatId) {
 
   // 1. Obtener todos los partidos en vivo
   const liveRaw = await fetchLiveRaw();
+  // Sin filtro de liga — analiza cualquier partido activo en vivo
   const liveActive = liveRaw.filter(f =>
-    ['1H', '2H', 'ET'].includes(f.fixture.status.short) &&
-    LEAGUE_IDS.has(f.league.id)
+    ['1H', '2H', 'ET'].includes(f.fixture.status.short)
   );
 
   if (liveActive.length === 0) {
-    return bot.sendMessage(chatId, '😔 No hay partidos activos ahora mismo en las ligas monitoreadas.');
+    return bot.sendMessage(chatId, '😔 No hay partidos en vivo ahora mismo. Inténtalo cuando haya partidos activos.');
   }
 
   await bot.sendMessage(chatId, `🔍 *${liveActive.length}* partido(s) activo(s). Calculando probabilidades de gol...`, { parse_mode: 'Markdown' });
