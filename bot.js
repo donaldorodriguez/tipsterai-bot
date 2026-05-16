@@ -916,8 +916,10 @@ async function findTeamWithButtons(chatId, name, countryHint = '', intent = null
   // Ordenar: primero los que juegan pronto, luego por score
   enriched.sort((a, b) => b._priority - a._priority || b._score - a._score);
 
-  // Si tras el ordenamiento hay uno claramente en vivo/hoy y los demás no → elegir automático
-  if (enriched[0]._priority >= 2 && (enriched[1]?._priority || 0) === 0) return enriched[0];
+  // Solo auto-seleccionar por "juega hoy" si el nombre también es el mejor match (gap > 15)
+  // Evita elegir Hibernian cuando el usuario preguntó por Celtic solo porque Hibernian juega hoy
+  const nameGapTop = enriched[0]._score - (enriched[1]?._score || 0);
+  if (enriched[0]._priority >= 2 && (enriched[1]?._priority || 0) === 0 && nameGapTop > 15) return enriched[0];
 
   // Codificar intencion en callback_data (sin estado en memoria)
   const intentCode = (intent?.intencion === 'rachas') ? 'r' : 'p';
@@ -3880,7 +3882,7 @@ async function handleAlertaGol(chatId) {
   await bot.sendMessage(chatId, `🔍 *${liveActive.length}* partido(s) activo(s). Calculando probabilidades de gol...`, { parse_mode: 'Markdown' });
 
   // 2. Obtener stats en vivo + históricas en paralelo (máx 6 partidos)
-  const candidates = liveActive.slice(0, 6);
+  const candidates = liveActive.slice(0, 20);
   const [liveStatsResults, homeStatsResults, awayStatsResults] = await Promise.all([
     Promise.allSettled(candidates.map(f => getFixtureStatistics(f.fixture.id))),
     Promise.allSettled(candidates.map(f => getTeamStats(f.teams.home.id, f.league.id))),
@@ -3897,7 +3899,7 @@ async function handleAlertaGol(chatId) {
     const awayStatsData  = awayStatsResults[i].status  === 'fulfilled' ? awayStatsResults[i].value  : null;
 
     const alert = calcGoalAlert(parsed, liveStats, homeStatsData, awayStatsData);
-    if (alert && alert.impliedOdds >= 1.45) alerts.push(alert);
+    if (alert && alert.pGoal >= 55) alerts.push(alert); // pGoal es porcentaje, ≥55% = cuota ~1.82
   }
 
   if (alerts.length === 0) {
