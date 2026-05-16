@@ -3270,7 +3270,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   // ── Selección matemática de picks ────────────────────────────────────────
   const candidates = buildPickCandidates(enrichedFiltrado);
-  const topPicks   = selectDiversePicks(candidates, 5);
+  const topPicks   = selectDiversePicks(candidates, 3);
 
   // Log detallado de por qué cada partido pasó o no
   console.log(`🎯 Candidatos válidos: ${candidates.length}`);
@@ -3563,8 +3563,24 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
 
   await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV...`);
 
+  // Filtro de calidad: descartar partidos sin datos reales de ningún equipo
+  const enrichedFiltradoL = enriched.map(e => ({
+    ...e,
+    _statsSource: (e.statsLocal && e.statsVisitante) ? 'real'
+      : e.statsLocal ? 'local_only'
+      : e.statsVisitante ? 'away_only'
+      : 'fallback',
+  })).filter(e => {
+    if (e._statsSource === 'fallback') {
+      console.log(`❌ Liga: DESCARTADO sin stats: ${e.local} vs ${e.visitante}`);
+      return false;
+    }
+    if (e._statsSource === 'local_only' || e._statsSource === 'away_only') e._maxStake = 5;
+    return true;
+  });
+
   // Selección matemática de picks
-  const candidatesL = buildPickCandidates(enriched);
+  const candidatesL = buildPickCandidates(enrichedFiltradoL);
   const topPicksL   = selectDiversePicks(candidatesL, 3);
   console.log(`🎯 ${displayName} — candidatos EV+: ${candidatesL.length} | seleccionados: ${topPicksL.length}`);
 
@@ -3587,12 +3603,15 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
   recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
 }
 
-async function handlePartido(chatId, teamName, countryHint = '') {
-  await bot.sendMessage(chatId, `🔍 Buscando *${teamName}* en nuestra base de datos...`, { parse_mode: 'Markdown' });
+async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverride = null) {
+  let teamData = _teamDataOverride;
 
-  const teamData = await findTeamWithButtons(chatId, teamName, countryHint, { intencion: 'partido_especifico' });
-  if (!teamData) return bot.sendMessage(chatId, `❌ No encontré el equipo "${teamName}" en nuestra base de datos.`);
-  if (teamData === 'PENDING') return; // esperando selección del usuario
+  if (!teamData) {
+    await bot.sendMessage(chatId, `🔍 Buscando *${teamName}* en nuestra base de datos...`, { parse_mode: 'Markdown' });
+    teamData = await findTeamWithButtons(chatId, teamName, countryHint, { intencion: 'partido_especifico' });
+    if (!teamData) return bot.sendMessage(chatId, `❌ No encontré el equipo "${teamName}" en nuestra base de datos.`);
+    if (teamData === 'PENDING') return;
+  }
 
   const teamId   = teamData.team.id;
   const teamFull = teamData.team.name;
@@ -3921,40 +3940,64 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
 
   await bot.sendMessage(chatId, `⏳ *${liveFixtures.length}* partido(s) en vivo detectados. Recopilando estadísticas...`, { parse_mode: 'Markdown' });
 
-  // Get live stats for up to 4 matches (API call limit)
+  // Get live stats + team stats históricos para todos los partidos en paralelo
   const toAnalyze = liveFixtures.slice(0, 4);
-  const statsResults = await Promise.allSettled(
-    toAnalyze.map(f => getFixtureStatistics(f.fixtureId))
+  const today = new Date().toISOString().split('T')[0];
+  const [liveStatsResults, homeStatsResults, awayStatsResults, sofaEventsVivo] = await Promise.all([
+    Promise.allSettled(toAnalyze.map(f => getFixtureStatistics(f.fixtureId))),
+    Promise.allSettled(toAnalyze.map(f => getTeamStats(f.homeId, f.leagueId))),
+    Promise.allSettled(toAnalyze.map(f => getTeamStats(f.awayId, f.leagueId))),
+    fetchSofaScoreEvents(today).catch(() => []),
+  ]);
+
+  // Standings por liga única
+  const uniqueLeagueIdsVivo = [...new Set(toAnalyze.map(f => f.leagueId))];
+  const standingsVivo = await Promise.allSettled(uniqueLeagueIdsVivo.map(lid => getLeagueStandings(lid)));
+  const standingsMapVivo = {};
+  uniqueLeagueIdsVivo.forEach((lid, i) => {
+    if (standingsVivo[i].status === 'fulfilled') standingsMapVivo[lid] = standingsVivo[i].value;
+  });
+
+  // Sofascore context para cada partido
+  const sofaResultsVivo = await Promise.allSettled(
+    toAnalyze.map(f => getSofaMatchContext(f.homeTeam, f.awayTeam, sofaEventsVivo))
   );
 
   const enriched = toAnalyze.map((f, i) => {
-    const liveStats = statsResults[i].status === 'fulfilled' ? statsResults[i].value : null;
+    const liveStats = liveStatsResults[i].status === 'fulfilled' ? liveStatsResults[i].value : null;
+    const hStats    = homeStatsResults[i].status === 'fulfilled' ? homeStatsResults[i].value : null;
+    const aStats    = awayStatsResults[i].status === 'fulfilled' ? awayStatsResults[i].value : null;
+    const sofa      = sofaResultsVivo[i].status === 'fulfilled'  ? sofaResultsVivo[i].value  : null;
     const elapsed   = f.elapsed || 0;
+    const standingsLeague = standingsMapVivo[f.leagueId] || { teams: [], total: 20 };
+    const homeStanding = standingsLeague.teams?.find?.(t => t.teamId === f.homeId) || null;
+    const awayStanding = standingsLeague.teams?.find?.(t => t.teamId === f.awayId) || null;
+    const totalTeamsV  = standingsLeague.total || standingsLeague.teams?.length || 20;
 
-    // Momentum en vivo
-    const momentum = calcLiveMomentum(liveStats, f.homeTeam, f.awayTeam);
-
-    // Proyección de corners al ritmo actual
+    const momentum    = calcLiveMomentum(liveStats, f.homeTeam, f.awayTeam);
     const homeCorners = liveStats ? (homeStats(liveStats)?.['Corner Kicks'] ?? 0) : 0;
     const awayCorners = liveStats ? (awayStats(liveStats)?.['Corner Kicks'] ?? 0) : 0;
-    const cornersProj = elapsed > 0
-      ? calcLiveProjection(homeCorners + awayCorners, elapsed)
-      : null;
-
-    // Proyección de tarjetas
-    const homeCards = liveStats
-      ? ((homeStats(liveStats)?.['Yellow Cards'] ?? 0) + (homeStats(liveStats)?.['Red Cards'] ?? 0))
-      : 0;
-    const awayCards = liveStats
-      ? ((awayStats(liveStats)?.['Yellow Cards'] ?? 0) + (awayStats(liveStats)?.['Red Cards'] ?? 0))
-      : 0;
-    const cardsProj = elapsed > 0
-      ? calcLiveProjection(homeCards + awayCards, elapsed)
-      : null;
+    const cornersProj = elapsed > 0 ? calcLiveProjection(homeCorners + awayCorners, elapsed) : null;
+    const homeCards   = liveStats ? ((homeStats(liveStats)?.['Yellow Cards']??0)+(homeStats(liveStats)?.['Red Cards']??0)) : 0;
+    const awayCards   = liveStats ? ((awayStats(liveStats)?.['Yellow Cards']??0)+(awayStats(liveStats)?.['Red Cards']??0)) : 0;
+    const cardsProj   = elapsed > 0 ? calcLiveProjection(homeCards + awayCards, elapsed) : null;
 
     return {
+      _aviso: 'Stats históricas son promedios de temporada completa — NUNCA las etiquetes como stats de una copa o competición específica. Solo cita números literalmente presentes en este JSON.',
       ...f,
       marcador: `${f.homeGoals ?? 0}-${f.awayGoals ?? 0}`,
+      arbitro: sofa?.arbitro?.nombre || f.referee || null,
+      ...(sofa?.arbitro && { arbitroStats: sofa.arbitro }),
+      contextoPorPartido: {
+        queSeJuegaLocal:     getTeamMotivation(homeStanding, totalTeamsV).texto,
+        queSeJuegaVisitante: getTeamMotivation(awayStanding, totalTeamsV).texto,
+        posicionLocal:       homeStanding ? `${homeStanding.rank}º — ${homeStanding.points} pts` : 'sin datos',
+        posicionVisitante:   awayStanding ? `${awayStanding.rank}º — ${awayStanding.points} pts` : 'sin datos',
+      },
+      statsLocal:     hStats ? { ...hStats, _fuente: 'promedio temporada completa' } : null,
+      statsVisitante: aStats ? { ...aStats, _fuente: 'promedio temporada completa' } : null,
+      ...(sofa?.formaLocal     && { formaRecienteLocalSofascore:     sofa.formaLocal }),
+      ...(sofa?.formaVisitante && { formaRecienteVisitanteSofascore: sofa.formaVisitante }),
       estadisticasVivo: liveStats,
       ...(momentum    && { momentumEnVivo: momentum }),
       ...(cornersProj && { proyeccionCorners: cornersProj }),
@@ -3967,13 +4010,18 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
   const liveOddsResults = await Promise.allSettled(toAnalyze.map(f => getLiveOdds(f.fixtureId)));
   for (let i = 0; i < enriched.length; i++) {
     const lo = liveOddsResults[i].status === 'fulfilled' ? liveOddsResults[i].value : null;
-    if (lo) enriched[i].cuotasVivo = lo;
+    if (lo) {
+      enriched[i].cuotasVivo = lo;
+    } else {
+      enriched[i].cuotasVivo = null;
+      enriched[i]._sinCuotasVivo = 'Sin cuotas en vivo disponibles. Escribe SIEMPRE "verificar en casa de apuestas" — NUNCA inventes una cuota.';
+    }
   }
 
   await bot.sendMessage(chatId, '🎯 Identificando picks de valor...');
   const analysis = await sonnet(
     INPLAY_SYSTEM,
-    `DATOS REALES EN VIVO de API-Football:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y da picks de valor in-play. USA cuotasVivo para las cuotas reales. Si cuotasVivo es null para un partido, indica "verificar cuota en casa de apuestas".`
+    `DATOS REALES EN VIVO — API-Football + Sofascore:\n\n${JSON.stringify(enriched, null, 2)}\n\nMáximo 3 picks en total. Da solo picks con valor real. Si cuotasVivo es null, escribe "verificar en casa de apuestas".`
   );
   try {
     await sendLong(chatId, `🔴 *PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}*\n\n${analysis}`, { parse_mode: 'Markdown' });
@@ -4075,31 +4123,66 @@ async function handleEspecifica(chatId, intent) {
 
   await bot.sendMessage(chatId, `📊 Recopilando datos históricos...`);
 
-  const [h2hRes, homeStatsRes, awayStatsRes] = await Promise.allSettled([
+  const fixtureDate2 = nextRaw.fixture.date.split('T')[0];
+  const [h2hRes, homeStatsRes, awayStatsRes, predRes2, standRes2, lineupsRes2, injHomeRes2, injAwayRes2, sofaEvRes2] = await Promise.allSettled([
     getH2H(homeId, awayId),
     getTeamStats(homeId, leagueId),
     getTeamStats(awayId, leagueId),
+    getApiPrediction(nextRaw.fixture.id),
+    getLeagueStandings(leagueId),
+    getLineups(nextRaw.fixture.id),
+    getInjuries(homeId, leagueId),
+    getInjuries(awayId, leagueId),
+    fetchSofaScoreEvents(fixtureDate2),
   ]);
 
-  const h2hData2       = h2hRes.status === 'fulfilled' ? h2hRes.value : [];
-  const homeStatsData2 = homeStatsRes.status === 'fulfilled' ? homeStatsRes.value : null;
-  const awayStatsData2 = awayStatsRes.status === 'fulfilled' ? awayStatsRes.value : null;
+  const h2hData2       = h2hRes.status === 'fulfilled'       ? h2hRes.value       : [];
+  const homeStatsData2 = homeStatsRes.status === 'fulfilled'  ? homeStatsRes.value  : null;
+  const awayStatsData2 = awayStatsRes.status === 'fulfilled'  ? awayStatsRes.value  : null;
+  const predData2      = predRes2?.status === 'fulfilled'     ? predRes2.value      : null;
+  const standData2     = standRes2?.status === 'fulfilled'    ? standRes2.value     : { teams: [], total: 20 };
+  const lineupsData2   = lineupsRes2?.status === 'fulfilled'  ? lineupsRes2.value   : null;
+  const injHome2       = injHomeRes2?.status === 'fulfilled'  ? injHomeRes2.value   : [];
+  const injAway2       = injAwayRes2?.status === 'fulfilled'  ? injAwayRes2.value   : [];
+  const sofaEv2        = sofaEvRes2?.status === 'fulfilled'   ? sofaEvRes2.value    : [];
+  const sofaCtx2       = await getSofaMatchContext(homeTeam, awayTeam, sofaEv2).catch(() => null);
+
+  const homeStanding2  = standData2.teams?.find(t => t.teamId === homeId) || null;
+  const awayStanding2  = standData2.teams?.find(t => t.teamId === awayId) || null;
+  const totalTeams2    = standData2.total || standData2.teams?.length || 20;
   const probBlock2     = buildProbBlock(homeStatsData2, awayStatsData2, h2hData2);
 
   const analysisData = {
+    _aviso: 'SOLO cita números literalmente presentes en este JSON. Stats son promedios de temporada completa — NUNCA las etiquetes como de una copa o competición específica.',
     partido: {
       liga:      nextRaw.league.name,
-      fecha:     nextRaw.fixture.date.split('T')[0],
+      ronda:     nextRaw.league?.round || null,
+      fecha:     fixtureDate2,
       hora:      formatHour(nextRaw.fixture.date),
       local:     homeTeam,
       visitante: awayTeam,
+      arbitro:   sofaCtx2?.arbitro?.nombre || nextRaw.fixture.referee || null,
+      estadio:   nextRaw.fixture.venue?.name || null,
+    },
+    ...(sofaCtx2?.arbitro && { arbitroStats: sofaCtx2.arbitro }),
+    contextoPorPartido: {
+      queSeJuegaLocal:     getTeamMotivation(homeStanding2, totalTeams2).texto,
+      queSeJuegaVisitante: getTeamMotivation(awayStanding2, totalTeams2).texto,
+      posicionLocal:       homeStanding2 ? `${homeStanding2.rank}º — ${homeStanding2.points} pts` : 'sin datos',
+      posicionVisitante:   awayStanding2 ? `${awayStanding2.rank}º — ${awayStanding2.points} pts` : 'sin datos',
     },
     equipoConsultado: teamFull,
     rolEnPartido: isHome ? 'LOCAL' : 'VISITANTE',
     h2h:          h2hData2,
     bttsEnH2H:    h2hData2.filter(m => m.btts).length,
-    statsLocal:   homeStatsData2,
-    statsVisitante: awayStatsData2,
+    statsLocal:     homeStatsData2 ? { ...homeStatsData2, _fuente: 'promedio temporada completa' } : null,
+    statsVisitante: awayStatsData2 ? { ...awayStatsData2, _fuente: 'promedio temporada completa' } : null,
+    ...(predData2    && { prediccionAPIFootball: predData2 }),
+    ...(lineupsData2 && lineupsData2.length > 0 && { alineaciones: lineupsData2 }),
+    ...(injHome2     && injHome2.length > 0 && { lesionadosLocal: injHome2 }),
+    ...(injAway2     && injAway2.length > 0 && { lesionadosVisitante: injAway2 }),
+    ...(sofaCtx2?.formaLocal     && { formaRecienteLocalSofascore:     sofaCtx2.formaLocal }),
+    ...(sofaCtx2?.formaVisitante && { formaRecienteVisitanteSofascore: sofaCtx2.formaVisitante }),
     ...(probBlock2 && { probabilidadesCalculadas: probBlock2 }),
   };
 
@@ -4973,63 +5056,9 @@ bot.on('message', async (msg) => {
 });
 
 // Continúa handlePartido con un equipo ya seleccionado (post-botón)
+// Redirige al handlePartido completo pasando el teamData directamente — mismo análisis, mismos datos
 async function handlePartidoConTeam(chatId, teamData, intent = {}) {
-  const teamId   = teamData.team.id;
-  const teamFull = teamData.team.name;
-
-  await bot.sendMessage(chatId, `⚽ Buscando próximo partido de *${teamFull}*...`, { parse_mode: 'Markdown' });
-
-  const nextRaw = await findNextFixtureByDate(teamId, 14);
-  if (!nextRaw) {
-    return bot.sendMessage(chatId, `😔 No encontré próximos partidos para *${teamFull}* en los próximos 14 días.`, { parse_mode: 'Markdown' });
-  }
-
-  const homeId   = nextRaw.teams.home.id;
-  const awayId   = nextRaw.teams.away.id;
-  const leagueId = nextRaw.league.id;
-  const homeTeam = nextRaw.teams.home.name;
-  const awayTeam = nextRaw.teams.away.name;
-  const isLive   = ['1H','HT','2H','ET','P'].includes(nextRaw.fixture?.status?.short);
-
-  await bot.sendMessage(chatId,
-    `⚽ ${isLive ? '🔴 EN VIVO: ' : 'Próximo: '}*${homeTeam} vs ${awayTeam}*\n🏆 ${nextRaw.league.name} | ⏰ ${formatHour(nextRaw.fixture.date)}\n\n📊 Recopilando estadísticas...`,
-    { parse_mode: 'Markdown' }
-  );
-
-  const requests = [getH2H(homeId, awayId), getTeamStats(homeId, leagueId), getTeamStats(awayId, leagueId)];
-  if (isLive) requests.push(getFixtureStatistics(nextRaw.fixture.id));
-  const [h2hRes, homeStatsRes, awayStatsRes, liveStatsRes] = await Promise.allSettled(requests);
-
-  const h2hData       = h2hRes.status === 'fulfilled'       ? h2hRes.value       : [];
-  const homeStatsData = homeStatsRes.status === 'fulfilled'  ? homeStatsRes.value  : null;
-  const awayStatsData = awayStatsRes.status === 'fulfilled'  ? awayStatsRes.value  : null;
-  const liveStatsData = (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
-  const probBlock     = buildProbBlock(homeStatsData, awayStatsData, h2hData, leagueId);
-  const momentum      = isLive ? calcLiveMomentum(liveStatsData, homeTeam, awayTeam) : null;
-  const elapsed       = nextRaw.fixture?.status?.elapsed || 0;
-  const cornersProj   = isLive && elapsed > 0 ? calcLiveProjection((homeStats(liveStatsData)?.['Corner Kicks']??0)+(awayStats(liveStatsData)?.['Corner Kicks']??0), elapsed) : null;
-  const cardsProj     = isLive && elapsed > 0 ? calcLiveProjection(((homeStats(liveStatsData)?.['Yellow Cards']??0)+(homeStats(liveStatsData)?.['Red Cards']??0))+((awayStats(liveStatsData)?.['Yellow Cards']??0)+(awayStats(liveStatsData)?.['Red Cards']??0)), elapsed) : null;
-
-  const analysisData = {
-    partido: { liga: nextRaw.league.name, pais: nextRaw.league.country, fecha: nextRaw.fixture.date.split('T')[0], hora: formatHour(nextRaw.fixture.date), local: homeTeam, visitante: awayTeam, enVivo: isLive, minuto: elapsed || null, marcador: isLive ? `${nextRaw.goals?.home??0}-${nextRaw.goals?.away??0}` : null },
-    h2h: h2hData, bttsEnH2H: h2hData.filter(m => m.btts).length,
-    statsLocal: homeStatsData, statsVisitante: awayStatsData, estadisticasVivo: liveStatsData,
-    ...(probBlock   && { probabilidadesCalculadas: probBlock }),
-    ...(momentum    && { momentumEnVivo: momentum }),
-    ...(cornersProj && { proyeccionCorners: cornersProj }),
-    ...(cardsProj   && { proyeccionTarjetas: cardsProj }),
-  };
-
-  await bot.sendMessage(chatId, '⚡ Procesando análisis...');
-  const system   = isLive ? INPLAY_SYSTEM : TIPSTER_SYSTEM;
-  const season   = LEAGUE_SEASONS[leagueId] || 2025;
-  const analysis = await sonnet(system, `Analiza este partido (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}`);
-  try {
-    await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
-  } catch {
-    await sendLong(chatId, `🎯 ${homeTeam} vs ${awayTeam}\n\n${analysis.replace(/[*_`]/g, '')}`);
-  }
-  recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]).catch(() => {});
+  await handlePartido(chatId, '', '', teamData);
 }
 
 // Continúa handleRachas con un equipo ya seleccionado (post-botón)
