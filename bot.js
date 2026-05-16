@@ -1793,8 +1793,7 @@ function buildPickCandidates(enrichedFixtures) {
       // usamos prob heurística directamente (ya definida en cada tarjeta arriba)
 
       const ev = calcEV(m.prob, o);
-      // Permitimos hasta -3% de EV (el margen de las casas es ~5-8%, estar en -3% sigue siendo valor)
-      if (ev === null || ev < -3) continue;
+      if (ev === null || ev < -5) continue;
 
       // DNB absolutamente prohibido
       if (m.key.includes('dnb')) continue;
@@ -2339,12 +2338,14 @@ REGLA DNB GLOBAL — APLICA PRE-PARTIDO Y EN VIVO:
 - NUNCA recomendar DNB de un equipo que ya va ganando en el marcador (la cuota sería 1.05-1.20, sin ningún valor).
 - NUNCA recomendar Match Winner (1X2) de un favorito que ya va ganando en el entretiempo — la cuota no tiene valor.
 
-CRITERIO DE STAKE:
-10/10: +80% probabilidad, cuota entre 1.90–2.20
-9/10:  +75% probabilidad, cuota entre 1.80–2.20
-8/10:  +70% probabilidad, cuota entre 1.70–2.20
-7/10:  +68% probabilidad + EV positivo, cuota entre 1.65–2.20
-1-6:   NUNCA publicar
+CRITERIO DE STAKE (basado en ventaja real sobre el mercado):
+10/10: EV > 15% sobre el mercado + prob ≥ 52%
+9/10:  EV > 10% sobre el mercado + prob ≥ 52%
+8/10:  EV > 6%  sobre el mercado + prob ≥ 50%
+7/10:  EV > 3%  sobre el mercado + prob ≥ 50%
+6/10:  EV > 0%  sobre el mercado + prob ≥ 50%
+5/10:  EV ≥ -2% (valor marginal, pick débil pero publicable)
+EV = prob × cuota - 1. Las casas tienen margen 5-8%, EV > 5% ya es una ventaja real.
 
 REGLAS DE CUOTA ABSOLUTAS — SIN EXCEPCIÓN:
 - CUOTA MÍNIMA: 1.65 — descarta cualquier pick por debajo
@@ -2360,10 +2361,10 @@ Cuando un equipo tiene pocos partidos en la competición actual (Copa del Mundo 
 5. Contexto del partido: qué se juegan, presión, local/visitante
 Si alguno de estos factores apunta claramente en una dirección, hay pick. Si todo es incierto, baja el stake y explícalo en el razonamiento.
 
-REGLA DE PUBLICACIÓN (solo aplica a picks automáticos del día):
-- Stake mínimo publicable: 7/10
-- Si no hay partidos que cumplan stake 7+, emite solo los que sí cumplen (puede ser 1 o 2)
-- Si ningún partido cumple los criterios: "⛔ Sin picks de valor hoy"
+REGLA DE PUBLICACIÓN:
+- Stake mínimo publicable: 5/10
+- Publica los mejores picks disponibles según el EV calculado
+- Solo di "⛔ Sin picks de valor hoy" si genuinamente NINGÚN partido tiene EV ≥ -2%
 
 FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 
@@ -2410,7 +2411,7 @@ REGLAS DE PICKS — OBLIGATORIAS:
 - MÁXIMO 2 picks por partido. Si ya diste 2 picks de un mismo partido, NO agregues más de ese partido
 - BTTS Solo si: % local marcó en casa ≥65% Y % visitante marcó fuera ≥65% Y H2H BTTS ≥65%. Si alguno no llega, NO dar BTTS
 - Asian Handicap MÁXIMO -0.5. NUNCA recomendar -1, -1.5 ni más — el riesgo no justifica el stake
-- Stake MÍNIMO PUBLICABLE: 7/10. Si la probabilidad no supera 68% o el EV no supera +5%, NO das pick — el pick no existe. NUNCA bajes a stake 6 ni 5.
+- Stake MÍNIMO PUBLICABLE: 5/10. Publica el pick con el stake que corresponda según el EV real. No inventes valor donde no hay, pero tampoco descartes picks con EV positivo o marginalmente negativo.
 - PROHIBIDO analizar partidos que ya empezaron hace más de 10 minutos (evitar picks sobre partidos en curso sin datos en vivo)
 
 Responde en español. NUNCA inventes estadísticas. Usa SOLO los datos que recibes.`;
@@ -2424,7 +2425,7 @@ INSTRUCCIONES ESPECIALES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
 - NO recomendes mercados AH_HOME, AH_AWAY ni DNB_HOME en picks del día
 - CUOTA MÍNIMA ABSOLUTA: 1.65. Cualquier cuota menor se descarta sin excepción.
 - CUOTA MÁXIMA ABSOLUTA: 2.30. Cualquier pick que solo exista a cuota mayor se descarta — no importa el EV teórico, con muestra reducida las probabilidades son poco confiables.
-- STAKE MÍNIMO PUBLICABLE: 7/10. NUNCA emitas picks con stake 5 o 6 — si tu confianza no llega a 7, es que no hay pick.
+- STAKE MÍNIMO PUBLICABLE: 5/10. Publica picks con el stake que corresponda al EV real calculado. Stake 5-6 son picks válidos con valor marginal.
 - PROHIBIDO dar picks de partidos donde statsLocal y statsVisitante son null o muestran datos limitados en más de 3 de los 5 indicadores clave (goles anotados, goles recibidos, forma reciente, porcentaje BTTS, porcentaje Over 2.5). Si no hay base estadística real, DESCARTA el partido completamente.
 - PARTIDOS CON MUESTRA REDUCIDA EN LA COMPETICIÓN ACTUAL: Si un equipo tiene menos de 5 partidos en esa copa/torneo específico, usa su liga doméstica como fuente principal de estadísticas. Si no hay NINGÚN dato adicional (ni liga doméstica ni H2H), descarta ese partido de los picks automáticos del día — el usuario puede preguntar por él directamente y el bot lo analiza con todos los factores disponibles.
 - Calidad sobre cantidad: es mejor dar 1 pick sólido que 3 mediocres.
@@ -3304,14 +3305,11 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     );
   }
 
-  // ── Validador post-generación ──────────────────
-  // Escudo final: si el LLM ignoró las reglas de cuota/stake, descarta los picks
+  // Validador mínimo: solo rechaza si la cuota es absurda (>3.50 o <1.30)
   const cuotasEnTexto = [...picksText.matchAll(/[Cc]uota\s+m[íi]nima[:\s*]+(\d+[\.,]\d+)/g)].map(m => parseFloat(m[1].replace(',', '.')))
-  const stakesEnTexto = [...picksText.matchAll(/[Ss]take[:\s*]+(\d+)\/10/g)].map(m => parseInt(m[1]))
-  const cuotaInvalida = cuotasEnTexto.some(c => c > 2.70 || c < 1.40)
-  const stakeInvalido = stakesEnTexto.some(s => s < 5)
-  if (cuotaInvalida || stakeInvalido) {
-    console.warn(`⚠️ VALIDADOR: picks rechazados — cuotas=[${cuotasEnTexto}] stakes=[${stakesEnTexto}]`)
+  const cuotaAbsurda = cuotasEnTexto.some(c => c > 3.50 || c < 1.30)
+  if (cuotaAbsurda) {
+    console.warn(`⚠️ VALIDADOR: cuotas absurdas detectadas [${cuotasEnTexto}] — regenerando`)
     picksText = '⛔ Sin picks de valor real hoy.'
   }
 
