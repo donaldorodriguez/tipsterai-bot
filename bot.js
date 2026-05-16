@@ -2431,7 +2431,7 @@ INSTRUCCIONES ESPECIALES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
 - Calidad sobre cantidad: es mejor dar 1 pick sólido que 3 mediocres.
 
 INSTRUCCIÓN ESPECIAL PARA PICKS DEL DÍA:
-Emite entre 1 y 3 picks individuales (partidos diferentes) que cumplan stake 7+ + 1 APUESTA COMBINADA al final solo si hay 2+ picks válidos. Calidad sobre cantidad — es preferible dar 1 pick sólido que 3 débiles.
+Emite entre 1 y 3 picks individuales (partidos diferentes) + 1 APUESTA COMBINADA de exactamente 3 patas al final solo si hay 2+ picks válidos. La combinada NUNCA puede superar cuota 12.00 — si la supera, usa mercados más probables. Calidad sobre cantidad.
 
 USO DE DATOS CONTEXTUALES (cuando están disponibles en los datos):
 - h2h: array de últimos 5 enfrentamientos directos. Usa para identificar tendencias de goles, si hay equipos que casi siempre marcan, patrones de resultado histórico.
@@ -2462,7 +2462,7 @@ Los datos de la copa actual son complementarios. Si hay menos de 5 partidos en e
 
 ━━━━━━━━━━━━━━━━━━━
 🎰 *COMBINADA DEL DÍA*
-Mínimo 3 selecciones, máximo 5. Mercados y partidos distintos.
+Exactamente 3 selecciones. Mercados y partidos distintos. Cuota combinada máxima: 12.00 — si supera eso, reemplaza la pata de mayor cuota por una más segura.
 
 ▸ [Local] vs [Visitante] → *[mercado]* | Cuota: *X.XX*
 ▸ [Local] vs [Visitante] → *[mercado]* | Cuota: *X.XX*
@@ -2684,7 +2684,7 @@ FORMATO OBLIGATORIO — SIEMPRE usa este estructura:
 [repetir para PICK 2, PICK 3]
 
 ━━━━━━━━━━━━━━━━━━━
-⛔ MERCADOS DESCARTADOS (menciona 2-3 que evaluaste pero no recomiendas y por qué)
+⛔ NUNCA escribas una sección de "mercados descartados" ni expliques qué mercados no recomiendas — el usuario no necesita ver el proceso interno
 
 REGLAS IRROMPIBLES:
 - Cuota mínima 1.65 para cualquier pick
