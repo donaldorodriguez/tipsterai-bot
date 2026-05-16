@@ -1799,17 +1799,17 @@ function buildPickCandidates(enrichedFixtures) {
       // DNB absolutamente prohibido
       if (m.key.includes('dnb')) continue;
 
-      // Stake basado en prob + EV — calibrado a rangos reales de fútbol.
-      // En fútbol, bets con valor real suelen estar en el rango 52-68% de probabilidad.
-      // Pedir 63%+ (como antes) excluía prácticamente todos los partidos competitivos.
+      // Stake basado en EV (ventaja real sobre el mercado).
+      // Las casas tienen márgenes del 5-8% → EV > 5% ya indica valor real.
+      // No se usa prob × cuota combinada porque eso requeriría errores imposibles del mercado.
       let stake;
-      if      (m.prob >= 0.80 && o >= 1.90) stake = 10;
-      else if (m.prob >= 0.75 && o >= 1.80) stake = 9;
-      else if (m.prob >= 0.70 && o >= 1.70) stake = 8;
-      else if (m.prob >= 0.65 && ev > 5)    stake = 7;
-      else if (m.prob >= 0.60)               stake = 6;  // antes: 0.63
-      else if (m.prob >= 0.54)               stake = 5;  // antes: filtrado
-      else                                   stake = 4;  // filtrado
+      if      (ev > 15 && m.prob >= 0.52) stake = 10;
+      else if (ev > 10 && m.prob >= 0.52) stake = 9;
+      else if (ev >  6 && m.prob >= 0.50) stake = 8;
+      else if (ev >  3 && m.prob >= 0.50) stake = 7;
+      else if (ev >  0 && m.prob >= 0.50) stake = 6;
+      else if (ev >= -2)                  stake = 5;
+      else                                stake = 4;
 
       // Si el partido tiene stats parciales (solo un equipo), bajar stake 1 nivel por confianza.
       if (partialStats && stake > 4) stake = Math.max(4, stake - 1);
@@ -2505,31 +2505,24 @@ INSTRUCCIONES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
 // ─── Formatter-only prompt ────────────────────────────────────────────────────
 // Usado cuando los picks ya fueron seleccionados matemáticamente.
 // El LLM SOLO formatea — no selecciona, no descarta, no agrega picks.
-const PICKS_HOY_FORMATTER_SYSTEM = `Eres el mejor tipster profesional del mundo. El motor matemático pre-seleccionó picks con Poisson+EV. Tu trabajo es VALIDARLOS con contexto real y escribir el resultado final.
+const PICKS_HOY_FORMATTER_SYSTEM = `Eres el mejor tipster profesional del mundo. El motor matemático pre-seleccionó picks con Poisson+EV. Tu trabajo es ÚNICAMENTE FORMATEAR — NO descartas, NO eliminas, NO cambias ningún pick. Publica todos los picks que recibes exactamente como vienen.
 
-VALIDACIÓN OBLIGATORIA — antes de publicar cada pick, verifica:
+CONTEXTO ADICIONAL — úsalo solo para enriquecer el razonamiento, NUNCA para descartar:
 
-1. MOTIVACIÓN: Si el campo motivacionLocal o motivacionVisitante indica "nada_en_juego" y es final de temporada (jornadas_restantes ≤ 5), ese equipo puede alinear reservas. Si AMBOS equipos están sin motivación → DESCARTA ese partido.
-   Si UNO está sin motivación (el que juega de local o visitante) → baja el stake 1 nivel. Si el pick depende de ese equipo atacar/marcar, DESCARTA.
+1. MOTIVACIÓN: Si motivacionLocal o motivacionVisitante indica "nada_en_juego", menciónalo en el campo Riesgo. No descartes el pick por eso.
 
-2. ÁRBITRO: Si hay datos de árbitro (arbitroStats o arbitro), úsalos:
-   - amarillas_por_partido > 4.5 → árbitro permisivo con el juego físico, mayor probabilidad de Over tarjetas
-   - amarillas_por_partido < 2.5 → árbitro restrictivo, mercados de tarjetas tienen menos valor
-   - penaltis_por_partido > 0.4 → árbitro que pita muchos penaltis, favorece DNB de equipos que atacan
-   Menciona al árbitro en el razonamiento si sus stats refuerzan o debilitan el pick.
+2. ÁRBITRO: Si hay datos de árbitro (arbitroStats o arbitro), úsalos en el razonamiento:
+   - amarillas_por_partido > 4.5 → árbitro permisivo, favorece Over tarjetas
+   - amarillas_por_partido < 2.5 → árbitro restrictivo
+   - penaltis_por_partido > 0.4 → pita muchos penaltis
 
-3. CONTEXTO TEMPORAL: Si es final de temporada (jornadas_restantes ≤ 5):
-   - Equipos ya campeones o descendidos → rotaciones probables → evitar picks de goles de ese equipo
-   - Equipos en lucha extrema (descenso, título) → intensidad máxima → favorece mercados de tarjetas/corners
-   - Menciona el contexto en el razonamiento ("Equipo sin nada que jugarse al final de temporada")
+3. CONTEXTO TEMPORAL: Si es final de temporada (jornadas_restantes ≤ 5), menciónalo en Riesgo. No descartes.
 
-4. ÁRBITRO SIN DATOS: Si solo tienes el nombre del árbitro (campo "arbitro"), usa tu conocimiento sobre ese árbitro específico para el razonamiento si es conocido.
-
-REGLAS DE PICKS (idénticas al motor, no relajar):
-- CUOTA: 1.65–2.30 absoluto
-- STAKE MÍNIMO PUBLICABLE: 7/10
+REGLAS DE FORMATO:
+- Usa exactamente el stake que viene en los datos — el motor ya lo calculó, NO lo toques
+- Usa exactamente la cuota que viene en los datos
 - MÁXIMO 2 picks por partido
-- Si un pick no pasa la validación de motivación → descártalo y elige el siguiente candidato o di "Sin picks válidos"
+- NUNCA digas "Sin picks válidos" — si recibes picks, los publicas todos
 
 FORMATO EXACTO (Telegram Markdown):
 🌍 [País] — [Liga]
@@ -3100,38 +3093,59 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     return bot.sendMessage(chatId, `😔 No hay partidos no iniciados en las ligas monitoreadas hoy (${today}).`);
   }
 
-  // Top 12 partidos por prioridad de liga
-  const selected = [...fixtures]
+  // ── FASE 1: verificar cuotas para el mayor número de partidos posible ────────
+  // Ordenar todos los partidos disponibles por prioridad de liga
+  const oddsPool = [...fixtures]
     .sort((a, b) => (LEAGUE_PRIORITY[b.leagueId] || 0) - (LEAGUE_PRIORITY[a.leagueId] || 0))
-    .slice(0, 12);
+    .slice(0, 80); // revisar hasta 80 partidos buscando cuotas
 
-  console.log(`✅ Candidatos seleccionados: ${selected.length} partidos`);
-  await bot.sendMessage(chatId, `📊 ${fixtures.length} partidos identificados. Recopilando estadísticas...`);
+  await bot.sendMessage(chatId, `📊 ${fixtures.length} partidos en ligas monitoreadas. Verificando cuotas en ${oddsPool.length} partidos...`);
 
-  // Fetch team stats en batches de 4 para no saturar la API
+  // Cuotas en lotes de 20 para no saturar la API
+  const oddsStage1 = [];
+  for (let i = 0; i < oddsPool.length; i += 20) {
+    const batch = await Promise.allSettled(oddsPool.slice(i, i + 20).map(f => getRealOdds(f.fixtureId)));
+    oddsStage1.push(...batch);
+    if (i + 20 < oddsPool.length) await new Promise(r => setTimeout(r, 2000));
+  }
+
+  // Quedarnos solo con los que tienen cuotas reales — sin cuotas no hay EV
+  const withOdds = oddsPool
+    .map((f, i) => ({ fixture: f, odds: oddsStage1[i].status === 'fulfilled' ? oddsStage1[i].value : null }))
+    .filter(x => x.odds !== null);
+
+  console.log(`✅ Cuotas encontradas: ${withOdds.length} / ${oddsPool.length} partidos`);
+
+  // Si nadie tiene cuotas, continuar con los top 20 sin cuotas (modo fallback)
+  const selected = withOdds.length > 0
+    ? withOdds.slice(0, 40).map(x => x.fixture)
+    : oddsPool.slice(0, 20);
+
+  const oddsPreFetched = new Map(withOdds.slice(0, 40).map(x => [x.fixture.fixtureId, x.odds]));
+
+  await bot.sendMessage(chatId, `📈 ${withOdds.length} partidos con cuotas reales. Analizando ${selected.length}...`);
+
+  // ── FASE 2: stats de equipo solo para partidos con cuotas ────────────────────
   const statsPairs = selected.flatMap(f => [
     getTeamStats(f.homeId, f.leagueId),
     getTeamStats(f.awayId, f.leagueId),
   ]);
   const statsResults = [];
-  for (let i = 0; i < statsPairs.length; i += 4) {
-    const batch = await Promise.allSettled(statsPairs.slice(i, i + 4));
+  for (let i = 0; i < statsPairs.length; i += 6) {
+    const batch = await Promise.allSettled(statsPairs.slice(i, i + 6));
     statsResults.push(...batch);
-    if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 6000));
+    if (i + 6 < statsPairs.length) await new Promise(r => setTimeout(r, 4000));
   }
 
   // Construir enriched con probabilidades extendidas (HT + corners)
-  // Usar promedios de liga como fallback cuando no hay stats del equipo
   const enriched = selected.map((f, i) => {
     const hStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
     const aStats = statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
 
-    // Fallback a promedios europeos cuando no hay stats: 1.3 goles en casa, 1.1 fuera
     const hFor  = parseFloat(hStats?.golesAnotadosHome) || 1.3;
     const hAgt  = parseFloat(hStats?.golesRecibidosHome) || 1.1;
     const aFor  = parseFloat(aStats?.golesAnotadosAway) || 1.0;
     const aAgt  = parseFloat(aStats?.golesRecibidosAway) || 1.3;
-    // Siempre calculamos probs — con stats reales o con promedios de referencia
     const extProbs = calcExtendedProbs(hFor, hAgt, aFor, aAgt);
 
     return {
@@ -3149,11 +3163,10 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     };
   });
 
-  // Fetch cuotas, H2H y standings en paralelo
-  await bot.sendMessage(chatId, `📈 Consultando cuotas, H2H y tabla de posiciones...`);
+  // ── FASE 3: H2H, standings y enriquecimiento ─────────────────────────────────
+  await bot.sendMessage(chatId, `🔢 Consultando H2H y tabla de posiciones...`);
   const uniqueLeagueIds = [...new Set(selected.map(f => f.leagueId))];
-  const [oddsResults, h2hResults, standingsArray] = await Promise.all([
-    Promise.allSettled(selected.map(f => getRealOdds(f.fixtureId))),
+  const [h2hResults, standingsArray] = await Promise.all([
     Promise.allSettled(selected.map(f => getH2H(f.homeId, f.awayId))),
     Promise.allSettled(uniqueLeagueIds.map(lid => getLeagueStandings(lid))),
   ]);
@@ -3168,10 +3181,10 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     }
   });
 
-  // Enriquecer con cuotas, H2H, posición en tabla, jornada y estadio
+  // Enriquecer con cuotas (ya prefetched), H2H, posición en tabla, jornada y estadio
   let conOdds = 0;
   for (let i = 0; i < enriched.length; i++) {
-    const odds = oddsResults[i].status === 'fulfilled' ? oddsResults[i].value : null;
+    const odds = oddsPreFetched.get(selected[i].fixtureId) || null;
     if (odds) { enriched[i].cuotasReales = odds; conOdds++; }
 
     const h2h = h2hResults[i].status === 'fulfilled' ? h2hResults[i].value : [];
@@ -3227,7 +3240,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   // ── Selección matemática de picks ────────────────────────────────────────
   const candidates = buildPickCandidates(enriched);
-  const topPicks   = selectDiversePicks(candidates, 3);
+  const topPicks   = selectDiversePicks(candidates, 5);
 
   // Log detallado de por qué cada partido pasó o no
   console.log(`🎯 Candidatos válidos: ${candidates.length}`);
