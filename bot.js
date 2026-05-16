@@ -2251,6 +2251,12 @@ MERCADOS RECOMENDADOS POR LIGA:
 
 const TIPSTER_SYSTEM = `Eres el mejor tipster profesional del mundo especializado en mercados de VALOR REAL.
 
+REGLA ABSOLUTA — DATOS Y ESTADÍSTICAS:
+- SOLO puedes mencionar números que aparezcan literalmente en el JSON que recibes. Cero inventar, cero inferir, cero recordar de tu entrenamiento.
+- Las estadísticas del JSON son promedios de TEMPORADA COMPLETA en TODAS las competiciones. NUNCA las etiquetes como "en Champions", "en FA Cup", "en copa" — son datos globales de temporada.
+- Si un dato no está en el JSON (árbitro, clima, alineación, estadística específica), escribe "sin datos disponibles" — nunca lo rellenes con suposiciones.
+- El campo "_aviso" del JSON es una instrucción de sistema: léela y cúmplela.
+
 PICKS QUE NUNCA DAS — aplica estos criterios internamente, sin mencionarlos al usuario:
 - Gana el favorito obvio a cuota menor de 1.80 (gana Bayern, gana Madrid, gana City, gana Barcelona, gana PSG etc)
 - Over 2.5 o Over 3.5 de equipos muy ofensivos (Madrid, Barcelona, Bayern, City, PSG) en casa vs rivales débiles — todo el mundo lo sabe, no hay valor
@@ -2260,6 +2266,7 @@ PICKS QUE NUNCA DAS — aplica estos criterios internamente, sin mencionarlos al
 - PICKS YA RESUELTOS: si el mercado ya se cumplió (ej: BTTS cuando ya hay goles de ambos), omítelo completamente
 - MÁXIMO 2 PICKS POR PARTIDO — nunca más de 2 mercados distintos sobre el mismo partido. Si tienes 3 ideas para un partido, elige las 2 mejores y descarta la tercera
 - BTTS en derbis o clásicos de alta tensión táctica (Milan vs Inter, Real Madrid vs Atlético, Arsenal vs Tottenham, Celtic vs Rangers, etc.) — se cierran defensivamente, BTTS falla sistemáticamente
+- Over 2.5 o Over 3.5 en FINALES de copa de partido único (FA Cup Final, Copa del Rey Final, Copa Italia Final, DFB-Pokal Final, etc.) con 0-0 al descanso — las finales son tácticamente cerradas, ambos equipos priorizan no perder, la prórroga es el resultado más probable cuando va 0-0 al HT. En estos casos busca Under 2.5, corners, tarjetas, o siguiente gol. NUNCA Over 3.5 en una final 0-0 al HT
 - Asian Handicap de -1 o mayor (-1, -1.5, -2). Máximo permitido: AH -0.5, y solo si el equipo promedia más de 2.0 goles en su contexto
 - BTTS cuando un equipo tiene más del 35% de partidos sin marcar en su contexto (casa o fuera)
 - Asian Handicap (AH) y Draw No Bet local (DNB_HOME) en picks automáticos del día. Solo usar DNB_AWAY si la probabilidad supera 75%
@@ -2591,6 +2598,11 @@ PROYECCIONES EN TIEMPO REAL:
   Si la línea válida (current+3) no tiene cuota ≥ 1.65 → descarta tarjetas.
 - Solo usa proyecciones con confidence "alta" para picks de stake 7+.
 - CUOTAS EN VIVO: usa cuotasVivo cuando estén disponibles. Si cuotasVivo es null, escribe "verificar cuota en casa de apuestas" — nunca inventes un número.
+
+FINALES DE COPA EN VIVO (partido único: FA Cup, Copa del Rey, Copa Italia, DFB-Pokal, etc.):
+- Si el campo "ronda" del partido contiene "Final" y el marcador es 0-0 al descanso: la prórroga es el escenario más probable. Reduce la prob de Over 2.5 FT en 25 puntos porcentuales respecto al modelo Poisson. NUNCA recomiendas Over 2.5 ni Over 3.5 FT en una final 0-0 al HT.
+- En finales 0-0 al HT los picks válidos son: Under 2.5 FT, BTTS No, Over corners 2T, tarjetas 2T (alta tensión), o siguiente gol del equipo que domina el momentum.
+- Las estadísticas de goles de temporada (liga doméstica) NO son representativas para finales — las finales son contextos únicos de máxima presión táctica. Aplica un factor conservador: usa el 60% de los promedios de goles normales.
 
 REGLAS IN-PLAY (aplícalas en silencio — no las menciones al usuario):
 - No uses # ## ### en el formato de respuesta
@@ -3595,36 +3607,94 @@ async function handlePartido(chatId, teamName, countryHint = '') {
   const isEuropean = [2, 3, 848].includes(leagueId);
   const domLeagueId = isEuropean ? null : null; // no necesitamos hardcodear, lo hacemos con ambos equipos
 
+  const fixtureDate = nextRaw.fixture.date.split('T')[0];
+
+  // Fase 1: todas las llamadas paralelas independientes
   const requests = [
-    getH2H(homeId, awayId),
-    getTeamStats(homeId, leagueId),
-    getTeamStats(awayId, leagueId),
+    getH2H(homeId, awayId),                                    // 0
+    getTeamStats(homeId, leagueId),                            // 1
+    getTeamStats(awayId, leagueId),                            // 2
+    getLineups(nextRaw.fixture.id),                            // 3
+    getInjuries(homeId, leagueId),                             // 4
+    getInjuries(awayId, leagueId),                             // 5
+    getApiPrediction(nextRaw.fixture.id),                      // 6
+    getLeagueStandings(leagueId).catch(() => ({ teams: [] })), // 7
+    fetchSofaScoreEvents(fixtureDate).catch(() => []),         // 8
   ];
-  if (isLive) requests.push(getFixtureStatistics(nextRaw.fixture.id));
-  // Para ligas europeas (CL/EL): buscar también stats de LaLiga/Bundesliga del home team
-  // Detectamos la liga doméstica probable buscando stats en las ligas más comunes
+  if (isLive) requests.push(getFixtureStatistics(nextRaw.fixture.id)); // 9
   if (isEuropean) {
     requests.push(
-      // Intenta LaLiga(140), Bundesliga(78), PremierLeague(39), SerieA(135), Ligue1(61), Eredivisie(88), Liga NOS(94)
       Promise.any([140,78,39,135,61,88,94].map(lid => getTeamStats(homeId, lid).then(s => s ? s : Promise.reject()))).catch(() => null),
       Promise.any([140,78,39,135,61,88,94].map(lid => getTeamStats(awayId, lid).then(s => s ? s : Promise.reject()))).catch(() => null)
     );
   }
 
-  const [h2hRes, homeStatsRes, awayStatsRes, liveStatsRes, homedomRes, awaydomRes] = await Promise.allSettled(requests);
+  const results = await Promise.allSettled(requests);
+  const h2hRes        = results[0];
+  const homeStatsRes  = results[1];
+  const awayStatsRes  = results[2];
+  const lineupsRes    = results[3];
+  const injHomeRes    = results[4];
+  const injAwayRes    = results[5];
+  const predRes       = results[6];
+  const standingsRes  = results[7];
+  const sofaEventsRes = results[8];
+  const liveStatsRes  = isLive ? results[9] : null;
+  const euroBase      = isLive ? 10 : 9;
+  const homedomRes    = isEuropean ? results[euroBase]     : null;
+  const awaydomRes    = isEuropean ? results[euroBase + 1] : null;
 
-  const h2hData         = h2hRes.status === 'fulfilled'       ? h2hRes.value       : [];
-  const homeStatsData   = homeStatsRes.status === 'fulfilled'  ? homeStatsRes.value  : null;
-  const awayStatsData   = awayStatsRes.status === 'fulfilled'  ? awayStatsRes.value  : null;
+  const h2hData         = h2hRes.status === 'fulfilled'        ? h2hRes.value        : [];
+  const homeStatsData   = homeStatsRes.status === 'fulfilled'   ? homeStatsRes.value   : null;
+  const awayStatsData   = awayStatsRes.status === 'fulfilled'   ? awayStatsRes.value   : null;
+  const lineupsData     = lineupsRes?.status === 'fulfilled'    ? lineupsRes.value    : null;
+  const injHomeData     = injHomeRes?.status === 'fulfilled'    ? injHomeRes.value    : [];
+  const injAwayData     = injAwayRes?.status === 'fulfilled'    ? injAwayRes.value    : [];
+  const predData        = predRes?.status === 'fulfilled'       ? predRes.value       : null;
+  const standingsData   = standingsRes?.status === 'fulfilled'  ? standingsRes.value  : { teams: [] };
+  const sofaEvents      = sofaEventsRes?.status === 'fulfilled' ? sofaEventsRes.value : [];
   const liveStatsData   = (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
   const homeDomStats    = isEuropean && homedomRes?.status === 'fulfilled' ? homedomRes.value : null;
   const awayDomStats    = isEuropean && awaydomRes?.status === 'fulfilled' ? awaydomRes.value : null;
 
+  // Fase 2: Sofascore context (depende de sofaEvents)
+  const sofaContext = await getSofaMatchContext(homeTeam, awayTeam, sofaEvents).catch(() => null);
+
+  // Standings: extraer posición y motivación de cada equipo
+  const homeStanding = standingsData.teams.find(t => t.teamId === homeId) || null;
+  const awayStanding = standingsData.teams.find(t => t.teamId === awayId) || null;
+  const totalTeams   = standingsData.total || standingsData.teams.length || 20;
+  const motivLocal   = getTeamMotivation(homeStanding, totalTeams);
+  const motivVisit   = getTeamMotivation(awayStanding, totalTeams);
+
   // Detectar contexto de eliminatoria (CL/EL Knockout o ronda específica)
   const round = nextRaw.league?.round || '';
   const isKnockout = /quarter|semi|final|round of|octavos|cuartos|semis|knockout/i.test(round);
+  const isSingleLegFinal = /\bfinal\b/i.test(round);
   let contextoEliminatoria = null;
-  if (isKnockout) {
+
+  // Finales de partido único (FA Cup, Copa del Rey, etc.) — sin primera pata
+  if (isSingleLegFinal) {
+    const marcadorActual = isLive
+      ? `${nextRaw.goals?.home ?? 0}-${nextRaw.goals?.away ?? 0}`
+      : null;
+    const esEmpate0_0AlHT = isLive &&
+      nextRaw.fixture?.status?.short === 'HT' &&
+      (nextRaw.goals?.home ?? 0) === 0 &&
+      (nextRaw.goals?.away ?? 0) === 0;
+    contextoEliminatoria = {
+      ronda: round,
+      tipoPartido: 'FINAL DE COPA — partido único, no hay primera pata ni global',
+      implicacionTactica: 'Ambos equipos priorizan no perder sobre atacar. Alta probabilidad de prórroga si el marcador sigue igualado. Las estadísticas de goles de temporada NO aplican directamente — las finales son tácticamente únicas.',
+      alertaGoles: esEmpate0_0AlHT
+        ? '⚠️ FINAL 0-0 AL DESCANSO: probabilidad de prórroga muy alta. PROHIBIDO recomendar Over 2.5 o Over 3.5 FT. Busca Under 2.5, BTTS No, corners o tarjetas.'
+        : marcadorActual
+        ? `Marcador actual: ${marcadorActual}. Partido único — sin posibilidad de clasificarse en global.`
+        : 'Partido único de final — no hay segunda oportunidad. Táctica extremadamente conservadora esperada.',
+    };
+  }
+
+  if (isKnockout && !isSingleLegFinal) {
     // Buscar la ida en el H2H (partido reciente de la misma competición entre estos equipos)
     const primeraPata = h2hData.find(m =>
       m.liga === nextRaw.league.name &&
@@ -3661,9 +3731,20 @@ async function handlePartido(chatId, teamName, countryHint = '') {
 
   // Calcular probabilidades con modelo de Poisson
   // Para europeas: usar stats domésticas si hay (más representativas)
+  // Para finales de copa: aplicar factor reductor de goles (las finales son tácticamente cerradas)
   const homeBase = homeDomStats || homeStatsData;
   const awayBase = awayDomStats || awayStatsData;
-  const probBlock = buildProbBlock(homeBase, awayBase, h2hData, leagueId);
+  let probBlock = buildProbBlock(homeBase, awayBase, h2hData, leagueId);
+  if (isSingleLegFinal && probBlock) {
+    // Reducir un 30% los xG para reflejar que las finales producen ~1.8 goles de media vs ~2.7 en liga
+    const FINAL_FACTOR = 0.70;
+    probBlock = {
+      ...probBlock,
+      xGLocal:    probBlock.xGLocal    != null ? +(probBlock.xGLocal    * FINAL_FACTOR).toFixed(2) : null,
+      xGVisitante: probBlock.xGVisitante != null ? +(probBlock.xGVisitante * FINAL_FACTOR).toFixed(2) : null,
+      _ajusteFinal: `Lambdas reducidas ${Math.round((1 - FINAL_FACTOR) * 100)}% por ser final de copa (partido único, táctica conservadora). Las probabilidades de Over son más bajas que en liga regular.`,
+    };
+  }
 
   // Momentum y proyecciones en vivo
   const momentum   = isLive ? calcLiveMomentum(liveStatsData, homeTeam, awayTeam) : null;
@@ -3684,6 +3765,7 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     : null;
 
   const analysisData = {
+    _aviso: 'TODAS las estadísticas de este JSON son promedios de TEMPORADA COMPLETA en TODAS las competiciones. NUNCA las etiquetes como estadísticas de una copa o competición específica. SOLO puedes citar números que aparezcan literalmente en este JSON — si un dato no está aquí, escribe "sin datos disponibles".',
     partido: {
       liga:      nextRaw.league.name,
       ronda:     round || null,
@@ -3695,14 +3777,32 @@ async function handlePartido(chatId, teamName, countryHint = '') {
       enVivo:    isLive,
       minuto:    elapsed || null,
       marcador:  isLive ? `${nextRaw.goals?.home ?? 0}-${nextRaw.goals?.away ?? 0}` : null,
+      arbitro:   sofaContext?.arbitro?.nombre || nextRaw.fixture.referee || null,
+      estadio:   nextRaw.fixture.venue?.name || null,
+      ciudad:    nextRaw.fixture.venue?.city || null,
     },
+    ...(sofaContext?.arbitro && { arbitroStats: sofaContext.arbitro }),
+    contextoPorPartido: {
+      queSeJuegaLocal:    motivLocal.texto,
+      queSeJuegaVisitante: motivVisit.texto,
+      posicionLocal:      homeStanding ? `${homeStanding.rank}º — ${homeStanding.points} pts` : 'sin datos de clasificación',
+      posicionVisitante:  awayStanding ? `${awayStanding.rank}º — ${awayStanding.points} pts` : 'sin datos de clasificación',
+      jornadasRestantes:  motivLocal.jornadas_restantes ?? null,
+      ...(isSingleLegFinal && { esPartidoUnico: 'FINAL DE COPA — partido único, no hay vuelta. Presión máxima para ambos.' }),
+    },
+    ...(predData && { prediccionAPIFootball: predData }),
     h2h:            h2hData,
     bttsEnH2H:      h2hData.filter(m => m.btts).length,
-    statsLocal:     homeStatsData,
-    statsVisitante: awayStatsData,
-    ...(homeDomStats && { statsLocalLigaDomestica:   homeDomStats }),
-    ...(awayDomStats && { statsVisitanteLigaDomestica: awayDomStats }),
+    statsLocal:     homeStatsData ? { ...homeStatsData, _fuente: 'promedio temporada completa — todas las competiciones' } : null,
+    statsVisitante: awayStatsData ? { ...awayStatsData, _fuente: 'promedio temporada completa — todas las competiciones' } : null,
+    ...(homeDomStats && { statsLocalLigaDomestica:   { ...homeDomStats, _fuente: 'promedio liga doméstica — todas las competiciones' } }),
+    ...(awayDomStats && { statsVisitanteLigaDomestica: { ...awayDomStats, _fuente: 'promedio liga doméstica — todas las competiciones' } }),
     estadisticasVivo: liveStatsData,
+    ...(lineupsData && lineupsData.length > 0 && { alineaciones: lineupsData }),
+    ...(injHomeData && injHomeData.length > 0 && { lesionadosLocal: injHomeData }),
+    ...(injAwayData && injAwayData.length > 0 && { lesionadosVisitante: injAwayData }),
+    ...(sofaContext?.formaLocal     && { formaRecienteLocalSofascore:     sofaContext.formaLocal }),
+    ...(sofaContext?.formaVisitante && { formaRecienteVisitanteSofascore: sofaContext.formaVisitante }),
     ...(contextoEliminatoria && { contextoEliminatoria }),
     ...(probBlock   && { probabilidadesCalculadas: probBlock }),
     ...(momentum    && { momentumEnVivo: momentum }),
@@ -3715,7 +3815,12 @@ async function handlePartido(chatId, teamName, countryHint = '') {
   // ── En vivo → INPLAY_SYSTEM (necesita contexto del partido activo) ──────────
   if (isLive) {
     const liveOdds = await getLiveOdds(nextRaw.fixture.id).catch(() => null);
-    if (liveOdds) analysisData.cuotasVivo = liveOdds;
+    if (liveOdds) {
+      analysisData.cuotasVivo = liveOdds;
+    } else {
+      analysisData.cuotasVivo = null;
+      analysisData._sinCuotasVivo = 'No hay cuotas en vivo disponibles. Para el campo "Cuota mínima" escribe SIEMPRE "verificar en casa de apuestas" — NUNCA inventes una cuota.';
+    }
     const analysis = await sonnet(
       INPLAY_SYSTEM,
       `Analiza este partido EN VIVO:\n\n${JSON.stringify(analysisData, null, 2)}`
