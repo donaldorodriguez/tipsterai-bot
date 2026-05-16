@@ -1734,11 +1734,9 @@ function buildPickCandidates(enrichedFixtures) {
   const candidates = [];
 
   for (const f of enrichedFixtures) {
-    // Excluir solo fixtures donde NO hay stats de ninguno de los dos equipos.
-    // Con stats de al menos un equipo, el modelo Poisson tiene mejor base que el LLM.
-    // 'fallback' = ningún equipo tiene stats → promedios genéricos → menos confiable pero usable.
-    // Los picks igual pasan por EV real vs cuotas de mercado, que filtra lo que no tiene valor.
-    if (!f._extendedProbs) continue; // sin probs calculadas → skip
+    // 'fallback' = ningún equipo tiene stats reales → ya filtrado antes de llegar aquí
+    // 'local_only' / 'away_only' = un equipo sin datos → stake máximo 5 por _maxStake
+    if (!f._extendedProbs) continue;
 
     const partialStats = f._statsSource !== 'real'; // true si solo uno de los dos tiene stats
     const probs = f._extendedProbs;
@@ -1814,6 +1812,8 @@ function buildPickCandidates(enrichedFixtures) {
 
       // Si el partido tiene stats parciales (solo un equipo), bajar stake 1 nivel por confianza.
       if (partialStats && stake > 4) stake = Math.max(4, stake - 1);
+      // Respetar el tope de stake impuesto antes del motor (ej: _maxStake=5 para datos parciales)
+      if (f._maxStake && stake > f._maxStake) stake = f._maxStake;
 
       // La cuota mostrada al usuario lleva el buffer (+0.15).
       // La cuota real (o) se usó para el cálculo de EV — es correcta internamente.
@@ -3244,17 +3244,32 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV por mercado...`);
 
+  // ── Filtro de calidad ANTES del motor ────────────────────────────────────
+  // Sin datos reales de ambos equipos = pick inventado = DESCARTADO
+  const enrichedFiltrado = enriched.filter(e => {
+    if (e._statsSource === 'fallback') {
+      console.log(`❌ DESCARTADO (sin stats de ningún equipo): ${e.local} vs ${e.visitante}`);
+      return false;
+    }
+    return true;
+  });
+  // Picks con solo un equipo con datos → stake máximo 5 (alta incertidumbre)
+  enrichedFiltrado.forEach(e => {
+    if (e._statsSource === 'local_only' || e._statsSource === 'away_only') {
+      e._maxStake = 5;
+    }
+  });
+
   // ── Debug logging detallado ───────────────────────────────────────────────
   console.log(`📊 DEBUG picks motor:`);
-  console.log(`   Partidos analizados: ${enriched.length}`);
-  console.log(`   Con cuotas reales: ${conOdds}/${enriched.length}`);
-  const sinStats = enriched.filter(e => e._statsSource !== 'real').length;
-  const sinProbs = enriched.filter(e => !e._extendedProbs).length;
-  console.log(`   Stats parciales (un equipo sin datos): ${sinStats} — siguen al motor con penalización de stake`);
-  if (sinProbs > 0) console.log(`   Sin probs calculadas (excluidos): ${sinProbs}`);
+  console.log(`   Partidos totales: ${enriched.length} | Tras filtro calidad: ${enrichedFiltrado.length}`);
+  console.log(`   Descartados por sin stats: ${enriched.length - enrichedFiltrado.length}`);
+  console.log(`   Con cuotas reales: ${conOdds}/${enrichedFiltrado.length}`);
+  const sinStats = enrichedFiltrado.filter(e => e._statsSource !== 'real').length;
+  console.log(`   Stats parciales (un equipo): ${sinStats} — stake máximo 5`);
 
   // ── Selección matemática de picks ────────────────────────────────────────
-  const candidates = buildPickCandidates(enriched);
+  const candidates = buildPickCandidates(enrichedFiltrado);
   const topPicks   = selectDiversePicks(candidates, 5);
 
   // Log detallado de por qué cada partido pasó o no
