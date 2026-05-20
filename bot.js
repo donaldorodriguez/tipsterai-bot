@@ -1206,6 +1206,79 @@ async function getLineups(fixtureId) {
   } catch { return null; }
 }
 
+/**
+ * Eventos del partido: goles, tarjetas, cambios — con minuto y jugador.
+ * Esencial para análisis en vivo (quién marcó, quién está en riesgo, cambios tácticos).
+ */
+async function getFixtureEvents(fixtureId) {
+  try {
+    const { data } = await API.get('/fixtures/events', { params: { fixture: fixtureId } });
+    const res = data.response || [];
+    return res.map(e => ({
+      minuto:    e.time?.elapsed ?? null,
+      minExtra:  e.time?.extra   ?? null,
+      equipo:    e.team?.name    ?? null,
+      equipoId:  e.team?.id      ?? null,
+      jugador:   e.player?.name  ?? null,
+      asistente: e.assist?.name  ?? null,  // en goles: quien asistió
+      tipo:      e.type          ?? null,  // 'Goal' | 'Card' | 'subst' | 'Var'
+      detalle:   e.detail        ?? null,  // 'Normal Goal' | 'Yellow Card' | 'Red Card' | 'Penalty' | 'Own Goal' | etc.
+      comentario:e.comments      ?? null,
+    }));
+  } catch { return []; }
+}
+
+/**
+ * Resumen legible de eventos: goles, tarjetas activas (riesgo 2ª amarilla), cambios.
+ * Se inyecta directo en el contexto de Claude para análisis en vivo.
+ */
+function summarizeEvents(events, homeTeam, awayTeam) {
+  if (!events || events.length === 0) return null;
+
+  const goals   = events.filter(e => e.tipo === 'Goal');
+  const cards   = events.filter(e => e.tipo === 'Card');
+  const substs  = events.filter(e => e.tipo === 'subst');
+
+  // Jugadores con amarilla → riesgo de 2ª
+  const yellowsByPlayer = {};
+  cards.filter(c => c.detalle === 'Yellow Card').forEach(c => {
+    const key = `${c.jugador}__${c.equipoId}`;
+    yellowsByPlayer[key] = (yellowsByPlayer[key] || 0) + 1;
+  });
+  const doubleYellowRisk = Object.entries(yellowsByPlayer)
+    .filter(([, cnt]) => cnt >= 1)
+    .map(([key]) => {
+      const [nombre] = key.split('__');
+      return nombre;
+    });
+
+  return {
+    goles: goals.map(g => ({
+      min:     g.minuto,
+      equipo:  g.equipo,
+      jugador: g.jugador,
+      asiste:  g.asistente,
+      tipo:    g.detalle, // 'Normal Goal' | 'Own Goal' | 'Penalty'
+    })),
+    tarjetas: {
+      amarillas: cards.filter(c => c.detalle === 'Yellow Card').map(c => ({ min: c.minuto, jugador: c.jugador, equipo: c.equipo })),
+      rojas:     cards.filter(c => c.detalle?.includes('Red')).map(c => ({ min: c.minuto, jugador: c.jugador, equipo: c.equipo })),
+      riesgo2aAmarilla: doubleYellowRisk, // jugadores con 1 amarilla → si juegan agresivo pueden ser expulsados
+    },
+    cambios: substs.map(s => ({
+      min:    s.minuto,
+      equipo: s.equipo,
+      sale:   s.jugador,
+      entra:  s.asistente,
+    })),
+    resumenTexto: [
+      goals.length  > 0 ? `⚽ Goles: ${goals.map(g => `${g.jugador} (${g.equipo}, ${g.minuto}')`).join(', ')}` : null,
+      doubleYellowRisk.length > 0 ? `⚠️ Riesgo expulsión: ${doubleYellowRisk.join(', ')}` : null,
+      substs.length > 0 ? `🔄 Cambios recientes: ${substs.slice(-3).map(s => `${s.asistente}↑ por ${s.jugador} (${s.equipo}, ${s.minuto}')`).join(' | ')}` : null,
+    ].filter(Boolean).join('\n'),
+  };
+}
+
 async function getInjuries(teamId, leagueId) {
   try {
     const season = LEAGUE_SEASONS[leagueId] || 2025;
@@ -2178,6 +2251,13 @@ PICKS PUNTUALES según el momento:
 - Usa el campo "market" que ya viene calculado — es el pick concreto. No lo cambies.
 - Usa "shotsLocal" y "shotsVisitante" para explicar quién está presionando más.
 
+EVENTOS DEL PARTIDO (campo "eventosPartido" en cada alerta, si existe):
+- goles[]: quién marcó y cuándo → úsalo para contextualizar el marcador ("X marcó en min 23")
+- tarjetas.riesgo2aAmarilla[]: jugadores con amarilla → menciónalo si es relevante para tarjetas
+- cambios[]: sustituciones recientes → detecta intención táctica
+  Si un equipo metió delantero en el 2T → confirma presión de ataque → refuerza el pick de gol
+REGLA: cita 1-2 datos concretos de eventos en el "Contexto" del formato — hace el análisis creíble.
+
 FORMATO OBLIGATORIO:
 ⚡ *ALERTA DE GOL #[N]*
 ⚽ [local] [marcador] [visitante] | 🕐 Min [minuto] ([period])
@@ -2187,7 +2267,7 @@ FORMATO OBLIGATORIO:
 📊 Probabilidad: *[pGoal]%*
 💰 Cuota estimada: *~[impliedOdds]*
 ⏱️ Apostar antes del min: *[minuto límite concreto]*
-📈 Contexto: [razon — usa tiros a puerta, marcador, minuto para explicar por qué AHORA]
+📈 Contexto: [razon — usa tiros a puerta, goles con jugador, cambios tácticos, minuto para explicar por qué AHORA]
 🏆 Stake: *[X]/10*
 ━━━━━━━━━━━━━━━━━━━
 
@@ -2671,6 +2751,16 @@ ANÁLISIS DE MOMENTUM (campo "momentumEnVivo"):
 - score < -15: el visitante domina → favorece next goal visitante, AH visitante
 - score entre -15 y 15: partido equilibrado → corners y tarjetas
 
+EVENTOS DEL PARTIDO (campo "eventosPartido"):
+Si el JSON incluye "eventosPartido", úsalo para enriquecer ENORMEMENTE el análisis:
+- goles[]: quién marcó, en qué minuto, si fue penal u og → explica el contexto del marcador
+- tarjetas.amarillas[]: jugadores amonestados → si están en posición defensiva, riesgo de 2ª amarilla
+- tarjetas.riesgo2aAmarilla[]: jugadores con 1 amarilla → menciónalo en el razonamiento si es relevante
+- cambios[]: sustituciones → inferir intención táctica (¿metieron un delantero? ¿defendiendo el resultado?)
+  Ejemplo: "Min 70: entra Benzema por centrocampista → equipo busca gol → Over 2.5 / BTTS favorecido"
+REGLA: Si ves un cambio táctico ofensivo (delantero por defensa o MC) en el 2T → aumenta probabilidad de gol.
+REGLA: Si un defensa clave tiene amarilla → riesgo de falta que puede dar penalti o 2ª amarilla.
+
 PROYECCIONES EN TIEMPO REAL:
 - GOLES: línea mínima con valor real = currentGoals + 2. Si el partido ya tiene los goles
   necesarios para una línea, esa línea no tiene valor. Busca la siguiente.
@@ -2698,12 +2788,14 @@ REGLAS IN-PLAY:
 FORMATO IN-PLAY (usa este exacto):
 🌍 [País] — [Liga/Copa]
 ⚽ [Local] vs [Visitante] | ⏰ Min [X] | [Marcador]
-📊 Momentum: [label] | Corners: [N] | Tarjetas: [N]
+📊 Stats: [N] tiros | [N]% posesión local | Corners: [N]-[N] | Tarjetas: [N]-[N]
+[Si hay eventosPartido.goles]: ⚽ Goles: [jugador] (equipo, min')
+[Si hay riesgo2aAmarilla]: ⚠️ Riesgo: [jugador] ([equipo])
 ━━━━━━━━━━━━━━━━━━━
 
 🎯 *PICK [N]: [Mercado]*
 ┌ Selección: [qué apostar, específico]
-├ Razonamiento: [1 línea: por qué ahora, qué dato lo justifica]
+├ Razonamiento: [1-2 líneas: por qué ahora, qué dato lo justifica — cita stats reales]
 ├ ⏰ Actúa antes del: min [XX]
 ├ 💡 Cuota mínima: [número o "busca > X.XX"]
 └ 🏆 Stake: [X]/10
@@ -3887,7 +3979,10 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     getLeagueStandings(leagueId).catch(() => ({ teams: [] })), // 7
     fetchSofaScoreEvents(fixtureDate).catch(() => []),         // 8
   ];
-  if (isLive) requests.push(getFixtureStatistics(nextRaw.fixture.id)); // 9
+  if (isLive) {
+    requests.push(getFixtureStatistics(nextRaw.fixture.id)); // 9
+    requests.push(getFixtureEvents(nextRaw.fixture.id));     // 10  ← goles/tarjetas/cambios
+  }
   if (isEuropean) {
     requests.push(
       Promise.any([140,78,39,135,61,88,94].map(lid => getTeamStats(homeId, lid).then(s => s ? s : Promise.reject()))).catch(() => null),
@@ -3905,8 +4000,9 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const predRes       = results[6];
   const standingsRes  = results[7];
   const sofaEventsRes = results[8];
-  const liveStatsRes  = isLive ? results[9] : null;
-  const euroBase      = isLive ? 10 : 9;
+  const liveStatsRes  = isLive ? results[9]  : null;
+  const liveEventsRes = isLive ? results[10] : null;
+  const euroBase      = isLive ? 11 : 9;
   const homedomRes    = isEuropean ? results[euroBase]     : null;
   const awaydomRes    = isEuropean ? results[euroBase + 1] : null;
 
@@ -3920,6 +4016,8 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const standingsData   = standingsRes?.status === 'fulfilled'  ? standingsRes.value  : { teams: [] };
   const sofaEvents      = sofaEventsRes?.status === 'fulfilled' ? sofaEventsRes.value : [];
   const liveStatsData   = (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
+  const rawEventsData   = (isLive && liveEventsRes?.status === 'fulfilled') ? liveEventsRes.value : [];
+  const liveEventsData  = rawEventsData.length > 0 ? summarizeEvents(rawEventsData, homeTeam, awayTeam) : null;
   const homeDomStats    = isEuropean && homedomRes?.status === 'fulfilled' ? homedomRes.value : null;
   const awayDomStats    = isEuropean && awaydomRes?.status === 'fulfilled' ? awaydomRes.value : null;
 
@@ -4064,6 +4162,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     ...(homeDomStats && { statsLocalLigaDomestica:   { ...homeDomStats, _fuente: 'promedio liga doméstica — todas las competiciones' } }),
     ...(awayDomStats && { statsVisitanteLigaDomestica: { ...awayDomStats, _fuente: 'promedio liga doméstica — todas las competiciones' } }),
     estadisticasVivo: liveStatsData,
+    ...(liveEventsData && { eventosPartido: liveEventsData }),  // ← goles con jugador, tarjetas, cambios
     ...(lineupsData && lineupsData.length > 0 && { alineaciones: lineupsData }),
     ...(injHomeData && injHomeData.length > 0 && { lesionadosLocal: injHomeData }),
     ...(injAwayData && injAwayData.length > 0 && { lesionadosVisitante: injAwayData }),
@@ -4173,11 +4272,12 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
 
   await bot.sendMessage(chatId, `⏳ *${liveFixtures.length}* partido(s) en vivo detectados. Recopilando estadísticas...`, { parse_mode: 'Markdown' });
 
-  // Get live stats + team stats históricos para todos los partidos en paralelo
+  // Get live stats + eventos + team stats históricos para todos los partidos en paralelo
   const toAnalyze = liveFixtures.slice(0, 4);
   const today = new Date().toISOString().split('T')[0];
-  const [liveStatsResults, homeStatsResults, awayStatsResults, sofaEventsVivo] = await Promise.all([
+  const [liveStatsResults, liveEventsResults, homeStatsResults, awayStatsResults, sofaEventsVivo] = await Promise.all([
     Promise.allSettled(toAnalyze.map(f => getFixtureStatistics(f.fixtureId))),
+    Promise.allSettled(toAnalyze.map(f => getFixtureEvents(f.fixtureId))),  // ← NUEVO: goles/tarjetas/cambios
     Promise.allSettled(toAnalyze.map(f => getTeamStats(f.homeId, f.leagueId))),
     Promise.allSettled(toAnalyze.map(f => getTeamStats(f.awayId, f.leagueId))),
     fetchSofaScoreEvents(today).catch(() => []),
@@ -4197,11 +4297,12 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
   );
 
   const enriched = toAnalyze.map((f, i) => {
-    const liveStats = liveStatsResults[i].status === 'fulfilled' ? liveStatsResults[i].value : null;
-    const hStats    = homeStatsResults[i].status === 'fulfilled' ? homeStatsResults[i].value : null;
-    const aStats    = awayStatsResults[i].status === 'fulfilled' ? awayStatsResults[i].value : null;
-    const sofa      = sofaResultsVivo[i].status === 'fulfilled'  ? sofaResultsVivo[i].value  : null;
-    const elapsed   = f.elapsed || 0;
+    const liveStats  = liveStatsResults[i].status  === 'fulfilled' ? liveStatsResults[i].value  : null;
+    const rawEvents  = liveEventsResults[i].status === 'fulfilled' ? liveEventsResults[i].value  : [];
+    const hStats     = homeStatsResults[i].status  === 'fulfilled' ? homeStatsResults[i].value   : null;
+    const aStats     = awayStatsResults[i].status  === 'fulfilled' ? awayStatsResults[i].value   : null;
+    const sofa       = sofaResultsVivo[i].status   === 'fulfilled' ? sofaResultsVivo[i].value    : null;
+    const elapsed    = f.elapsed || 0;
     const standingsLeague = standingsMapVivo[f.leagueId] || { teams: [], total: 20 };
     const homeStanding = standingsLeague.teams?.find?.(t => t.teamId === f.homeId) || null;
     const awayStanding = standingsLeague.teams?.find?.(t => t.teamId === f.awayId) || null;
@@ -4214,6 +4315,7 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
     const homeCards   = liveStats ? ((homeStats(liveStats)?.['Yellow Cards']??0)+(homeStats(liveStats)?.['Red Cards']??0)) : 0;
     const awayCards   = liveStats ? ((awayStats(liveStats)?.['Yellow Cards']??0)+(awayStats(liveStats)?.['Red Cards']??0)) : 0;
     const cardsProj   = elapsed > 0 ? calcLiveProjection(homeCards + awayCards, elapsed) : null;
+    const eventosResumen = rawEvents.length > 0 ? summarizeEvents(rawEvents, f.homeTeam, f.awayTeam) : null;
 
     return {
       _aviso: 'Stats históricas son promedios de temporada completa — NUNCA las etiquetes como stats de una copa o competición específica. Solo cita números literalmente presentes en este JSON.',
@@ -4231,10 +4333,11 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
       statsVisitante: aStats ? { ...aStats, _fuente: 'promedio temporada completa' } : null,
       ...(sofa?.formaLocal     && { formaRecienteLocalSofascore:     sofa.formaLocal }),
       ...(sofa?.formaVisitante && { formaRecienteVisitanteSofascore: sofa.formaVisitante }),
-      estadisticasVivo: liveStats,
-      ...(momentum    && { momentumEnVivo: momentum }),
-      ...(cornersProj && { proyeccionCorners: cornersProj }),
-      ...(cardsProj   && { proyeccionTarjetas: cardsProj }),
+      estadisticasVivo:  liveStats,
+      eventosPartido:    eventosResumen,   // ← goles con jugador, tarjetas activas, cambios
+      ...(momentum    && { momentumEnVivo:       momentum }),
+      ...(cornersProj && { proyeccionCorners:    cornersProj }),
+      ...(cardsProj   && { proyeccionTarjetas:   cardsProj }),
     };
   });
 
@@ -4282,10 +4385,11 @@ async function handleAlertaGol(chatId) {
 
   await bot.sendMessage(chatId, `🔍 *${liveActive.length}* partido(s) activo(s). Calculando probabilidades de gol...`, { parse_mode: 'Markdown' });
 
-  // 2. Obtener stats en vivo + históricas en paralelo (máx 6 partidos)
+  // 2. Obtener stats en vivo + eventos + históricas en paralelo
   const candidates = liveActive.slice(0, 20);
-  const [liveStatsResults, homeStatsResults, awayStatsResults] = await Promise.all([
+  const [liveStatsResults, liveEventsResults, homeStatsResults, awayStatsResults] = await Promise.all([
     Promise.allSettled(candidates.map(f => getFixtureStatistics(f.fixture.id))),
+    Promise.allSettled(candidates.map(f => getFixtureEvents(f.fixture.id))),  // ← goles/tarjetas/cambios
     Promise.allSettled(candidates.map(f => getTeamStats(f.teams.home.id, f.league.id))),
     Promise.allSettled(candidates.map(f => getTeamStats(f.teams.away.id, f.league.id))),
   ]);
@@ -4294,13 +4398,19 @@ async function handleAlertaGol(chatId) {
   const alerts = [];
   for (let i = 0; i < candidates.length; i++) {
     const f = candidates[i];
-    const parsed = parseFixture(f);
-    const liveStats      = liveStatsResults[i].status  === 'fulfilled' ? liveStatsResults[i].value  : null;
-    const homeStatsData  = homeStatsResults[i].status  === 'fulfilled' ? homeStatsResults[i].value  : null;
-    const awayStatsData  = awayStatsResults[i].status  === 'fulfilled' ? awayStatsResults[i].value  : null;
+    const parsed        = parseFixture(f);
+    const liveStats     = liveStatsResults[i].status  === 'fulfilled' ? liveStatsResults[i].value  : null;
+    const rawEvents     = liveEventsResults[i].status === 'fulfilled' ? liveEventsResults[i].value  : [];
+    const homeStatsData = homeStatsResults[i].status  === 'fulfilled' ? homeStatsResults[i].value   : null;
+    const awayStatsData = awayStatsResults[i].status  === 'fulfilled' ? awayStatsResults[i].value   : null;
 
     const alert = calcGoalAlert(parsed, liveStats, homeStatsData, awayStatsData);
-    if (alert && alert.pGoal >= 55) alerts.push(alert); // pGoal es porcentaje, ≥55% = cuota ~1.82
+    if (alert && alert.pGoal >= 55) {
+      // Adjuntar resumen de eventos al alert para enriquecer el contexto de Claude
+      const evResumen = rawEvents.length > 0 ? summarizeEvents(rawEvents, parsed.homeTeam, parsed.awayTeam) : null;
+      if (evResumen) alert.eventosPartido = evResumen;
+      alerts.push(alert);
+    }
   }
 
   if (alerts.length === 0) {
