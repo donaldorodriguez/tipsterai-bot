@@ -1219,6 +1219,25 @@ async function getInjuries(teamId, leagueId) {
   } catch { return []; }
 }
 
+/**
+ * Obtiene jugadores lesionados/sancionados confirmados para un fixture específico.
+ * Usa el endpoint /injuries?fixture=X que devuelve bajas concretas para ese partido.
+ * Retorna { homeTeamId, players: [{nombre, equipo, equipoId, tipo, razon}] }
+ */
+async function getFixtureInjuries(fixtureId) {
+  try {
+    const { data } = await API.get('/injuries', { params: { fixture: fixtureId } });
+    const res = data.response || [];
+    return res.map(i => ({
+      nombre:   i.player?.name  || 'Desconocido',
+      equipoId: i.team?.id      || null,
+      equipo:   i.team?.name    || null,
+      tipo:     i.player?.type === 'Missing Fixture' ? 'Suspendido' : 'Lesionado',
+      razon:    i.player?.reason || null,
+    }));
+  } catch { return []; }
+}
+
 async function getRealOdds(fixtureId) {
   try {
     // Intentar primero sin filtro de bookmaker para obtener lo que esté disponible
@@ -1460,6 +1479,21 @@ function poissonCDF_above(lambda, threshold) {
  * @param {number} awayAgainst - Promedio goles recibidos por visitante fuera
  * @returns {object} probabilidades de mercados clave
  */
+
+/**
+ * Convierte la forma reciente (últimos 5 partidos) en un multiplicador para el lambda.
+ * 9 pts  (3W‑0D‑2L)  = temporada normal → factor 1.00 (sin cambio)
+ * 15 pts (5W)         = racha excelente  → factor 1.20 (+20%)
+ *  0 pts (5L)         = racha terrible   → factor 0.80 (−20%)
+ * Blend aplicado: 50% promedios de temporada + 50% forma ponderada.
+ */
+function formMultiplier(forma5) {
+  if (!forma5 || forma5.puntos == null) return 1.0;
+  const pts = Math.max(0, Math.min(15, forma5.puntos));
+  // Lineal: factor = 1.0 + (pts − 9) / 30  → [0.70, 1.20] clampado a [0.80, 1.20]
+  return Math.max(0.80, Math.min(1.20, 1.0 + (pts - 9) / 30));
+}
+
 function calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
   // Goles esperados (xG implícito)
   const homeLambda = ((homeFor || 1.2) + (awayAgainst || 1.2)) / 2;
@@ -2568,6 +2602,12 @@ CONTEXTO ADICIONAL — úsalo solo para enriquecer el razonamiento, NUNCA para d
 
 3. CONTEXTO TEMPORAL: Si es final de temporada (jornadas_restantes ≤ 5), menciónalo en Riesgo. No descartes.
 
+4. BAJAS CONFIRMADAS (lesionadosLocal / lesionadosVisitante): Si hay jugadores lesionados o sancionados,
+   menciónalos en la sección 📊 ESTADÍSTICAS CLAVE con el ícono 🩹. Ejemplo:
+   "🩹 Bajas locales: Jugador A (Lesionado), Jugador B (Suspendido)"
+   Si algún equipo tiene ≥2 bajas, añade en Riesgo: "⚠️ [Equipo] con [N] bajas confirmadas".
+   El stake ya fue ajustado por el motor si aplica — NO lo cambies.
+
 REGLAS DE FORMATO:
 - Usa exactamente el stake que viene en los datos — el motor ya lo calculó, NO lo toques
 - Usa exactamente la cuota que viene en los datos
@@ -2588,6 +2628,8 @@ FORMATO EXACTO (Telegram Markdown):
 ▸ [local] anota en casa: *X.X* goles/partido | Forma: *[forma]*
 ▸ [visitante] anota fuera: *X.X* goles/partido | Forma: *[forma]*
 ▸ [Si H2H ≥3 partidos: resumen H2H]
+[Si lesionadosLocal o lesionadosVisitante tienen datos:]
+🩹 Bajas: [local: nombres] / [visitante: nombres] (tipo)
 
 🎯 *PICK: [Mercado]*
 ┌ Selección: [Qué apostar]
@@ -3197,14 +3239,28 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     const hStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
     const aStats = statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
 
+    // ── Lambdas base (promedios de temporada) ──
     const hFor  = parseFloat(hStats?.golesAnotadosHome) || 1.3;
     const hAgt  = parseFloat(hStats?.golesRecibidosHome) || 1.1;
     const aFor  = parseFloat(aStats?.golesAnotadosAway) || 1.0;
     const aAgt  = parseFloat(aStats?.golesRecibidosAway) || 1.3;
-    const extProbs = calcExtendedProbs(hFor, hAgt, aFor, aAgt);
+
+    // ── Ajuste por forma reciente (blend 50% temporada + 50% forma ponderada) ──
+    // El multiplicador de forma del equipo ajusta su ataque;
+    // el del rival ajusta los goles que recibe el propio equipo.
+    const hFormFact = formMultiplier(hStats?.forma5);
+    const aFormFact = formMultiplier(aStats?.forma5);
+    const blend = 0.50; // peso de la forma reciente (vs. media de temporada)
+    const hForAdj = hFor * (1 - blend + blend * hFormFact);   // ataque local según forma
+    const aForAdj = aFor * (1 - blend + blend * aFormFact);   // ataque visitante según forma
+    const hAgtAdj = hAgt * (1 - blend + blend * aFormFact);   // defensa local = cuánto hace el ataque visitante
+    const aAgtAdj = aAgt * (1 - blend + blend * hFormFact);   // defensa visit = cuánto hace el ataque local
+    const extProbs = calcExtendedProbs(hForAdj, hAgtAdj, aForAdj, aAgtAdj);
 
     return {
       fixtureId:      f.fixtureId,
+      homeId:         f.homeId,    // ← necesario para matching de lesionados
+      awayId:         f.awayId,    // ← necesario para matching de lesionados
       liga:           f.leagueName,
       country:        f.country,
       local:          f.homeTeam,
@@ -3215,6 +3271,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       statsVisitante: aStats,
       _extendedProbs: extProbs,
       _statsSource:   (hStats && aStats) ? 'real' : hStats ? 'local_only' : aStats ? 'away_only' : 'fallback',
+      _formFactors:   { hFormFact, aFormFact }, // útil para debug
     };
   });
 
@@ -3311,6 +3368,44 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   // ── Selección matemática de picks ────────────────────────────────────────
   const candidates = buildPickCandidates(enrichedFiltrado);
   const topPicks   = selectDiversePicks(candidates, 3);
+
+  // ── Lesionados/sancionados para los picks seleccionados ────────────────────
+  // Solo consultamos los 3 fixtures finales → máximo 3 llamadas API extra.
+  if (topPicks.length > 0) {
+    try {
+      const injResults = await Promise.allSettled(
+        topPicks.map(pick => getFixtureInjuries(pick.fixtureId))
+      );
+      injResults.forEach((res, idx) => {
+        if (res.status !== 'fulfilled') return;
+        const allInjuries = res.value;  // [{nombre, equipoId, equipo, tipo, razon}]
+        const pick   = topPicks[idx];
+        const match  = enriched.find(e => e.fixtureId === pick.fixtureId);
+        if (!match || !allInjuries.length) return;
+
+        pick.lesionadosLocal     = allInjuries.filter(i => i.equipoId === match.homeId);
+        pick.lesionadosVisitante = allInjuries.filter(i => i.equipoId === match.awayId);
+
+        // Reducir stake si algún equipo tiene ≥2 bajas confirmadas
+        const bajasLocal = pick.lesionadosLocal.length;
+        const bajasVisit = pick.lesionadosVisitante.length;
+        if (bajasLocal >= 2 || bajasVisit >= 2) {
+          const stakeAntes = pick.stake;
+          pick.stake = Math.max(5, pick.stake - 1);
+          console.log(`🏥 Stake ${stakeAntes}→${pick.stake} por bajas: ${pick.local}(${bajasLocal}) vs ${pick.visitante}(${bajasVisit})`);
+        }
+
+        const totalBajas = bajasLocal + bajasVisit;
+        if (totalBajas > 0) {
+          console.log(`🩹 ${pick.local} vs ${pick.visitante}: ${bajasLocal} bajas local, ${bajasVisit} bajas visitante`);
+          pick.lesionadosLocal.forEach(p => console.log(`   🔴 [LOCAL] ${p.nombre} — ${p.tipo}${p.razon ? ': '+p.razon : ''}`));
+          pick.lesionadosVisitante.forEach(p => console.log(`   🔴 [VISIT] ${p.nombre} — ${p.tipo}${p.razon ? ': '+p.razon : ''}`));
+        }
+      });
+    } catch (injErr) {
+      console.warn('⚠️ Error obteniendo lesionados:', injErr.message);
+    }
+  }
 
   // Log detallado de por qué cada partido pasó o no
   console.log(`🎯 Candidatos válidos: ${candidates.length}`);
