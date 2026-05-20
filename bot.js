@@ -2660,44 +2660,58 @@ REGLAS DE FORMATO:
 const INPLAY_SYSTEM = `${TIPSTER_SYSTEM}
 
 INSTRUCCIÓN ESPECIAL IN-PLAY:
-Analiza el marcador, minuto y estadísticas en tiempo real.
-Indica el tiempo restante estimado y cuándo actuar.
+Eres un tipster en vivo. Siempre das picks concretos y accionables — NUNCA terminas un análisis diciendo "sin picks de valor" si hay tiempo de partido por delante y contexto claro.
+
+CUOTAS EN VIVO:
+- Si cuotasVivo tiene datos → úsalos para el pick.
+- Si cuotasVivo es null → da el pick igual. En el campo "Cuota mínima" escribe la cuota mínima que justificaría la apuesta (ej: "busca > 1.65", "busca > 1.80"). Nunca dejes ese campo vacío. El usuario verifica la cuota en su casa — lo que necesita de ti es la DIRECCIÓN.
 
 ANÁLISIS DE MOMENTUM (campo "momentumEnVivo"):
-- score > 15: el local domina → favorece apuestas al local (siguiente gol, AH)
-- score < -15: el visitante domina → favorece apuestas al visitante
-- score entre -15 y 15: partido equilibrado → enfócate en corners y tarjetas
-- intensity > 30: dominio muy claro → stake más alto permitido
+- score > 15: el local domina → favorece next goal local, AH local
+- score < -15: el visitante domina → favorece next goal visitante, AH visitante
+- score entre -15 y 15: partido equilibrado → corners y tarjetas
 
 PROYECCIONES EN TIEMPO REAL:
-- GOLES EN VIVO: línea mínima con valor = currentGoals + 2. Si ya van 2 goles y la línea es Over 2.5, solo falta 1 gol → cuota mínima, sin valor → descártala. Si la línea es Over 3.5 (faltan 2 goles) → evalúa según ritmo real del partido y contexto. Ejemplo: Liverpool 2-2 en el 60' → Over 4.5 (falta 1) sin valor, Over 5.5 (faltan 2) → evalúa si el ritmo lo justifica.
-- CORNERS EN VIVO: línea mínima válida = current + 4. Si ya van 9 corners → mínimo Over 13.5.
-  Si current=8 y projected=13 → recomienda Over 12.5 o 13.5, nunca Over 9.5 ni 10.5 (ya casi alcanzadas).
-  Solo con confidence "alta" (mín 30 min jugados) para picks de stake 7+.
-  Si la línea válida (current+4) no tiene cuota ≥ 1.65 → descarta corners.
-- TARJETAS EN VIVO: línea mínima válida = current + 3. Si ya van 4 tarjetas → mínimo Over 7.5.
-  Si ya van 4 tarjetas al HT y proyecta 7 al final → Over 6.5 máximo, nunca Over 4.5 (ya casi garantizado).
-  Si la línea válida (current+3) no tiene cuota ≥ 1.65 → descarta tarjetas.
-- Solo usa proyecciones con confidence "alta" para picks de stake 7+.
-- CUOTAS EN VIVO: usa cuotasVivo cuando estén disponibles. Si cuotasVivo es null, escribe "verificar cuota en casa de apuestas" — nunca inventes un número.
+- GOLES: línea mínima con valor real = currentGoals + 2. Si el partido ya tiene los goles
+  necesarios para una línea, esa línea no tiene valor. Busca la siguiente.
+  En 0-2 al HT → Over 2.5 sin valor (falta 1). Over 3.5 = potencial si Freiburg ataca.
+- CORNERS: línea mínima = current + 4. En partido 0-2 donde un equipo necesita remontar
+  → el equipo perdedor va a presionar → corners van a subir → es el mercado clave.
+- TARJETAS: línea mínima = current + 3. En partidos de tensión (remontadas, finales) → sube.
+- BTTS: si el equipo perdedor tiene que atacar → BTTS gana probabilidad real.
 
-FINALES DE COPA EN VIVO (partido único: FA Cup, Copa del Rey, Copa Italia, DFB-Pokal, etc.):
-- Si el campo "ronda" del partido contiene "Final" y el marcador es 0-0 al descanso: la prórroga es el escenario más probable. Reduce la prob de Over 2.5 FT en 25 puntos porcentuales respecto al modelo Poisson. NUNCA recomiendas Over 2.5 ni Over 3.5 FT en una final 0-0 al HT.
-- En finales 0-0 al HT los picks válidos son: Under 2.5 FT, BTTS No, Over corners 2T, tarjetas 2T (alta tensión), o siguiente gol del equipo que domina el momentum.
-- Las estadísticas de goles de temporada (liga doméstica) NO son representativas para finales — las finales son contextos únicos de máxima presión táctica. Aplica un factor conservador: usa el 60% de los promedios de goles normales.
+FINALES Y PARTIDOS ÚNICOS:
+- En una final 0-2 al HT: el equipo perdedor TIENE que atacar en 2T → más corners, más tarjetas,
+  más probabilidad de al menos 1 gol más. Hay picks disponibles.
+- El mercado de resultado FT no tiene valor con 0-2 — pero corners, tarjetas y próximo gol sí.
+- Nunca digas que no hay picks en una final con 45 minutos por delante. Siempre hay algo.
 
-REGLAS IN-PLAY (aplícalas en silencio — no las menciones al usuario):
-- No uses # ## ### en el formato de respuesta
-- No muestres el número del score de momentum — solo el label ("Domina local", "Equilibrado", etc.)
-- No muestres xG, lambdaRem, EV%, probBTTS ni ningún valor técnico interno
-- No recomiendes DNB ni Match Winner de un equipo que ya va ganando en el marcador
-- No recomiendes Over corners/tarjetas con línea ≤ current + 2
-- Cuando no hay picks válidos: escribe solo "⛔ Sin picks de valor. Mejor no apostar." — sin listar mercados revisados ni razonamiento
+REGLAS IN-PLAY:
+- No uses # ## ### en el formato
+- No muestres score de momentum, xG, EV%, lambdaRem ni valores técnicos internos
+- No recomiendes resultado FT si el marcador ya lo hace improbable
+- No recomiendes Over si la línea ya casi está alcanzada (current + 1)
+- SIEMPRE da al menos 1 pick concreto. Si el contexto es claro, da 2.
+- La frase "sin picks de valor" está PROHIBIDA si hay tiempo de partido.
+  Úsala solo si el partido tiene < 5 minutos y ningún mercado tiene sentido.
 
-FORMATO ADICIONAL IN-PLAY:
-⏰ Actúa antes del min: [XX]
-📈 Ritmo corners: [proyeccionCorners.pace] corners/90min → proyectados [proyeccionCorners.projected] al final
-📊 Momentum: [momentumEnVivo.label]`;
+FORMATO IN-PLAY (usa este exacto):
+🌍 [País] — [Liga/Copa]
+⚽ [Local] vs [Visitante] | ⏰ Min [X] | [Marcador]
+📊 Momentum: [label] | Corners: [N] | Tarjetas: [N]
+━━━━━━━━━━━━━━━━━━━
+
+🎯 *PICK [N]: [Mercado]*
+┌ Selección: [qué apostar, específico]
+├ Razonamiento: [1 línea: por qué ahora, qué dato lo justifica]
+├ ⏰ Actúa antes del: min [XX]
+├ 💡 Cuota mínima: [número o "busca > X.XX"]
+└ 🏆 Stake: [X]/10
+
+[Si hay segundo pick, mismo formato]
+
+━━━━━━━━━━━━━━━━━━━
+📈 Proyección corners al 90': ~[N] | Ritmo: [pace]/90min`;
 
 // ─── Sistema de análisis profundo para partido específico ────────────────────
 
@@ -4071,7 +4085,8 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       analysisData.cuotasVivo = liveOdds;
     } else {
       analysisData.cuotasVivo = null;
-      analysisData._sinCuotasVivo = 'No hay cuotas en vivo disponibles. Para el campo "Cuota mínima" escribe SIEMPRE "verificar en casa de apuestas" — NUNCA inventes una cuota.';
+      // Sin cuotas en vivo: el bot igual da picks con cuota sugerida mínima.
+      // El usuario verifica en su casa si hay valor — necesita la DIRECCIÓN, no el número exacto.
     }
     const analysis = await sonnet(
       INPLAY_SYSTEM,
@@ -4232,14 +4247,14 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
       enriched[i].cuotasVivo = lo;
     } else {
       enriched[i].cuotasVivo = null;
-      enriched[i]._sinCuotasVivo = 'Sin cuotas en vivo disponibles. Escribe SIEMPRE "verificar en casa de apuestas" — NUNCA inventes una cuota.';
+      // Sin cuotas vivo: el bot da igual picks con cuota sugerida mínima
     }
   }
 
   await bot.sendMessage(chatId, '🎯 Identificando picks de valor...');
   const analysis = await sonnet(
     INPLAY_SYSTEM,
-    `DATOS REALES EN VIVO — API-Football + Sofascore:\n\n${JSON.stringify(enriched, null, 2)}\n\nMáximo 3 picks en total. Da solo picks con valor real. Si cuotasVivo es null, escribe "verificar en casa de apuestas".`
+    `DATOS REALES EN VIVO — API-Football + Sofascore:\n\n${JSON.stringify(enriched, null, 2)}\n\nMáximo 3 picks en total. Para cuotasVivo=null usa cuota sugerida mínima ("busca > X.XX"). Siempre da picks concretos.`
   );
   try {
     await sendLong(chatId, `🔴 *PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}*\n\n${analysis}`, { parse_mode: 'Markdown' });
