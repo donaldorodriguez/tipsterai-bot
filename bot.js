@@ -1457,6 +1457,28 @@ async function getTeamStats(teamId, leagueId) {
     if (!hasData) return null;
     // Marcar muestras pequeñas para que Claude no las use como argumento sólido
     const muestraReducida = played > 0 && played < 5;
+    // ─── Tarjetas: suma por períodos (API devuelve por franja de minutos, no total directo) ───
+    const sumCards = (cardObj) => {
+      if (!cardObj) return 0;
+      return Object.values(cardObj).reduce((acc, v) => acc + (v?.total || 0), 0);
+    };
+    const totalAmarillasSeason = sumCards(r.cards?.yellow);
+    const totalRojasSeason     = sumCards(r.cards?.red);
+    // Promedio por partido (si tenemos datos de partidos jugados)
+    const amarillasPP = played > 0 && totalAmarillasSeason > 0
+      ? +(totalAmarillasSeason / played).toFixed(2) : null;
+    const rojasPP = played > 0 && totalRojasSeason > 0
+      ? +(totalRojasSeason / played).toFixed(2) : null;
+
+    // ─── Faltas: la API-Football devuelve en /fixtures/statistics por partido, no en /teams/statistics.
+    //     Aquí estimamos faltas por partido = amarillas * 4.2 (ratio histórico promedio en ligas top).
+    //     Marcamos como estimación para que Claude no lo cite como dato oficial.
+    const faltasPP_est = amarillasPP != null ? +(amarillasPP * 4.2).toFixed(1) : null;
+
+    // ─── Corners: también en /teams/statistics → campo "fixtures.goals" NO, pero sí en algunos planes.
+    //     Si la API los devuelve en r.goals.for.minute o similar, los leemos; si no, null.
+    //     La API-Football NO devuelve corners en /teams/statistics estándar — solo en /fixtures/statistics.
+
     return {
       equipo:             r.team?.name,
       liga:               r.league?.name,
@@ -1483,6 +1505,12 @@ async function getTeamStats(teamId, leagueId) {
       victorias:          r.fixtures?.wins,
       empates:            r.fixtures?.draws,
       derrotas:           r.fixtures?.loses,
+      // ── Tarjetas históricas ──────────────────────────────────────────────────
+      ...(amarillasPP != null && { amarillasPorPartido: amarillasPP }),
+      ...(rojasPP     != null && { rojasPorPartido:     rojasPP }),
+      ...(totalAmarillasSeason > 0 && { amarillasTemporada: totalAmarillasSeason }),
+      // ── Faltas estimadas (derivada de tarjetas) ──────────────────────────────
+      ...(faltasPP_est != null && { faltasCometidasPorPartido_est: faltasPP_est, _nota_faltas: 'Estimación (amarillas × 4.2) — no es dato directo de API' }),
     };
   }
 
@@ -2776,14 +2804,25 @@ FINALES Y PARTIDOS ÚNICOS:
 - El mercado de resultado FT no tiene valor con 0-2 — pero corners, tarjetas y próximo gol sí.
 - Nunca digas que no hay picks en una final con 45 minutos por delante. Siempre hay algo.
 
+CUANDO estadisticasVivo ES NULL (sin stats de tiros/posesión en tiempo real):
+No significa que no tienes datos. Tienes TODA esta información para dar picks igual:
+1. statsLocal.amarillasPorPartido + statsVisitante.amarillasPorPartido → proyección de tarjetas totales
+   Ejemplo: local 2.1 + visit 1.8 = 3.9 esperadas → Over 3.5 tarjetas tiene valor
+2. statsLocal.faltasCometidasPorPartido_est + statsVisitante.faltasCometidasPorPartido_est → intensidad del partido
+3. arbitroStats.amarillas_por_partido → si el árbitro da 4.2/partido y los equipos son agresivos, Over tarjetas seguro
+4. contextoPorPartido.queSeJuegaLocal/Visitante → si hay presión (descenso, título) → más agresividad
+5. marcador actual + minuto → si va 0-0 en min 65, ambos equipos presionan → corners y tarjetas suben
+6. eventosPartido.tarjetas.amarillas (del partido actual) → cuántas van ya y quién está en riesgo
+NUNCA digas "no tengo estadísticas suficientes". Siempre hay suficiente para 1 pick concreto.
+
 REGLAS IN-PLAY:
 - No uses # ## ### en el formato
 - No muestres score de momentum, xG, EV%, lambdaRem ni valores técnicos internos
 - No recomiendes resultado FT si el marcador ya lo hace improbable
 - No recomiendes Over si la línea ya casi está alcanzada (current + 1)
 - SIEMPRE da al menos 1 pick concreto. Si el contexto es claro, da 2.
-- La frase "sin picks de valor" está PROHIBIDA si hay tiempo de partido.
-  Úsala solo si el partido tiene < 5 minutos y ningún mercado tiene sentido.
+- Las frases "sin picks de valor", "no tengo estadísticas", "datos insuficientes" están PROHIBIDAS.
+  Solo omite el análisis si el partido lleva < 3 minutos y no hay absolutamente ningún contexto.
 
 FORMATO IN-PLAY (usa este exacto):
 🌍 [País] — [Liga/Copa]
@@ -2831,7 +2870,8 @@ USO DE ESTADÍSTICAS:
 - Usa golesAnotadosHome/Away de AMBAS fuentes (CL stats y liga doméstica si ambas están disponibles)
 - Si hay statsLigaDomestica, úsalas como referencia de volumen de goles real (más partidos = más representativo)
 - Para corners: toma el promedio de goles totales y proyecta: 8 + (xGTotal - 2.0) × 3.0 = lambda corners
-- Para tarjetas: suma de amarillas totales de ambos equipos / partidos jugados
+- Para tarjetas: usa directamente statsLocal.amarillasPorPartido + statsVisitante.amarillasPorPartido (ya calculado).
+  Si no están disponibles, usa amarillasTemporada / partidosJugados como fallback.
 - SIEMPRE contrasta con los patrones de liga del LEAGUE_STATS_CONTEXT: si la liga tiene 60% BTTS base y el equipo individual también supera 60%, el pick tiene doble confirmación
 
 ${LEAGUE_STATS_CONTEXT}
