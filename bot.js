@@ -4548,13 +4548,15 @@ async function handleRachas(chatId, intent) {
 }
 
 async function handleChatGeneral(chatId, pregunta) {
-  const CHAT_SYSTEM = `Eres TipsterAI Master PRO, el mejor asistente de apuestas deportivas.
-Responde en español. Sé amigable, conciso y profesional.
-No menciones tecnologías, APIs ni plataformas.
-Si el usuario saluda, saluda de vuelta y menciona brevemente qué puedes hacer.
-Si hace una pregunta general de fútbol o apuestas, responde con conocimiento experto.
-Recuérdales que pueden pedir: picks del día, analizar un equipo, partidos en vivo, enviar imagen de un partido, o ver planes.
-FORMATO: usa *texto* para negritas (un solo asterisco, estilo Telegram). Nunca uses **doble asterisco**.`;
+  const CHAT_SYSTEM = `Eres TipsterAI, el analista de fútbol con IA más avanzado disponible en Telegram.
+Responde en español. Tono: amigable, directo, seguro de sí mismo. Máximo 4 líneas.
+No menciones tecnologías, APIs ni plataformas. No uses ** (doble asterisco) — solo * simple para negrita.
+
+Si el usuario saluda o pregunta qué puedes hacer: responde con energía, menciona 2-3 casos concretos de uso y termina con un CTA directo. Ejemplo de tono: "Cuéntame el partido y te digo exactamente qué apostar."
+
+Si pregunta sobre fútbol o apuestas: responde con conocimiento experto y al final sugiere que pida un análisis completo.
+
+Siempre que sea natural, cierra recordando que puede pedir: *picks de hoy*, *analiza [equipo] vs [equipo]*, *en vivo*, o *ver planes* para acceso completo.`;
 
   const response = await haiku(CHAT_SYSTEM, pregunta);
   await bot.sendMessage(chatId, normalizeMd(response), { parse_mode: 'Markdown' });
@@ -4567,37 +4569,31 @@ async function handleVerPlanes(chatId, telegramId) {
   const linkPro30 = wompiLink(WOMPI_LINKS.pro30, tid, 'pro30');
 
   await bot.sendMessage(chatId,
-    `🏆 *TIPSTERAI MASTER PRO*\n` +
-    `_El bot de análisis deportivo con IA más avanzado_\n\n` +
-    `━━━━━━━━━━━━━━━━━━━\n` +
-    `🆓 *FREEMIUM — Gratis*\n` +
-    `▸ 1 consulta al día · 3 días de prueba\n` +
-    `▸ Picks básicos del día\n\n` +
-    `⚡ *VIP 15 días — $59.900 COP*\n` +
-    `▸ 10 consultas diarias\n` +
-    `▸ Picks del día con estadísticas reales\n` +
-    `▸ Análisis profundo de cualquier partido\n` +
-    `▸ Picks en vivo con datos en tiempo real\n` +
-    `▸ Filtros por liga y equipo\n` +
-    `▸ Alertas de gol en vivo\n\n` +
-    `⚡ *VIP 30 días — $99.900 COP*\n` +
-    `▸ Todo lo del VIP 15 días\n` +
-    `▸ Mejor precio por día ($3.330/día)\n\n` +
-    `🏆 *PRO 30 días — $179.900 COP*\n` +
-    `▸ 50 consultas diarias\n` +
-    `▸ Todo lo del plan VIP\n` +
-    `▸ Análisis de imágenes en vivo 📸\n` +
-    `▸ Sube foto del partido y recibe análisis al instante\n` +
-    `▸ Acceso a todas las ligas del mundo\n` +
+    `🤖 *TipsterAI — Elige tu plan*\n\n` +
+    `Acceso a análisis reales con datos de más de 100 ligas:\n` +
+    `✅ Modelo Poisson + estadísticas reales por partido\n` +
+    `✅ Lesionados y sancionados confirmados antes del partido\n` +
+    `✅ Motivación de equipos (qué se juegan en la jornada)\n` +
+    `✅ Historial H2H + forma reciente de los últimos 5 partidos\n` +
+    `✅ Picks en vivo con datos en tiempo real\n\n` +
     `━━━━━━━━━━━━━━━━━━━\n\n` +
-    `🇨🇴 *Si estás en Colombia:*\n` +
-    `Paga con Nequi, Daviplata, PSE o Bancolombia:\n` +
-    `💳 [VIP 15 días — $59.900](${linkVip15})\n` +
-    `💳 [VIP 30 días — $99.900](${linkVip30})\n` +
-    `💳 [PRO 30 días — $179.900](${linkPro30})\n\n` +
-    `🌎 *Para el resto del mundo:*\n` +
-    `Paga con tarjeta internacional:\n` +
-    `🔗 [Suscribirse en Whop (USD)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
+    `⚡ *VIP 15 días — $59.900 COP*\n` +
+    `▸ 10 consultas/día · todo incluido\n` +
+    `▸ Solo *$3.993 pesos por día* — menos que un café ☕\n` +
+    `💳 [Pagar con Nequi / PSE / Bancolombia](${linkVip15})\n\n` +
+    `🔥 *VIP 30 días — $99.900 COP* ← _más popular_\n` +
+    `▸ Todo el VIP · doble duración\n` +
+    `▸ Solo *$3.330 pesos por día*\n` +
+    `💳 [Pagar con Nequi / PSE / Bancolombia](${linkVip30})\n\n` +
+    `👑 *PRO 30 días — $179.900 COP*\n` +
+    `▸ 50 consultas/día · todo el VIP\n` +
+    `▸ + Análisis de imágenes en vivo 📸\n` +
+    `▸ Sube la foto del partido → análisis instantáneo\n` +
+    `💳 [Pagar con Nequi / PSE / Bancolombia](${linkPro30})\n\n` +
+    `━━━━━━━━━━━━━━━━━━━\n` +
+    `🌎 ¿Fuera de Colombia? Paga con tarjeta internacional:\n` +
+    `🔗 [Suscribirse en Whop (USD)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)\n\n` +
+    `_Pago 100% seguro. Activo en menos de 1 minuto._`,
     { parse_mode: 'Markdown' }
   );
 }
@@ -4770,16 +4766,16 @@ async function enviarRemarketingTelegram(adminChatId, fecha, mensajeCustom) {
   }
 
   const mensaje = mensajeCustom ||
-`⚽ *¡Hola! TipsterAI aquí.*
+`⚽ *Los picks de hoy ya están listos*
 
-Los picks de hoy ya están listos — análisis con datos reales de las principales ligas 📊
+Análisis con datos reales, lesionados confirmados y motivación de equipos.
 
-Escríbeme *"picks de hoy"* y te los entrego ahora mismo.
+Escríbeme *"picks de hoy"* para verlos.
 
-O si tienes un partido específico en mente: *"analiza [equipo] vs [equipo]"* y hago el análisis completo.
+O si tienes un partido específico: *"analiza [equipo] vs [equipo]"* y lo analizo completo ahora.
 
 ━━━━━━━━━━━━━━━━━━━
-💡 ¿Quieres acceso ilimitado? Escribe *"ver planes"*`;
+¿Quieres acceso sin límites? Escribe *"ver planes"* — desde *$3.330/día* 💳`;
 
   await bot.sendMessage(adminChatId, `📤 Enviando a *${ids.length}* usuarios free del ${fecha}...`, { parse_mode: 'Markdown' });
 
@@ -4873,20 +4869,30 @@ async function checkAccess(chatId, telegramId, isImage = false) {
       const linkVip30 = wompiLink(WOMPI_LINKS.vip30, telegramId, 'vip30');
       const linkPro30 = wompiLink(WOMPI_LINKS.pro30, telegramId, 'pro30');
       await bot.sendMessage(chatId,
-        `Tu período de prueba gratuito ha terminado 🏁\n\n` +
-        `Espero que hayas visto el nivel del análisis. Para continuar elige tu plan:\n\n` +
+        `⏳ *Tu prueba gratuita terminó*\n\n` +
+        `Viste lo que puede hacer TipsterAI: picks con datos reales, motivación de equipos, lesionados confirmados y análisis en vivo.\n\n` +
+        `Para seguir accediendo elige tu plan:\n\n` +
+        `━━━━━━━━━━━━━━━━━━━\n` +
         `⚡ *VIP 15 días — $59.900 COP*\n` +
-        `▸ 10 consultas/día · picks · análisis · en vivo · alertas\n` +
-        `💳 [Pagar con Wompi](${linkVip15})\n\n` +
-        `⚡ *VIP 30 días — $99.900 COP*\n` +
-        `▸ 10 consultas/día · todo lo del VIP · mejor precio\n` +
-        `💳 [Pagar con Wompi](${linkVip30})\n\n` +
-        `🏆 *PRO 30 días — $179.900 COP*\n` +
-        `▸ 50 consultas/día · análisis de imágenes 📸 · todas las ligas\n` +
-        `💳 [Pagar con Wompi](${linkPro30})\n\n` +
-        `🇨🇴 Paga con Nequi, Bancolombia, tarjeta o PSE.\n` +
-        `🌎 También en: [Whop (USD)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
-        { parse_mode: 'Markdown' }
+        `▸ 10 consultas/día · solo *$3.993/día*\n` +
+        `💳 [Activar VIP 15 días](${linkVip15})\n\n` +
+        `🔥 *VIP 30 días — $99.900 COP* ← _más popular_\n` +
+        `▸ 10 consultas/día · doble duración · *$3.330/día*\n` +
+        `💳 [Activar VIP 30 días](${linkVip30})\n\n` +
+        `👑 *PRO 30 días — $179.900 COP*\n` +
+        `▸ 50 consultas/día + análisis de imágenes en vivo 📸\n` +
+        `💳 [Activar PRO](${linkPro30})\n\n` +
+        `_Pago con Nequi, PSE, Bancolombia o tarjeta. Activo al instante._\n` +
+        `🌎 [También en Whop (USD)](https://whop.com/joined/tipsterai-master-pro/products/tipsterai-master-pro-88/)`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔥 VIP 30 días — $99.900', url: linkVip30 }],
+              [{ text: '⚡ VIP 15 días — $59.900', url: linkVip15 }, { text: '👑 PRO — $179.900', url: linkPro30 }],
+            ]
+          }
+        }
       );
       return { allowed: false };
     }
@@ -4903,14 +4909,24 @@ async function checkAccess(chatId, telegramId, isImage = false) {
       const linkVip30 = wompiLink(WOMPI_LINKS.vip30, telegramId, 'vip30');
       const linkPro30 = wompiLink(WOMPI_LINKS.pro30, telegramId, 'pro30');
       await bot.sendMessage(chatId,
-        `⚠️ *Tu suscripción ${plan.toUpperCase()} ha expirado.*\n\n` +
-        `Tu acceso ha cambiado al plan gratuito.\n\n` +
-        `Para renovar escribe *"ver planes"* o elige aquí:\n\n` +
-        `⚡ *VIP 30 días* — $99.900 COP\n` +
-        `💳 [Renovar con Wompi](${linkVip30})\n\n` +
-        `🏆 *PRO 30 días* — $179.900 COP\n` +
-        `💳 [Renovar con Wompi](${linkPro30})`,
-        { parse_mode: 'Markdown' }
+        `🔄 *Tu suscripción ${plan.toUpperCase()} venció*\n\n` +
+        `Renueva y mantén acceso completo sin interrupciones:\n\n` +
+        `🔥 *VIP 30 días — $99.900 COP* ← _mejor valor_\n` +
+        `▸ 10 consultas/día · solo $3.330/día\n` +
+        `💳 [Renovar VIP 30 días](${linkVip30})\n\n` +
+        `👑 *PRO 30 días — $179.900 COP*\n` +
+        `▸ 50 consultas/día + análisis de imágenes 📸\n` +
+        `💳 [Renovar PRO](${linkPro30})\n\n` +
+        `_Activo al instante tras el pago._`,
+        {
+          parse_mode: 'Markdown',
+          reply_markup: {
+            inline_keyboard: [
+              [{ text: '🔥 Renovar VIP 30 días — $99.900', url: linkVip30 }],
+              [{ text: '👑 Renovar PRO — $179.900', url: linkPro30 }],
+            ]
+          }
+        }
       );
       return { allowed: false };
     }
@@ -4921,15 +4937,18 @@ async function checkAccess(chatId, telegramId, isImage = false) {
     let msg;
     if (plan === 'free') {
       await bot.sendMessage(chatId,
-        `Has usado tu consulta gratuita de hoy 🎯\n\n` +
-        `Vuelve mañana para tu próxima consulta gratis 📅\n\n` +
-        `¿Quieres acceso ilimitado sin esperar? Tenemos planes desde *$59.900 COP*`,
+        `✅ *Consulta de hoy usada*\n\n` +
+        `Vuelve mañana para tu próxima consulta gratis.\n\n` +
+        `O accede ahora mismo sin límites:\n\n` +
+        `⚡ *VIP — desde $59.900 COP*\n` +
+        `▸ 10 consultas/día · picks + análisis + en vivo\n` +
+        `▸ Solo $3.993 pesos por día ☕`,
         {
           parse_mode: 'Markdown',
           reply_markup: {
-            inline_keyboard: [[
-              { text: '🚀 Ver planes disponibles', callback_data: 'show_planes' }
-            ]]
+            inline_keyboard: [
+              [{ text: '🔥 Ver planes y precios', callback_data: 'show_planes' }],
+            ]
           }
         }
       );
@@ -4938,14 +4957,14 @@ async function checkAccess(chatId, telegramId, isImage = false) {
     } else if (plan === 'vip' || plan === 'vip15') {
       const linkPro30 = wompiLink(WOMPI_LINKS.pro30, telegramId, 'pro30');
       msg =
-        `Has alcanzado tus 10 consultas de hoy ⚡\n\n` +
-        `Tus consultas se renuevan a medianoche.\n` +
-        `¿Quieres más? Upgrade a PRO:\n\n` +
-        `🏆 *PRO 30 días* — $179.900 COP\n` +
-        `50 consultas/día + análisis de imágenes en vivo 📸\n\n` +
-        `💳 [Upgrade a PRO con Wompi](${linkPro30})`;
+        `⚡ *Llegaste al límite de hoy (10 consultas)*\n\n` +
+        `Tus consultas se renuevan a medianoche 🕛\n\n` +
+        `¿Necesitas más hoy? Upgrade a PRO:\n\n` +
+        `👑 *PRO 30 días — $179.900 COP*\n` +
+        `▸ 50 consultas/día + análisis de imágenes 📸\n\n` +
+        `💳 [Upgrade a PRO](${linkPro30})`;
     } else {
-      msg = `Has alcanzado tus 50 consultas de hoy.\nTus consultas se renuevan a medianoche. ⏰`;
+      msg = `⏰ *50 consultas alcanzadas hoy*\nTus consultas se renuevan a medianoche. ¡Hasta mañana!`;
     }
     console.log('CHECK ACCESS - resultado: bloqueado por límite diario');
     await bot.sendMessage(chatId, msg, { parse_mode: 'Markdown' });
@@ -5009,21 +5028,28 @@ bot.onText(/\/start/, async (msg) => {
     registerUser(telegramId, username).catch(e => console.error('register on start:', e.message));
   }
 
-  bot.sendMessage(chatId, `⚽ *TipsterAI — Análisis deportivo con IA*
-
-Hola${username ? ' ' + username : ''}. Tengo acceso a estadísticas en tiempo real, historial de enfrentamientos y datos de las principales ligas del mundo.
-
-Dime lo que necesitas:
-
-▸ *"picks de hoy"* → mejores análisis del día (stake 7+, cuota 1.70–2.20)
-▸ *"analiza Real Madrid vs Arsenal"* → análisis profundo del partido
-▸ *"en vivo"* → partidos en curso con picks in-play
-▸ *"estadísticas del Barcelona"* → forma, goles, rendimiento
-▸ 📸 Envía captura de un partido → análisis instantáneo
-
-━━━━━━━━━━━━━━━━━━━
-🆓 Tienes *3 días de prueba gratis* — 1 consulta diaria
-💡 Escribe *"ver planes"* para acceso ilimitado`, { parse_mode: 'Markdown' });
+  bot.sendMessage(chatId,
+    `🤖 *TipsterAI* — Analista de fútbol con IA\n\n` +
+    `Hola${username ? ' *' + username + '*' : ''}. Analizo partidos en segundos con datos reales:\n\n` +
+    `✅ Picks con modelo Poisson + Expected Goals\n` +
+    `✅ Lesionados y sancionados confirmados\n` +
+    `✅ Motivación de equipos (qué se juegan)\n` +
+    `✅ H2H, forma reciente y cuotas de mercado\n` +
+    `✅ Picks en vivo con estadísticas en tiempo real\n\n` +
+    `━━━━━━━━━━━━━━━━━━━\n` +
+    `Prueba ahora — *3 días gratis*, 1 consulta al día:\n\n` +
+    `▸ Escribe *"picks de hoy"*\n` +
+    `▸ O *"analiza [equipo] vs [equipo]"*\n` +
+    `▸ O envía 📸 una captura de partido en vivo`,
+    {
+      parse_mode: 'Markdown',
+      reply_markup: {
+        inline_keyboard: [
+          [{ text: '🎯 Picks de hoy', callback_data: 'picks_hoy' }, { text: '📊 Ver planes', callback_data: 'show_planes' }],
+        ]
+      }
+    }
+  );
 });
 
 // ─── Main message handler ─────────────────────────────────────────────────────
@@ -5216,11 +5242,24 @@ bot.on('callback_query', async (query) => {
   console.log(`[callback_query] chatId=${chatId} data="${data}"`);
 
   try {
-    // Ver planes (botón desde límite diario free)
+    // Picks del día (botón del /start)
+    if (data === 'picks_hoy') {
+      const telegramId = String(query.from?.id || chatId);
+      await bot.editMessageText(
+        `🎯 Buscando los mejores picks de hoy...`,
+        { chat_id: chatId, message_id: query.message.message_id }
+      ).catch(() => {});
+      const access = await checkAccess(chatId, telegramId, false);
+      if (!access.allowed) return;
+      await handlePicksHoy(chatId, false);
+      return;
+    }
+
+    // Ver planes (botón desde límite diario free o /start)
     if (data === 'show_planes') {
       const telegramId = query.from?.id || chatId;
       await bot.editMessageText(
-        `✅ Aquí están los planes disponibles:`,
+        `📊 Planes disponibles:`,
         { chat_id: chatId, message_id: query.message.message_id }
       ).catch(() => {});
       await handleVerPlanes(chatId, telegramId);
@@ -5576,16 +5615,23 @@ app.post('/webhook/wompi', async (req, res) => {
     const puedeImagen  = PLANES[internalPlan]?.puede_imagen || false;
 
     await bot.sendMessage(telegramId,
-      `🎉 *¡Pago confirmado! Bienvenido a ${planNombre}*\n\n` +
-      `Tu suscripción está activa hasta el *${expires}*.\n\n` +
-      `Ahora tienes acceso a:\n` +
-      `• 🎯 *${consultasDia} consultas diarias*\n` +
-      `• 📡 Picks en vivo con estadísticas en tiempo real\n` +
-      `• 🔍 Análisis de cualquier equipo o partido\n` +
-      `• 🏆 Picks del día con análisis estadístico real\n` +
-      (puedeImagen ? `• 📸 Análisis de imágenes en vivo\n` : '') +
-      `\nEscríbeme lo que necesitas para empezar. ¡Buena suerte! ⚽`,
-      { parse_mode: 'Markdown' }
+      `🎉 *¡Pago confirmado! Ya eres ${planNombre}*\n\n` +
+      `Acceso activo hasta el *${expires}* · *${consultasDia} consultas/día*\n\n` +
+      `Esto es lo que puedes hacer ahora:\n\n` +
+      `🎯 *"picks de hoy"* → los mejores picks del día con datos reales\n` +
+      `⚽ *"analiza [equipo] vs [equipo]"* → análisis completo con H2H, forma y cuotas\n` +
+      `📡 *"en vivo"* → picks para partidos que están jugando ahora\n` +
+      (puedeImagen ? `📸 *Envía una captura* de cualquier partido → análisis instantáneo\n\n` : `\n`) +
+      `━━━━━━━━━━━━━━━━━━━\n` +
+      `¿Empezamos? Escribe *"picks de hoy"* ahora mismo 🚀`,
+      {
+        parse_mode: 'Markdown',
+        reply_markup: {
+          inline_keyboard: [
+            [{ text: '🎯 Picks de hoy', callback_data: 'picks_hoy' }],
+          ]
+        }
+      }
     );
 
     res.status(200).json({ received: true });
