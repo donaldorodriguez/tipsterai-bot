@@ -1738,6 +1738,20 @@ function buildPickCandidates(enrichedFixtures) {
     // 'local_only' / 'away_only' = un equipo sin datos → stake máximo 5 por _maxStake
     if (!f._extendedProbs) continue;
 
+    // ── Filtro fin de temporada: ambos equipos sin nada en juego y ≤3 jornadas restantes ──
+    {
+      const motivL = f.motivacionLocal;
+      const motivV = f.motivacionVisitante;
+      const nada_L = motivL?.estado === 'nada_en_juego';
+      const nada_V = motivV?.estado === 'nada_en_juego';
+      const jorL   = motivL?.jornadas_restantes ?? 99;
+      const jorV   = motivV?.jornadas_restantes ?? 99;
+      if (nada_L && nada_V && (jorL <= 3 || jorV <= 3)) {
+        console.log(`⏭️ SKIP fin-temporada (ambos sin nada en juego): ${f.local} vs ${f.visitante}`);
+        continue;
+      }
+    }
+
     const partialStats = f._statsSource !== 'real'; // true si solo uno de los dos tiene stats
     const probs = f._extendedProbs;
     const odds  = f.cuotasReales || {};
@@ -1788,6 +1802,8 @@ function buildPickCandidates(enrichedFixtures) {
       if (!o || o <= 1) continue;                          // sin cuota
       if (o < (m.minOdds || 1.65)) continue;              // cuota muy baja
       if (!m.prob || m.prob < (m.minProb || 0.50)) continue; // prob insuficiente
+      // Under 2.5: cuota real > 1.90 implica mercado asigna <53% de prob → descartamos
+      if (m.key === 'under25' && o > 1.90) continue;
 
       // Tarjetas: no hay modelo propio → solo evaluar si la cuota tiene valor implícito
       // usamos prob heurística directamente (ya definida en cada tarjeta arriba)
@@ -1840,6 +1856,18 @@ function buildPickCandidates(enrichedFixtures) {
         xGLocal:      probs.homeLambda,
         xGVisitante:  probs.awayLambda,
         cornersLambda: probs.cornersLambda,
+        // ── Contexto enriquecido (necesario para el formateador) ──────────────
+        motivacionLocal:     f.motivacionLocal     || null,
+        motivacionVisitante: f.motivacionVisitante || null,
+        posicionLocal:       f.posicionLocal       || null,
+        posicionVisitante:   f.posicionVisitante   || null,
+        jornada:             f.jornada             || null,
+        estadio:             f.estadio             || null,
+        arbitro:             f.arbitro             || null,
+        arbitroStats:        f.arbitroStats        || null,
+        h2h:                 f.h2h                 || null,
+        formaSofaLocal:      f.formaSofaLocal      || null,
+        formaSofaVisitante:  f.formaSofaVisitante  || null,
       });
     }
   }
@@ -1854,38 +1882,50 @@ function buildPickCandidates(enrichedFixtures) {
  */
 function selectDiversePicks(candidates, count = 3) {
   const usedFixtures = new Set();
-  const catCount     = {};
+  const catCount     = {};   // por categoría amplia  (goals, result, btts…)
+  const marketCount  = {};   // por mercado específico (under25, over25, homeWin…)
+  const leagueCount  = {};   // por liga
   const selected     = [];
 
-  // Paso 1: estricto — max 1 por fixture, max 1 por categoría
-  for (const c of candidates) {
-    if (selected.length >= count) break;
-    if (usedFixtures.has(c.fixtureId)) continue;
-    if ((catCount[c.category] || 0) >= 1) continue;
+  /**
+   * Intenta añadir el candidato respetando los límites indicados.
+   * maxPerCat    : máx. picks de la misma categoría amplia
+   * maxPerMarket : máx. picks del mismo mercado exacto
+   * maxPerLeague : máx. picks de la misma liga
+   */
+  function tryAdd(c, maxPerCat, maxPerMarket, maxPerLeague) {
+    if (usedFixtures.has(c.fixtureId))              return false;
+    if ((catCount[c.category]   || 0) >= maxPerCat)    return false;
+    if ((marketCount[c.market]  || 0) >= maxPerMarket) return false;
+    if ((leagueCount[c.liga]    || 0) >= maxPerLeague) return false;
+
     usedFixtures.add(c.fixtureId);
-    catCount[c.category] = (catCount[c.category] || 0) + 1;
+    catCount[c.category]  = (catCount[c.category]  || 0) + 1;
+    marketCount[c.market] = (marketCount[c.market] || 0) + 1;
+    leagueCount[c.liga]   = (leagueCount[c.liga]   || 0) + 1;
     selected.push(c);
+    return true;
   }
 
-  // Paso 2: si faltan, relaja a max 2 por categoría (pero sigue max 1 por fixture)
+  // Paso 1: estricto — max 1/cat, max 1/market, max 2/liga
+  for (const c of candidates) {
+    if (selected.length >= count) break;
+    tryAdd(c, 1, 1, 2);
+  }
+
+  // Paso 2: relaja categoría a 2, pero sigue max 1/market exacto, max 2/liga
   if (selected.length < count) {
     for (const c of candidates) {
       if (selected.length >= count) break;
-      if (usedFixtures.has(c.fixtureId)) continue;
-      if ((catCount[c.category] || 0) >= 2) continue;
-      usedFixtures.add(c.fixtureId);
-      catCount[c.category] = (catCount[c.category] || 0) + 1;
-      selected.push(c);
+      tryAdd(c, 2, 1, 2);
     }
   }
 
-  // Paso 3: si aún faltan, toma cualquier fixture distinto sin límite de categoría
+  // Paso 3: permite hasta 2/market exacto y hasta 3/liga, máx 3/cat
   if (selected.length < count) {
     for (const c of candidates) {
       if (selected.length >= count) break;
-      if (usedFixtures.has(c.fixtureId)) continue;
-      usedFixtures.add(c.fixtureId);
-      selected.push(c);
+      tryAdd(c, 3, 2, 3);
     }
   }
 
