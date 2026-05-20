@@ -2965,6 +2965,14 @@ async function evaluatePickResult(pick, fixture, stats) {
   const sel       = (pick.seleccion || '').toLowerCase();
   const linea     = pick.linea;
 
+  // ── Alerta de gol en vivo: W si cayó al menos 1 gol después de la alerta ──
+  // scoreAtAlert guarda el marcador en el momento de emitir la alerta.
+  // Si el total final es mayor → se metió gol → W.
+  if (pick.source === 'alerta_gol' && pick.scoreAtAlert) {
+    const totalAtAlert = (pick.scoreAtAlert.home ?? 0) + (pick.scoreAtAlert.away ?? 0);
+    return total > totalAtAlert ? 'W' : 'L';
+  }
+
   // BTTS
   if (pick.mercado === 'BTTS_YES') return (goalsHome > 0 && goalsAway > 0) ? 'W' : 'L';
   if (pick.mercado === 'BTTS_NO')  return (goalsHome === 0 || goalsAway === 0) ? 'W' : 'L';
@@ -3023,6 +3031,46 @@ async function evaluatePickResult(pick, fixture, stats) {
   }
 
   return '?'; // can't determine automatically
+}
+
+/**
+ * Guarda los picks de alerta de gol directamente (datos estructurados,
+ * sin pasar por Claude extractor). Se llama al final de handleAlertaGol.
+ * Evaluación: W si cayó al menos 1 gol después del momento de la alerta.
+ */
+function saveAlertaGolPicks(alerts) {
+  if (!alerts || !alerts.length) return;
+  try {
+    const existing = loadPicks();
+    const today    = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+
+    const newPicks = alerts.map(a => ({
+      id:           `ag-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      emitidoAt:    new Date().toISOString(),
+      fecha:        today,
+      source:       'alerta_gol',           // ← distingue de picks_hoy en las stats
+      fixtureId:    a.fixtureId || null,
+      fechaPartido: new Date().toISOString(),
+      liga:         a.liga  || null,
+      local:        a.local,
+      visitante:    a.visitante,
+      mercado:      'OVER_GOALS',           // siempre Over (al menos 1 gol más)
+      seleccion:    a.market,               // texto descriptivo del pick
+      linea:        a.overLine ?? null,     // línea Over en el momento de la alerta
+      scoreAtAlert: { home: a.scoreLocal ?? 0, away: a.scoreVisitante ?? 0 },
+      minutoAlerta: a.elapsed ?? null,
+      cuota:        a.impliedOdds ?? null,
+      stake:        null,
+      esCombinada:  false,
+      resultado:    null,
+      scoresFinal:  null,
+    }));
+
+    persistPicks([...existing, ...newPicks]);
+    console.log(`⚡ ${newPicks.length} alertas de gol guardadas en picks.json`);
+  } catch (e) {
+    console.error('saveAlertaGolPicks error:', e.message);
+  }
 }
 
 async function evaluatePendingPicks() {
@@ -3084,13 +3132,25 @@ async function handleEstadisticas(chatId, period = 'hoy') {
     return bot.sendMessage(chatId, `😔 No hay picks registrados ${periodoLabel}.`);
   }
 
-  const individual  = filtered.filter(p => !p.esCombinada);
-  const evaluados   = filtered.filter(p => ['W', 'L'].includes(p.resultado));
-  const wins        = evaluados.filter(p => p.resultado === 'W').length;
-  const losses      = evaluados.filter(p => p.resultado === 'L').length;
-  const voids       = filtered.filter(p => p.resultado === 'V').length;
-  const pendientes  = filtered.filter(p => p.resultado === null || p.resultado === '?').length;
-  const pct         = evaluados.length ? Math.round((wins / evaluados.length) * 100) : null;
+  // ── Split por fuente ──────────────────────────────────────────────────────
+  const picksNormales  = filtered.filter(p => p.source !== 'alerta_gol' && !p.esCombinada);
+  const picksAlerta    = filtered.filter(p => p.source === 'alerta_gol');
+  const evaluados      = filtered.filter(p => ['W', 'L'].includes(p.resultado));
+  const wins           = evaluados.filter(p => p.resultado === 'W').length;
+  const losses         = evaluados.filter(p => p.resultado === 'L').length;
+  const voids          = filtered.filter(p => p.resultado === 'V').length;
+  const pendientes     = filtered.filter(p => p.resultado === null || p.resultado === '?').length;
+  const pct            = evaluados.length ? Math.round((wins / evaluados.length) * 100) : null;
+
+  // Breakdown picks normales
+  const evNorm   = picksNormales.filter(p => ['W','L'].includes(p.resultado));
+  const wNorm    = evNorm.filter(p => p.resultado === 'W').length;
+  const pctNorm  = evNorm.length ? Math.round(wNorm / evNorm.length * 100) : null;
+
+  // Breakdown alertas de gol
+  const evAlert  = picksAlerta.filter(p => ['W','L'].includes(p.resultado));
+  const wAlert   = evAlert.filter(p => p.resultado === 'W').length;
+  const pctAlert = evAlert.length ? Math.round(wAlert / evAlert.length * 100) : null;
 
   let text = `📊 *RENDIMIENTO — ${label}*\n`;
   text += `━━━━━━━━━━━━━━━━━━━\n`;
@@ -3101,15 +3161,30 @@ async function handleEstadisticas(chatId, period = 'hoy') {
   text += `━━━━━━━━━━━━━━━━━━━\n`;
   if (pct !== null) {
     const icon = pct >= 60 ? '🔥' : pct >= 40 ? '📈' : '📉';
-    text += `${icon} *Aciertos: ${pct}% (${wins}/${evaluados.length})*\n\n`;
+    text += `${icon} *Aciertos global: ${pct}% (${wins}/${evaluados.length})*\n`;
   }
+  // Desglose por tipo (solo si hay datos de ambos)
+  if (evNorm.length > 0 || evAlert.length > 0) {
+    text += `\n*Desglose por tipo:*\n`;
+    if (evNorm.length > 0) {
+      const iconN = pctNorm >= 60 ? '🔥' : pctNorm >= 40 ? '📈' : '📉';
+      text += `${iconN} Picks del día: *${pctNorm}%* (${wNorm}/${evNorm.length})\n`;
+    }
+    if (evAlert.length > 0) {
+      const iconA = pctAlert >= 60 ? '⚡🔥' : pctAlert >= 40 ? '⚡📈' : '⚡📉';
+      text += `${iconA} Alertas gol en vivo: *${pctAlert}%* (${wAlert}/${evAlert.length})\n`;
+    }
+  }
+  text += `\n`;
 
   text += `*Detalle de picks:*\n`;
   for (const p of filtered) {
     const icon = p.resultado === 'W' ? '✅' : p.resultado === 'L' ? '❌' : p.resultado === 'V' ? '↩️' : '⏳';
     const score = p.scoresFinal ? ` *(${p.scoresFinal.home}-${p.scoresFinal.away})*` : '';
     const combo = p.esCombinada ? ' 🔗' : '';
-    text += `${icon}${combo} ${p.local} vs ${p.visitante}${score}\n`;
+    const srcTag = p.source === 'alerta_gol' ? ' ⚡' : '';
+    const minTag = p.minutoAlerta ? ` [min ${p.minutoAlerta}]` : '';
+    text += `${icon}${combo}${srcTag} ${p.local} vs ${p.visitante}${score}${minTag}\n`;
     text += `   └ ${p.seleccion}`;
     if (p.cuota) text += ` @ ${p.cuota}`;
     if (p.stake) text += ` | STAKE ${p.stake}/10`;
@@ -4226,6 +4301,9 @@ async function handleAlertaGol(chatId) {
   );
 
   await sendLong(chatId, `⚡ *ALERTAS DE GOL EN VIVO*\n\n${analysis}`, { parse_mode: 'Markdown' });
+
+  // Guardar picks para tracking de aciertos
+  saveAlertaGolPicks(top);
 }
 
 async function handleEspecifica(chatId, intent) {
