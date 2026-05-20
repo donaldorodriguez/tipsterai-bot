@@ -2965,11 +2965,18 @@ async function evaluatePickResult(pick, fixture, stats) {
   const sel       = (pick.seleccion || '').toLowerCase();
   const linea     = pick.linea;
 
-  // ── Alerta de gol en vivo: W si cayó al menos 1 gol después de la alerta ──
-  // scoreAtAlert guarda el marcador en el momento de emitir la alerta.
-  // Si el total final es mayor → se metió gol → W.
+  // ── Alerta de gol en vivo ────────────────────────────────────────────────
   if (pick.source === 'alerta_gol' && pick.scoreAtAlert) {
     const totalAtAlert = (pick.scoreAtAlert.home ?? 0) + (pick.scoreAtAlert.away ?? 0);
+
+    // Solo se puede evaluar automáticamente si el pick no es equipo-específico.
+    // 'proximo_gol'  → "Equipo X anota el próximo gol": el marcador final no
+    //                  dice quién anotó primero → no evaluable.
+    // 'gol_equipo_2T' → "Equipo X empata": ídem, requiere secuencia de goles.
+    const noEvaluable = ['proximo_gol', 'gol_equipo_2T'].includes(pick.tipoAlerta);
+    if (noEvaluable) return '?';
+
+    // over_general / gol_urgente: W si cayó al menos 1 gol después de la alerta.
     return total > totalAtAlert ? 'W' : 'L';
   }
 
@@ -3058,6 +3065,7 @@ function saveAlertaGolPicks(alerts) {
       seleccion:    a.market,               // texto descriptivo del pick
       linea:        a.overLine ?? null,     // línea Over en el momento de la alerta
       scoreAtAlert: { home: a.scoreLocal ?? 0, away: a.scoreVisitante ?? 0 },
+      tipoAlerta:   a.tipo   ?? null,   // 'over_general'|'gol_urgente'|'proximo_gol'|'gol_equipo_2T'
       minutoAlerta: a.elapsed ?? null,
       cuota:        a.impliedOdds ?? null,
       stake:        null,
