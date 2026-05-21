@@ -269,42 +269,92 @@ function findLeagueId(name) {
 // ─── League priority for sorting ─────────────────────────────────────────────
 
 const LEAGUE_PRIORITY = {
-  1:105,                       // World Cup — máxima prioridad
-  6:98, 32:97,                 // Eliminatorias mundialistas
-  2:100,3:95,848:90,
-  10:89,                       // Amistosos internacionales — entre UCL y ligas top
-  39:88,140:87,135:86,78:85,61:84,
-  11:80,9:78,
-  88:70,94:69,207:68,144:67,169:66,
-  71:65,262:64,128:63,239:62,253:61,
-  40:55,141:54,136:53,79:52,62:51,
-  240:45,72:44,66:43,129:42,263:41,89:40,
-  // Ligas europeas medianas
-  207:42, // Switzerland
-  210:41, // Croatia
-  218:40, // Austria
-  119:39, // Denmark
-  235:38, // Russia
-  333:37, // Ukraine
-  103:36, // Norway
-  106:35, // Poland
-  113:34, // Sweden
-  283:33, // Romania
-  286:32, // Serbia
-  345:31, // Czech
-  172:30, // Bulgaria
-  // Otros
-  671:25, // Azerbaijan
-  // Asia / Oriente Medio / Africa
-  307:28, // Saudi
-  292:27, // K League
-  233:26, // Egypt
-  318:24, // Cyprus
+  // ── TIER 1: Competiciones internacionales top (prioridad 95–105) ─────────────
+  1:  105,  // World Cup
+  6:   98,  // WC Qualifiers
+  32:  97,  // Eliminatorias CONMEBOL
+  2:  100,  // Champions League
+  3:   95,  // Europa League
+  848: 90,  // Conference League
+  // ── TIER 2: Ligas top (prioridad 80–89) ──────────────────────────────────────
+  39:  88,  // Premier League
+  140: 87,  // LaLiga
+  135: 86,  // Serie A
+  78:  85,  // Bundesliga
+  61:  84,  // Ligue 1
+  11:  83,  // Copa Libertadores ← subida de 80 a 83 (partido de alto nivel)
+  9:   82,  // Copa Sudamericana ← subida de 78 a 82
+  // ── TIER 3: Ligas de primera importancia regional (prioridad 60–79) ──────────
+  88:  75,  // Eredivisie
+  144: 73,  // Jupiler Pro League (Bélgica)
+  207: 68,  // Swiss Super League
+  94:  67,  // Primeira Liga
+  203: 66,  // Süper Lig (Turquía)
+  169: 65,  // Jupiler Pro (alt ID)
+  71:  65,  // Brasileirao
+  262: 64,  // Liga MX
+  179: 63,  // Scottish Premier
+  253: 62,  // MLS
+  // ── TIER 4: Segundas divisiones europeas importantes (prioridad 50–59) ────────
+  40:  58,  // Championship
+  141: 56,  // LaLiga2
+  136: 55,  // Serie B
+  79:  54,  // 2.Bundesliga
+  62:  53,  // Ligue 2
+  239: 52,  // Liga BetPlay Colombia
+  210: 50,  // HNL (Croacia)
+  218: 50,  // Bundesliga Austria
+  // ── TIER 5: Ligas europeas medianas (prioridad 35–49) ────────────────────────
+  119: 45,  // Superliga Dinamarca
+  103: 44,  // Eliteserien Noruega
+  113: 43,  // Allsvenskan Suecia
+  235: 42,  // Premier Liga Rusia
+  333: 41,  // Premier League Ucrania
+  106: 40,  // Ekstraklasa Polonia
+  283: 38,  // Liga I Rumania
+  286: 37,  // Super Liga Serbia
+  345: 36,  // Fortuna Liga Czech
+  172: 35,  // First League Bulgaria
+  89:  35,  // Eerste Divisie NL
+  95:  35,  // Segunda Liga Portugal
+  180: 34,  // Scottish Championship
+  // ── TIER 6: Ligas de cobertura limitada (prioridad ≤30) ─────────────────────
+  128: 30,  // Liga Argentina
+  72:  28,  // Brasileirao B
+  129: 25,  // Primera B Argentina
+  307: 28,  // Saudi Pro League
+  292: 27,  // K League
+  233: 26,  // Egyptian Premier
+  671: 25,  // Premyer Liqa Azerbaijan
+  98:  24,  // J League
+  318: 23,  // First Division Cyprus
+  // ── TIER 7: Ligas secundarias latinoamericanas (prioridad ≤20) ───────────────
+  // Estas ligas tienen cobertura de datos muy baja en API-Football.
+  // Rara vez producen picks confiables — están en PICKS_EXCLUDE_LEAGUES.
+  240: 15,  // Torneo Águila (Colombia segunda)
+  66:  14,  // Liga Colombia B
+  263: 13,  // Ascenso MX
+  // Internacionales menores
+  4:   50,  // Euro Championship
+  5:   48,  // Nations League
+  8:   35,  // Copa Africa
+  7:   34,  // AFC Asian Cup
+  29:  30,  // Nations League Play
+  480: 50,  // Copa America
+  10:  20,  // Amistosos internacionales
 };
 
 // Ligas excluidas de picks automáticos (picks de hoy, picks en vivo)
-// El bot sigue respondiendo si el usuario pregunta por estas ligas específicamente
-const PICKS_EXCLUDE_LEAGUES = new Set([78, 94, 128]); // Bundesliga, Primeira Liga, Liga Argentina
+// El bot sigue respondiendo si el usuario pregunta por estas ligas específicamente.
+// Criterio de exclusión: datos API muy escasos → picks inventados.
+const PICKS_EXCLUDE_LEAGUES = new Set([
+  94,   // Primeira Liga (cobertura de cuotas muy baja)
+  128,  // Liga Argentina (datos inconsistentes)
+  240,  // Torneo Águila — Colombia segunda división (sin datos fiables)
+  66,   // Liga Colombia B (sin datos fiables)
+  263,  // Ascenso MX (sin datos fiables)
+  129,  // Primera B Argentina (sin datos fiables)
+]);
 
 // Buffer de cuota que se suma a la cuota real al mostrarla al usuario.
 // Representa el margen de seguridad: si la cuota cayó por debajo de la real
@@ -1943,11 +1993,23 @@ function buildPickCandidates(enrichedFixtures) {
       // Tarjetas: no hay modelo propio → solo evaluar si la cuota tiene valor implícito
       // usamos prob heurística directamente (ya definida en cada tarjeta arriba)
 
-      const ev = calcEV(m.prob, o);
-      if (ev === null || ev < -5) continue;
+      const evRaw = calcEV(m.prob, o);
+      if (evRaw === null || evRaw < -5) continue;
 
       // DNB absolutamente prohibido
       if (m.key.includes('dnb')) continue;
+
+      // ── Tier multiplier de liga: penaliza ligas de baja cobertura ────────────
+      // Impide que un partido de segunda división colombiana con EV "alto"
+      // (por datos incompletos) compita con UCL o Premier League.
+      const leagueP   = LEAGUE_PRIORITY[f.leagueId] || 20;
+      const tierMult  = leagueP >= 80 ? 1.15   // Tier 1-2: UCL, Libertadores, ligas top
+                      : leagueP >= 60 ? 1.05   // Tier 3: Eredivisie, Belgian, Brasileirao
+                      : leagueP >= 45 ? 1.00   // Tier 4: Championship, LaLiga2, Colombia A
+                      : leagueP >= 30 ? 0.90   // Tier 5: Ligas medianas europeas
+                      :                0.75;   // Tier 6-7: Ligas sin datos confiables
+      const ev = +(evRaw * tierMult).toFixed(2);
+      if (ev < -5) continue;  // re-verificar después del ajuste
 
       // Stake basado en EV (ventaja real sobre el mercado).
       // Las casas tienen márgenes del 5-8% → EV > 5% ya indica valor real.
@@ -3490,6 +3552,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       fixtureId:      f.fixtureId,
       homeId:         f.homeId,    // ← necesario para matching de lesionados
       awayId:         f.awayId,    // ← necesario para matching de lesionados
+      leagueId:       f.leagueId,  // ← necesario para tier multiplier en buildPickCandidates
       liga:           f.leagueName,
       country:        f.country,
       local:          f.homeTeam,
@@ -3571,19 +3634,22 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV por mercado...`);
 
   // ── Filtro de calidad ANTES del motor ────────────────────────────────────
-  // Sin datos reales de ambos equipos = pick inventado = DESCARTADO
+  // REGLA: necesitamos datos de AMBOS equipos. Sin datos de uno de los dos,
+  // el modelo Poisson usa defaults genéricos → pick inventado → DESCARTADO.
   const enrichedFiltrado = enriched.filter(e => {
     if (e._statsSource === 'fallback') {
       console.log(`❌ DESCARTADO (sin stats de ningún equipo): ${e.local} vs ${e.visitante}`);
       return false;
     }
-    return true;
-  });
-  // Picks con solo un equipo con datos → stake máximo 5 (alta incertidumbre)
-  enrichedFiltrado.forEach(e => {
-    if (e._statsSource === 'local_only' || e._statsSource === 'away_only') {
-      e._maxStake = 5;
+    if (e._statsSource === 'local_only') {
+      console.log(`❌ DESCARTADO (sin stats del local — Poisson inválido): ${e.local} vs ${e.visitante}`);
+      return false;
     }
+    if (e._statsSource === 'away_only') {
+      console.log(`❌ DESCARTADO (sin stats del visitante — Poisson inválido): ${e.local} vs ${e.visitante}`);
+      return false;
+    }
+    return true;
   });
 
   // ── Debug logging detallado ───────────────────────────────────────────────
