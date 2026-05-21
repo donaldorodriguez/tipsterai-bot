@@ -364,21 +364,46 @@ const ODDS_DISPLAY_BUFFER = 0.15;
 
 // Tasas históricas base de Over 2.5 y BTTS por liga
 // Fuente: estadísticas 2023-2025, usadas para calibrar probabilidades
+// Base rates históricas por liga (temporadas 2023-2025, promedio ponderado)
+// over25: % partidos con más de 2.5 goles | btts: % BTTS Sí
+// cards: promedio de tarjetas amarillas por partido (ambos equipos)
+// corners: promedio de corners totales por partido
 const LEAGUE_BASE_RATES = {
-  39:  { over25: 56, btts: 61, name: 'Premier League' },    // alta
-  140: { over25: 52, btts: 55, name: 'LaLiga' },            // media
-  135: { over25: 54, btts: 57, name: 'Serie A' },           // media
-  78:  { over25: 62, btts: 60, name: 'Bundesliga' },        // alta (pero 0% WR)
-  61:  { over25: 53, btts: 54, name: 'Ligue 1' },           // media-baja
-  2:   { over25: 61, btts: 63, name: 'Champions League' },  // alta
-  3:   { over25: 58, btts: 59, name: 'Europa League' },     // media-alta
-  71:  { over25: 55, btts: 58, name: 'Brasileirao' },       // media
-  94:  { over25: 50, btts: 53, name: 'Primeira Liga' },     // baja (0% WR)
-  128: { over25: 48, btts: 50, name: 'Liga Argentina' },    // baja (0% WR)
-  262: { over25: 54, btts: 56, name: 'Liga MX' },
-  239: { over25: 53, btts: 55, name: 'Liga BetPlay' },
-  207: { over25: 59, btts: 60, name: 'Super Lig' },
-  88:  { over25: 57, btts: 61, name: 'Eredivisie' },
+  // ── Ligas top europeas ────────────────────────────────────────────────────
+  39:  { over25: 56, btts: 61, cards: 3.8, corners: 10.2, name: 'Premier League' },
+  140: { over25: 52, btts: 55, cards: 4.9, corners:  9.8, name: 'LaLiga' },
+  135: { over25: 54, btts: 57, cards: 4.6, corners:  9.6, name: 'Serie A' },
+  78:  { over25: 62, btts: 60, cards: 3.6, corners: 10.1, name: 'Bundesliga' },
+  61:  { over25: 53, btts: 54, cards: 4.2, corners:  9.7, name: 'Ligue 1' },
+  // ── Copas europeas ─────────────────────────────────────────────────────────
+  2:   { over25: 61, btts: 63, cards: 3.5, corners: 10.5, name: 'Champions League' },
+  3:   { over25: 58, btts: 59, cards: 3.7, corners: 10.0, name: 'Europa League' },
+  848: { over25: 57, btts: 58, cards: 3.6, corners:  9.8, name: 'Conference League' },
+  // ── Otras europeas ─────────────────────────────────────────────────────────
+  88:  { over25: 57, btts: 61, cards: 3.4, corners: 10.4, name: 'Eredivisie' },
+  94:  { over25: 50, btts: 53, cards: 4.3, corners:  9.2, name: 'Primeira Liga' },
+  144: { over25: 58, btts: 60, cards: 3.5, corners: 10.0, name: 'Jupiler Pro League' },
+  203: { over25: 59, btts: 60, cards: 5.2, corners:  9.9, name: 'Süper Lig' },
+  207: { over25: 57, btts: 58, cards: 3.8, corners:  9.7, name: 'Swiss Super League' },
+  179: { over25: 55, btts: 57, cards: 3.9, corners:  9.5, name: 'Scottish Premier' },
+  119: { over25: 55, btts: 57, cards: 3.7, corners:  9.6, name: 'Superliga DK' },
+  40:  { over25: 55, btts: 59, cards: 3.9, corners: 10.3, name: 'Championship' },
+  141: { over25: 50, btts: 53, cards: 4.8, corners:  9.5, name: 'LaLiga2' },
+  136: { over25: 51, btts: 53, cards: 4.5, corners:  9.3, name: 'Serie B' },
+  79:  { over25: 58, btts: 57, cards: 3.8, corners: 10.0, name: '2. Bundesliga' },
+  62:  { over25: 52, btts: 54, cards: 4.0, corners:  9.4, name: 'Ligue 2' },
+  // ── Sudamérica ─────────────────────────────────────────────────────────────
+  11:  { over25: 54, btts: 55, cards: 4.8, corners:  9.3, name: 'Copa Libertadores' },
+  9:   { over25: 53, btts: 54, cards: 4.7, corners:  9.1, name: 'Copa Sudamericana' },
+  71:  { over25: 55, btts: 58, cards: 4.5, corners:  9.0, name: 'Brasileirao' },
+  262: { over25: 54, btts: 56, cards: 4.3, corners:  9.2, name: 'Liga MX' },
+  239: { over25: 53, btts: 55, cards: 4.9, corners:  8.8, name: 'Liga BetPlay' },
+  253: { over25: 54, btts: 57, cards: 3.8, corners: 10.1, name: 'MLS' },
+  128: { over25: 48, btts: 50, cards: 5.1, corners:  8.7, name: 'Liga Argentina' },
+  // ── Asia / Oriente Medio ──────────────────────────────────────────────────
+  307: { over25: 57, btts: 60, cards: 3.9, corners:  9.8, name: 'Saudi Pro League' },
+  98:  { over25: 55, btts: 58, cards: 3.2, corners: 10.2, name: 'J League' },
+  292: { over25: 53, btts: 56, cards: 3.5, corners:  9.6, name: 'K League 1' },
 };
 
 // ─── Plans config ─────────────────────────────────────────────────────────────
@@ -1480,19 +1505,153 @@ async function getLiveOdds(fixtureId) {
   } catch { return null; }
 }
 
+/**
+ * Obtiene los últimos N partidos de un equipo para calcular días de descanso.
+ * Retorna la fecha del último partido jugado.
+ */
+async function getLastMatchDate(teamId) {
+  try {
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    const from = new Date();
+    from.setDate(from.getDate() - 30);
+    const { data } = await API.get('/fixtures', {
+      params: {
+        team: teamId,
+        from: from.toISOString().split('T')[0],
+        to:   yesterday.toISOString().split('T')[0],
+        last: 1,
+      },
+    });
+    const last = data.response?.[0];
+    return last?.fixture?.date ? new Date(last.fixture.date) : null;
+  } catch { return null; }
+}
+
+/**
+ * Construye contexto rico del partido: ronda/competición, lo que se juega,
+ * cansancio, sede, urgencia táctica. Todo extraído de datos ya disponibles.
+ * NO hace llamadas extra — usa los datos del fixture y standings ya fetcheados.
+ */
+function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTeams, leagueId, homeLastMatch, awayLastMatch }) {
+  const ctx = {};
+
+  // ── 1. Días de descanso (cansancio) ─────────────────────────────────────────
+  const today = new Date();
+  if (homeLastMatch) {
+    const days = Math.round((today - homeLastMatch) / 86400000);
+    ctx.cansancioLocal = days <= 3 ? `⚠️ Solo ${days} días de descanso (posible rotación)` : `${days} días de descanso`;
+    ctx.diasDescansoLocal = days;
+  }
+  if (awayLastMatch) {
+    const days = Math.round((today - awayLastMatch) / 86400000);
+    ctx.cansancioVisitante = days <= 3 ? `⚠️ Solo ${days} días de descanso (posible rotación)` : `${days} días de descanso`;
+    ctx.diasDescansoVisitante = days;
+  }
+
+  // ── 2. Contexto de ronda/competición ─────────────────────────────────────────
+  if (round) {
+    // Champions/Europa — fase y número de partidos
+    const roundLower = round.toLowerCase();
+    if (/group stage/i.test(round)) {
+      const match = round.match(/(\d+)/);
+      const matchday = match ? parseInt(match[1]) : null;
+      // Copa Libertadores y Sudamericana tienen 6 jornadas de grupo
+      const totalGroupGames = [11, 9].includes(leagueId) ? 6 : 6;
+      if (matchday) {
+        if (matchday === totalGroupGames) {
+          ctx.contextoCopa = `🔥 ÚLTIMA JORNADA de fase de grupos — cada punto puede cambiar la clasificación`;
+          ctx.urgencia = 'maxima';
+        } else if (matchday === totalGroupGames - 1) {
+          ctx.contextoCopa = `⚡ Penúltima jornada de grupos — partido decisivo para la clasificación`;
+          ctx.urgencia = 'alta';
+        }
+      }
+    } else if (/round of 16|octavos/i.test(round)) {
+      ctx.contextoCopa = '🏆 Octavos de final — eliminación directa';
+    } else if (/quarter.?final|cuartos/i.test(round)) {
+      ctx.contextoCopa = '🏆 Cuartos de final — eliminación directa';
+    } else if (/semi.?final|semis/i.test(round)) {
+      ctx.contextoCopa = '🏆 Semifinal — a un partido de la final';
+    } else if (/\bfinal\b/i.test(round)) {
+      ctx.contextoCopa = '🏆 FINAL — partido único, todo en juego';
+      ctx.urgencia = 'maxima';
+    } else if (/2nd leg|vuelta|segundo partido/i.test(round)) {
+      ctx.contextoCopa = '⚽ PARTIDO DE VUELTA — considera el marcador del partido de ida';
+      ctx.urgencia = 'alta';
+    }
+
+    // Ligas de grupo con nombre explícito (Libertadores, Sudamericana, etc.)
+    if (/cuadrangular|cuadrang/i.test(round)) {
+      const matchday = round.match(/(\d+)/)?.[1];
+      ctx.contextoCopa = `🇨🇴 CUADRANGULAR — fase semifinal del torneo colombiano${matchday ? ` (Fecha ${matchday})` : ''}`;
+      ctx.formatoEspecial = 'cuadrangular_colombia';
+    }
+
+    // Temporada regular: detectar jornada y urgencia
+    const jornada = round.match(/(?:regular season|matchday|jornada|semana|fecha)\s*[-–]?\s*(\d+)/i);
+    if (jornada) {
+      const n = parseInt(jornada[1]);
+      ctx.jornadaNumero = n;
+      // Inferir jornadas totales según liga
+      const totalesLiga = {
+        39: 38, 140: 38, 135: 38, 78: 34, 61: 34,
+        88: 34, 71: 38, 239: 20, 262: 17, 253: 34,
+        144: 30, 94: 34, 11: 6, 9: 6,
+      };
+      const total = totalesLiga[leagueId] || 38;
+      const restantes = total - n;
+      ctx.jornadasRestantes = restantes;
+      if (restantes <= 0) ctx.contextoJornada = '🏁 ÚLTIMA JORNADA de la temporada regular';
+      else if (restantes <= 3) ctx.contextoJornada = `🔥 Últimas ${restantes} jornadas — definición de temporada en juego`;
+      else if (restantes <= 6) ctx.contextoJornada = `Recta final: quedan ${restantes} jornadas`;
+    }
+  }
+
+  // ── 3. Urgencia táctica por posición en tabla ─────────────────────────────────
+  const stakeTexts = [];
+  if (homeStanding && totalTeams) {
+    const pos = homeStanding.rank;
+    const pts = homeStanding.points;
+    const motiv = getTeamMotivation(homeStanding, totalTeams);
+
+    if (motiv.estado === 'titulo') stakeTexts.push(`🥇 ${homeStanding.team || 'Local'} PELEA EL TÍTULO (${pos}º, ${pts} pts)`);
+    else if (motiv.estado === 'champions') stakeTexts.push(`🔵 ${homeStanding.team || 'Local'} lucha por zona Champions/Libertadores (${pos}º)`);
+    else if (motiv.estado === 'lucha_descenso') stakeTexts.push(`🔴 ${homeStanding.team || 'Local'} EN ZONA DE DESCENSO (${pos}º) — necesita puntos`);
+    else if (motiv.estado === 'riesgo_descenso') stakeTexts.push(`🟠 ${homeStanding.team || 'Local'} al borde del descenso (${pos}º)`);
+    else if (motiv.estado === 'nada_en_juego') stakeTexts.push(`⚪ ${homeStanding.team || 'Local'} sin nada en juego (${pos}º)`);
+  }
+  if (awayStanding && totalTeams) {
+    const pos = awayStanding.rank;
+    const motiv = getTeamMotivation(awayStanding, totalTeams);
+    if (motiv.estado === 'titulo') stakeTexts.push(`🥇 ${awayStanding.team || 'Visitante'} PELEA EL TÍTULO (${pos}º)`);
+    else if (motiv.estado === 'lucha_descenso') stakeTexts.push(`🔴 ${awayStanding.team || 'Visitante'} EN ZONA DE DESCENSO (${pos}º)`);
+    else if (motiv.estado === 'nada_en_juego') stakeTexts.push(`⚪ ${awayStanding.team || 'Visitante'} sin nada en juego (${pos}º)`);
+  }
+  if (stakeTexts.length > 0) ctx.loQueSeJuega = stakeTexts;
+
+  return ctx;
+}
+
 async function getApiPrediction(fixtureId) {
   try {
     const { data } = await API.get('/predictions', { params: { fixture: fixtureId } });
     const pred = data.response?.[0];
     if (!pred) return null;
+    // goals_home / goals_away son los xG esperados del partido calculados por la API
+    // (más precisos que el promedio de temporada porque ajustan por rival, forma y contexto)
+    const goalsHome = parseFloat(pred.predictions?.goals?.home);
+    const goalsAway = parseFloat(pred.predictions?.goals?.away);
     return {
-      winner: pred.predictions?.winner?.name,
+      winner:        pred.predictions?.winner?.name,
       winnerComment: pred.predictions?.winner?.comment,
-      under_over: pred.predictions?.under_over,
-      goals_home: pred.predictions?.goals?.home,
-      goals_away: pred.predictions?.goals?.away,
-      advice: pred.predictions?.advice,
-      percent: pred.predictions?.percent,
+      under_over:    pred.predictions?.under_over,
+      goals_home:    !isNaN(goalsHome) ? goalsHome : null,
+      goals_away:    !isNaN(goalsAway) ? goalsAway : null,
+      advice:        pred.predictions?.advice,
+      percent:       pred.predictions?.percent,
+      // Comparación directa H2H de fortaleza
+      h2h_home:      pred.h2h,
     };
   } catch { return null; }
 }
@@ -1968,10 +2127,21 @@ function buildPickCandidates(enrichedFixtures) {
       { key: 'cornersOver105', label: 'Corners Over 10.5',  prob: probs.cornersOver105 / 100, oddsVal: odds.cornersOver105, cat: 'corners', minOdds: 1.55, minProb: 0.40 },
       { key: 'cornersUnder85', label: 'Corners Under 8.5',  prob: 1 - probs.cornersOver75 / 100, oddsVal: odds.cornersUnder85, cat: 'corners', minOdds: 1.45, minProb: 0.50 },
       { key: 'cornersUnder95', label: 'Corners Under 9.5',  prob: 1 - probs.cornersOver85 / 100, oddsVal: odds.cornersUnder95, cat: 'corners', minOdds: 1.45, minProb: 0.50 },
-      // ── Tarjetas FT
-      { key: 'cardsOver25',  label: 'Tarjetas Over 2.5',   prob: 0.72, oddsVal: odds.cardsOver25,  cat: 'cards', minOdds: 1.45, minProb: 0.60 },
-      { key: 'cardsOver35',  label: 'Tarjetas Over 3.5',   prob: 0.55, oddsVal: odds.cardsOver35,  cat: 'cards', minOdds: 1.45, minProb: 0.48 },
-      { key: 'cardsOver45',  label: 'Tarjetas Over 4.5',   prob: 0.38, oddsVal: odds.cardsOver45,  cat: 'cards', minOdds: 1.65, minProb: 0.42 },
+      // ── Tarjetas FT — Poisson real basado en datos de equipo + árbitro + liga ──
+      // Lambda: (amarillas_local + amarillas_visitante) ajustado por perfil del árbitro
+      // Si no hay datos de equipo → usar base rate de la liga → más fiable que 0.72 fijo
+      {
+        _cardsBlock: true,  // sentinel para el cálculo dinámico abajo
+        key: 'cardsOver25', label: 'Tarjetas Over 2.5', oddsVal: odds.cardsOver25, cat: 'cards', minOdds: 1.45, minProb: 0.52,
+      },
+      {
+        _cardsBlock: true,
+        key: 'cardsOver35', label: 'Tarjetas Over 3.5', oddsVal: odds.cardsOver35, cat: 'cards', minOdds: 1.45, minProb: 0.42,
+      },
+      {
+        _cardsBlock: true,
+        key: 'cardsOver45', label: 'Tarjetas Over 4.5', oddsVal: odds.cardsOver45, cat: 'cards', minOdds: 1.65, minProb: 0.35,
+      },
       // ── Doble oportunidad (DC)
       { key: 'dc_1X', label: 'Doble Oportunidad 1X (Local o Empate)',    prob: (probs.homeWin + probs.draw) / 100, oddsVal: odds.dc_1X, cat: 'dc', minOdds: 1.45, minProb: 0.65 },
       { key: 'dc_X2', label: 'Doble Oportunidad X2 (Empate o Visitante)', prob: (probs.draw + probs.awayWin) / 100, oddsVal: odds.dc_X2, cat: 'dc', minOdds: 1.45, minProb: 0.65 },
@@ -1982,10 +2152,44 @@ function buildPickCandidates(enrichedFixtures) {
       { key: 'goalsBothHalves', label: 'Goles en Ambas Mitades', prob: probs.btts * 0.75 / 100, oddsVal: odds.goalsBothHalves, cat: 'both_halves', minOdds: 1.55, minProb: 0.45 },
     ];
 
+    // ── Cálculo de lambda real para tarjetas (Poisson) ──────────────────────────
+    // Usa amarillasPorPartido de cada equipo + perfil árbitro + base rate de liga
+    const baseRates = LEAGUE_BASE_RATES[f.leagueId] || null;
+    const homeCardsAvg  = parseFloat(f.statsLocal?.amarillasPorPartido)     || null;
+    const awayCardsAvg  = parseFloat(f.statsVisitante?.amarillasPorPartido) || null;
+    const refCardsAvg   = parseFloat(f.arbitroStats?.amarillas_por_partido) || null;
+    const leagueCardsAvg = baseRates?.cards || 4.0;  // promedio de la liga o 4.0 global
+
+    // Lambda de tarjetas: promedio de ambos equipos, ajustado por árbitro si disponible
+    let cardsLambda;
+    if (homeCardsAvg != null && awayCardsAvg != null) {
+      // Datos reales de equipo disponibles
+      const teamAvg = homeCardsAvg + awayCardsAvg;
+      // Árbitro: normalizar vs promedio liga → factor de corrección
+      const refFactor = refCardsAvg != null ? refCardsAvg / leagueCardsAvg : 1.0;
+      cardsLambda = teamAvg * Math.max(0.60, Math.min(1.60, refFactor));
+    } else {
+      // Sin datos de equipo → usar base rate de liga ajustada por árbitro
+      const refFactor = refCardsAvg != null ? refCardsAvg / leagueCardsAvg : 1.0;
+      cardsLambda = leagueCardsAvg * Math.max(0.60, Math.min(1.60, refFactor));
+    }
+    // P(X >= N) usando Poisson con lambda = cardsLambda
+    const pCardsOver25 = poissonCDF_above(cardsLambda, 3);  // >= 3 tarjetas
+    const pCardsOver35 = poissonCDF_above(cardsLambda, 4);  // >= 4 tarjetas
+    const pCardsOver45 = poissonCDF_above(cardsLambda, 5);  // >= 5 tarjetas
+
     for (const m of markets) {
       const o = m.oddsVal;
       if (!o || o <= 1) continue;                          // sin cuota
       if (o < (m.minOdds || 1.65)) continue;              // cuota muy baja
+
+      // ── Inyectar prob real de tarjetas ───────────────────────────────────────
+      if (m._cardsBlock) {
+        m.prob = m.key === 'cardsOver25' ? pCardsOver25
+               : m.key === 'cardsOver35' ? pCardsOver35
+               :                           pCardsOver45;
+      }
+
       if (!m.prob || m.prob < (m.minProb || 0.50)) continue; // prob insuficiente
       // Under 2.5: cuota real > 1.90 implica mercado asigna <53% de prob → descartamos
       if (m.key === 'under25' && o > 1.90) continue;
@@ -2759,73 +2963,116 @@ INSTRUCCIONES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
 // ─── Formatter-only prompt ────────────────────────────────────────────────────
 // Usado cuando los picks ya fueron seleccionados matemáticamente.
 // El LLM SOLO formatea — no selecciona, no descarta, no agrega picks.
-const PICKS_HOY_FORMATTER_SYSTEM = `Eres el mejor tipster profesional del mundo. El motor matemático pre-seleccionó picks con Poisson+EV. Tu trabajo es ÚNICAMENTE FORMATEAR — NO descartas, NO eliminas, NO cambias ningún pick. Publica todos los picks que recibes exactamente como vienen.
+const PICKS_HOY_FORMATTER_SYSTEM = `Eres el mejor analista de fútbol del mundo — el nivel de Opta, Stats Perform y las mejores casas de análisis deportivo. No eres un "tipster" que genera picks vacíos: eres un analista que RAZONA, CONTEXTUALIZA y EXPLICA POR QUÉ cada partido tiene valor.
 
-CONTEXTO ADICIONAL — úsalo solo para enriquecer el razonamiento, NUNCA para descartar:
+El motor matemático Poisson+EV ya seleccionó los picks. Tu misión: convertir esos datos fríos en el análisis más inteligente y útil que el usuario pueda leer. Cada análisis debe sentirse como recibir un informe de un scout profesional.
 
-1. MOTIVACIÓN: Si motivacionLocal o motivacionVisitante indica "nada_en_juego", menciónalo en el campo Riesgo. No descartes el pick por eso.
+═══════════════════════════════════════
+PRINCIPIOS DEL ANALISTA DE ÉLITE
+═══════════════════════════════════════
 
-2. ÁRBITRO: Si hay datos de árbitro (arbitroStats o arbitro), úsalos en el razonamiento:
-   - amarillas_por_partido > 4.5 → árbitro permisivo, favorece Over tarjetas
-   - amarillas_por_partido < 2.5 → árbitro restrictivo
-   - penaltis_por_partido > 0.4 → pita muchos penaltis
+1. EL CONTEXTO MANDA — La estadística sin contexto no vale nada.
+   SIEMPRE empieza con "¿Qué se está jugando cada equipo en este partido?".
+   Un partido de relegación no es igual a un partido de mitad de tabla.
+   Un equipo con 3 días de descanso no es igual a uno con 7.
+   Una final no es igual a una jornada normal.
 
-3. CONTEXTO TEMPORAL: Si es final de temporada (jornadas_restantes ≤ 5), menciónalo en Riesgo. No descartes.
+2. CUENTA LA HISTORIA DEL PARTIDO — Antes del pick, el usuario debe entender
+   qué va a ver en ese partido. ¿Va a ser un partido cerrado o abierto?
+   ¿Hay urgencia? ¿Tiene sentido el Over o el Under dada la situación táctica?
 
-4. BAJAS CONFIRMADAS (lesionadosLocal / lesionadosVisitante): Si hay jugadores lesionados o sancionados,
-   menciónalos en la sección 📊 ESTADÍSTICAS CLAVE con el ícono 🩹. Ejemplo:
-   "🩹 Bajas locales: Jugador A (Lesionado), Jugador B (Suspendido)"
-   Si algún equipo tiene ≥2 bajas, añade en Riesgo: "⚠️ [Equipo] con [N] bajas confirmadas".
-   El stake ya fue ajustado por el motor si aplica — NO lo cambies.
+3. USA TODOS LOS DATOS DISPONIBLES — No te limites a goles por partido.
+   - amarillasPorPartido: predice tarjetas con datos reales, no genéricos
+   - arbitroStats: si el árbitro da 4.2/partido, ese dato cambia el análisis de tarjetas
+   - diasDescansoLocal/Visitante: si un equipo jugó hace 3 días, hay riesgo de rotación
+   - contextoPartido: lo que está en juego, urgencia táctica
+   - lesionadosLocal/Visitante: bajas que cambian el equipo titular
+   - H2H: los patrones históricos entre estos dos equipos
+   - prediccionAPI.goals_home/goals_away: proyección de la API para este partido
 
-REGLAS DE FORMATO:
-- Usa exactamente el stake que viene en los datos — el motor ya lo calculó, NO lo toques
-- Usa exactamente la cuota que viene en los datos
-- MÁXIMO 2 picks por partido
-- NUNCA digas "Sin picks válidos" — si recibes picks, los publicas todos
+4. SE ESPECÍFICO, NO GENÉRICO — Mal: "equipo en mala forma". Bien: "3 derrotas consecutivas, solo 1 gol en esos 3 partidos, déficit defensivo de 2.1 goles recibidos/partido como visitante".
 
-FORMATO EXACTO (Telegram Markdown):
+5. NO MENCIONES TECNICISMOS — Nunca escribas EV%, lambda, Poisson, xG como términos. Escribe el resultado de los cálculos, no el método.
+
+═══════════════════════════════════════
+CÓMO USAR CADA CAMPO DE DATOS
+═══════════════════════════════════════
+
+CONTEXTO (contextoPartido):
+- Si hay contextoCopa → es el primer bloque del análisis, antes de cualquier estadística
+- Si hay jornadasRestantes ≤ 4 → mencionar presión de final de temporada
+- Si hay loQueSeJuega → es el eje narrativo central del análisis
+- Si hay cansancioLocal/Visitante → mencionarlo como factor de riesgo explícito
+
+ÁRBITRO (arbitroStats):
+- amarillas > 4.5/partido: "árbitro permisivo — ambiente esperado de muchas tarjetas"
+- amarillas < 2.5/partido: "árbitro restrictivo — pick Over tarjetas con menor seguridad"
+- Si hay datos de árbitro y el pick ES de tarjetas → el árbitro es parte central del razonamiento
+
+BAJAS (lesionadosLocal/lesionadosVisitante):
+- 1 baja relevante: mencionarla brevemente
+- ≥2 bajas: bloque propio con 🩹, mención en Riesgo
+- Si un portero titular está lesionado → impacto enorme en goles esperados → menciónalo
+
+DESCANSO (diasDescansoLocal/Visitante):
+- 3-4 días de descanso: "partido de mitad de semana → posibles rotaciones"
+- ≤2 días: "fatiga alta → velocidad e intensidad reducidas en 2T → favorece Under"
+
+H2H (h2h):
+- Si 4/5 últimos partidos terminaron Over → refuerzo sólido para Over
+- Si ambos equipos se bloquean mutuamente en H2H → argumento para Under/BTTS No
+
+PREDICCIÓN API (prediccionAPI):
+- Si goals_home > 1.8: "el modelo de la API proyecta ataque fuerte del local"
+- Úsalo como segunda fuente para el razonamiento, no como primera
+
+═══════════════════════════════════════
+FORMATO OBLIGATORIO (Telegram Markdown)
+═══════════════════════════════════════
+
 🌍 [País] — [Liga]
 ⚽ [Local] vs [Visitante] | ⏰ [Hora Colombia]
-📍 [Estadio] | 🃏 Árbitro: [Nombre] ([amarillas_avg]/partido si disponible)
+📍 [Estadio si disponible] | 🃏 Árbitro: [Nombre] ([X.X]/partido) o "No disponible"
 ━━━━━━━━━━━━━━━━━━━
 
-🎯 *MOTIVACIÓN*
-▸ [Local]: [texto de motivacionLocal]
-▸ [Visitante]: [texto de motivacionVisitante]
+🔍 *CONTEXTO DEL PARTIDO*
+[1-3 líneas que expliquen QUÉ SE JUEGA cada equipo — la historia del partido]
+[Si contextoCopa existe → empieza aquí]
+[Si hay loQueSeJuega → incorpóralo]
+[Si hay cansancio → menciónalo]
 
-📊 *ESTADÍSTICAS CLAVE*
-▸ [local] anota en casa: *X.X* goles/partido | Forma: *[forma]*
-▸ [visitante] anota fuera: *X.X* goles/partido | Forma: *[forma]*
-▸ [Si H2H ≥3 partidos: resumen H2H]
-[Si lesionadosLocal o lesionadosVisitante tienen datos:]
-🩹 Bajas: [local: nombres] / [visitante: nombres] (tipo)
+📊 *ANÁLISIS*
+▸ [Local] (local): [goles en casa]/partido | Forma: [forma5] | [dato relevante adicional]
+▸ [Visitante] (visitante): [goles fuera]/partido | Forma: [forma5] | [dato relevante]
+[Si H2H ≥3 partidos]: ▸ H2H: [patrón concreto — "4 de los últimos 5 fueron Over 2.5"]
+[Si lesionados]: 🩹 Bajas: [equipo] → [jugadores + tipo]
+[Si diasDescanso ≤ 4]: ⏱️ Descanso: [equipo] jugó hace [N] días
 
-🎯 *PICK: [Mercado]*
-┌ Selección: [Qué apostar]
-├ Razonamiento: [Dato estadístico + contexto motivación/árbitro si aplica]
-├ Probabilidad: *[X]%*
+🎯 *PICK*
+┌ *[Mercado exacto]*
+├ [Razonamiento de 2-3 líneas: stats + contexto + por qué tiene valor AHORA en este partido]
+├ [Mención del árbitro si pick es de tarjetas]
 ├ 🏆 Stake: *[X]/10*
 ├ 💡 Cuota mínima: *[X.XX]*
-└ ⚠️ Riesgo: [1 línea]
+└ ⚠️ Riesgo: [Factor concreto que podría invalidar el pick — no genérico]
 
 ━━━━━━━━━━━━━━━━━━━
 
-[Después de todos los picks individuales, añade combinada si hay 2+:]
-━━━━━━━━━━━━━━━━━━━
-🎰 *COMBINADA DEL DÍA*
-▸ [Local] vs [Visitante] → *[mercado]* | Cuota: *X.XX*
-...
-🏆 Stake combinada: *[X]/10*
-💡 Cuota combinada estimada: *~X.XX*
+[Si hay 2+ picks con valor, añade al final:]
+🎰 *COMBINADA SUGERIDA*
+[Pick 1] × [Pick 2] | Cuota estimada: ~[X.XX] | Stake: [Y]/10
+
 ━━━━━━━━━━━━━━━━━━━
 
-REGLAS DE FORMATO:
-- NUNCA uses # ## ###
-- NUNCA menciones APIs, fuentes de datos, EV%, xG, lambda, probabilidadesCalculadas como términos técnicos
-- NUNCA inventes estadísticas — usa solo lo que viene en los datos
-- Si statsLocal/statsVisitante son null → escribe "datos limitados"
+REGLAS IRROMPIBLES:
+- NO uses # ## ### en ningún momento
+- NO menciones EV%, lambda, Poisson, xG, API, motor, ni tecnicismos
+- NO inventes estadísticas — solo usa números que estén explícitamente en los datos
+- NO cambies el stake ni la cuota que viene en los datos
+- NO añadas ni elimines picks — publicas exactamente los que recibes
+- El razonamiento debe conectar los números con la situación real del partido
 - Responde en español`;
+
 
 const INPLAY_SYSTEM = `${TIPSTER_SYSTEM}
 
@@ -3567,12 +3814,14 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     };
   });
 
-  // ── FASE 3: H2H, standings y enriquecimiento ─────────────────────────────────
-  await bot.sendMessage(chatId, `🔢 Consultando H2H y tabla de posiciones...`);
+  // ── FASE 3: H2H, standings, predicciones y contexto ─────────────────────────
+  await bot.sendMessage(chatId, `🔢 Consultando H2H, tabla de posiciones y predicciones de la API...`);
   const uniqueLeagueIds = [...new Set(selected.map(f => f.leagueId))];
-  const [h2hResults, standingsArray] = await Promise.all([
+  const [h2hResults, standingsArray, predResults] = await Promise.all([
     Promise.allSettled(selected.map(f => getH2H(f.homeId, f.awayId))),
     Promise.allSettled(uniqueLeagueIds.map(lid => getLeagueStandings(lid))),
+    // Predicciones solo para partidos con cuotas (máx 40, priorizados por tier)
+    Promise.allSettled(selected.map(f => getApiPrediction(f.fixtureId))),
   ]);
 
   // Construir mapa de standings por leagueId
@@ -3585,27 +3834,64 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     }
   });
 
-  // Enriquecer con cuotas (ya prefetched), H2H, posición en tabla, jornada y estadio
+  // Enriquecer con cuotas (ya prefetched), H2H, posición, contexto
   let conOdds = 0;
   for (let i = 0; i < enriched.length; i++) {
-    const odds = oddsPreFetched.get(selected[i].fixtureId) || null;
+    const f = selected[i];
+    const odds = oddsPreFetched.get(f.fixtureId) || null;
     if (odds) { enriched[i].cuotasReales = odds; conOdds++; }
 
     const h2h = h2hResults[i].status === 'fulfilled' ? h2hResults[i].value : [];
     if (h2h && h2h.length > 0) enriched[i].h2h = h2h.slice(0, 5);
 
-    enriched[i].jornada = selected[i].round;
-    enriched[i].estadio = selected[i].venue;
+    enriched[i].jornada = f.round;
+    enriched[i].estadio = f.venue;
 
-    const standings = standingsMap[selected[i].leagueId] || [];
-    const totalEquipos = standingsTotalMap[selected[i].leagueId] || 20;
-    const standingLocal = standings.find(s => s.teamId === selected[i].homeId);
-    const standingVisit = standings.find(s => s.teamId === selected[i].awayId);
-    if (standingLocal) enriched[i].posicionLocal = standingLocal.rank;
+    const standings    = standingsMap[f.leagueId] || [];
+    const totalEquipos = standingsTotalMap[f.leagueId] || 20;
+    const standingLocal = standings.find(s => s.teamId === f.homeId);
+    const standingVisit = standings.find(s => s.teamId === f.awayId);
+    if (standingLocal) enriched[i].posicionLocal    = standingLocal.rank;
     if (standingVisit) enriched[i].posicionVisitante = standingVisit.rank;
     enriched[i].motivacionLocal     = getTeamMotivation(standingLocal, totalEquipos);
     enriched[i].motivacionVisitante = getTeamMotivation(standingVisit, totalEquipos);
-    enriched[i].arbitro = selected[i].referee || null;
+    enriched[i].arbitro = f.referee || null;
+
+    // ── Predicción de la API como lambda secundario ────────────────────────────
+    const pred = predResults[i].status === 'fulfilled' ? predResults[i].value : null;
+    if (pred) {
+      enriched[i].prediccionAPI = pred;
+      // Si la API da xG esperados, recalcular probs blending 40% API + 60% nuestro Poisson
+      if (pred.goals_home != null && pred.goals_away != null) {
+        const blendFactor = 0.40;
+        const currentProbs = enriched[i]._extendedProbs;
+        // El lambda actual viene de homeLambda/awayLambda en extendedProbs
+        const apiHomeLambda = pred.goals_home;
+        const apiAwayLambda = pred.goals_away;
+        const blendedHomeLambda = currentProbs.homeLambda * (1 - blendFactor) + apiHomeLambda * blendFactor;
+        const blendedAwayLambda = currentProbs.awayLambda * (1 - blendFactor) + apiAwayLambda * blendFactor;
+        // Recalcular probs extendidas con lambdas más precisos
+        const blendedProbs = calcExtendedProbs(
+          blendedHomeLambda, currentProbs.homeLambda_agt ?? blendedHomeLambda,
+          blendedAwayLambda, currentProbs.awayLambda_agt ?? blendedAwayLambda,
+        );
+        enriched[i]._extendedProbs = blendedProbs;
+        enriched[i]._lambdaSource = 'blend_api_poisson';
+      }
+    }
+
+    // ── Contexto rico del partido (ronda, lo que se juega, urgencia) ──────────
+    const matchCtx = buildMatchContext({
+      fixture:       f,
+      round:         f.round,
+      homeStanding:  standingLocal,
+      awayStanding:  standingVisit,
+      totalTeams:    totalEquipos,
+      leagueId:      f.leagueId,
+      homeLastMatch: null,  // días de descanso se calculan post-selección (solo 3 picks)
+      awayLastMatch: null,
+    });
+    if (Object.keys(matchCtx).length > 0) enriched[i].contextoPartido = matchCtx;
   }
 
   // Enriquecer con SofaScore (árbitro con stats, forma reciente)
@@ -3699,6 +3985,42 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       });
     } catch (injErr) {
       console.warn('⚠️ Error obteniendo lesionados:', injErr.message);
+    }
+  }
+
+  // ── Días de descanso para los topPicks (solo 3-6 llamadas extra) ──────────────
+  if (topPicks.length > 0) {
+    try {
+      const restResults = await Promise.allSettled(
+        topPicks.flatMap(pick => {
+          const match = enriched.find(e => e.fixtureId === pick.fixtureId);
+          if (!match) return [Promise.resolve(null), Promise.resolve(null)];
+          return [getLastMatchDate(match.homeId), getLastMatchDate(match.awayId)];
+        })
+      );
+      topPicks.forEach((pick, idx) => {
+        const homeLastRaw = restResults[idx * 2].status === 'fulfilled' ? restResults[idx * 2].value : null;
+        const awayLastRaw = restResults[idx * 2 + 1].status === 'fulfilled' ? restResults[idx * 2 + 1].value : null;
+        const today = new Date();
+        if (homeLastRaw) {
+          const days = Math.round((today - homeLastRaw) / 86400000);
+          pick.diasDescansoLocal = days;
+          if (days <= 3) {
+            pick._alertaCansancioLocal = `⚠️ LOCAL con solo ${days} días de descanso — posible rotación`;
+            if (pick.stake > 6) pick.stake -= 1;  // reducir stake si cansancio alto
+          }
+        }
+        if (awayLastRaw) {
+          const days = Math.round((today - awayLastRaw) / 86400000);
+          pick.diasDescansoVisitante = days;
+          if (days <= 3) {
+            pick._alertaCansancioVisitante = `⚠️ VISITANTE con solo ${days} días de descanso — posible rotación`;
+            if (pick.stake > 6) pick.stake -= 1;
+          }
+        }
+      });
+    } catch (restErr) {
+      console.warn('⚠️ Error calculando días de descanso:', restErr.message);
     }
   }
 
