@@ -2863,23 +2863,22 @@ FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 ━━━━━━━━━━━━━━━━━━━
 
 🔍 *CONTEXTO DEL PARTIDO*
-[OBLIGATORIO — mínimo 2 líneas. Qué se juega cada equipo, situación en tabla, urgencia táctica.]
+[MÁXIMO 2 líneas. Lo esencial: qué se juegan, urgencia táctica, situación de tabla. SIN párrafos largos.]
 [Si hay advertenciaStats o contexto de playoff → primera línea con ⚠️]
 
 📊 *ANÁLISIS*
-▸ [Local] (local): [goles anotados en casa]/partido | Forma: [forma5] | [1 dato clave]
-▸ [Visitante] (visitante): [goles anotados fuera]/partido | Forma: [forma5] | [1 dato clave]
-[Ambas líneas SIEMPRE obligatorias — nunca mostrar solo un equipo]
-[Si H2H ≥3 partidos]: ▸ H2H: [patrón — ej. "4 de 5 últimos fueron Over 2.5"]
-[Si lesionados]: 🩹 Bajas: [equipo] → [jugadores]
-[Si diasDescanso ≤4]: ⏱️ Descanso: [equipo] jugó hace [N] días
+▸ [Local] (local): [goles anotados casa]/p | Forma: [forma5] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
+▸ [Visitante] (visit): [goles anotados fuera]/p | Forma: [forma5] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
+[Ambas líneas SIEMPRE obligatorias]
+[Si H2H ≥3 partidos]: ▸ H2H: [patrón en máx 1 línea]
+[Si hay bajas clave]: 🩹 Bajas: [máximo 1-2 nombres por equipo, solo los más relevantes]
 
 🎯 *PICK [N]: [Mercado en español]*
-┌ Selección: [Qué apostar exactamente — debe coincidir con el mercado del título]
-├ Razonamiento: [2-3 líneas: stats + contexto + por qué tiene valor AHORA]
+┌ Selección: [Qué apostar exactamente]
+├ Razonamiento: [MÁXIMO 2 líneas — argumento central con los datos clave]
 ├ 🏆 Stake: *[X]/10*
-├ 💡 Cuota mínima: *[X.XX]* [— esta cuota DEBE ser la del mercado indicado en el título]
-└ ⚠️ Riesgo: [Factor concreto — no genérico]
+├ 💡 Cuota mínima: *[X.XX]*
+└ ⚠️ Riesgo: [1 línea máximo]
 
 ━━━━━━━━━━━━━━━━━━━
 🔥 PICK ESTRELLA DEL DÍA [Solo si stake 8+/10]
@@ -2926,10 +2925,10 @@ INSTRUCCIONES ESPECIALES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
 - STAKE MÍNIMO PUBLICABLE: 5/10. Publica picks con el stake que corresponda al EV real calculado. Stake 5-6 son picks válidos con valor marginal.
 - PROHIBIDO dar picks de partidos donde statsLocal y statsVisitante son null o muestran datos limitados en más de 3 de los 5 indicadores clave (goles anotados, goles recibidos, forma reciente, porcentaje BTTS, porcentaje Over 2.5). Si no hay base estadística real, DESCARTA el partido completamente.
 - PARTIDOS CON MUESTRA REDUCIDA EN LA COMPETICIÓN ACTUAL: Si un equipo tiene menos de 5 partidos en esa copa/torneo específico, usa su liga doméstica como fuente principal de estadísticas. Si no hay NINGÚN dato adicional (ni liga doméstica ni H2H), descarta ese partido de los picks automáticos del día — el usuario puede preguntar por él directamente y el bot lo analiza con todos los factores disponibles.
-- Calidad sobre cantidad: es mejor dar 1 pick sólido que 3 mediocres.
+- Siempre busca llegar a 3 picks — solo da menos si genuinamente no hay suficientes partidos con datos mínimos.
 
 INSTRUCCIÓN ESPECIAL PARA PICKS DEL DÍA:
-Emite entre 1 y 3 picks individuales (partidos diferentes) + 1 APUESTA COMBINADA de exactamente 3 patas al final solo si hay 2+ picks válidos. La combinada NUNCA puede superar cuota 12.00 — si la supera, usa mercados más probables. Calidad sobre cantidad.
+Emite EXACTAMENTE 3 picks individuales de partidos distintos. Si tienes 4+ opciones, elige las 3 con mayor valor. Solo baja a 2 si hay exactamente 2 partidos con base estadística suficiente, y a 1 solo si es el único partido con datos reales. Después de los 3 picks individuales añade 1 APUESTA COMBINADA de exactamente 3 patas. La combinada NUNCA puede superar cuota 12.00.
 
 USO DE DATOS CONTEXTUALES (cuando están disponibles en los datos):
 - h2h: array de últimos 5 enfrentamientos directos. Usa para identificar tendencias de goles, si hay equipos que casi siempre marcan, patrones de resultado histórico.
@@ -3056,11 +3055,12 @@ BASE RATES DE LIGA (baseRatesLiga) — USO OBLIGATORIO:
 - Si baseRatesLiga es null → no menciones porcentajes de liga.
 
 ÁRBITRO (arbitroStats) — SIEMPRE MOSTRAR:
-- Si arbitroStats tiene datos → línea header obligatoria: "🃏 Árbitro: [nombre] ([X.X]/partido)"
-- Si arbitroStats es null → escribe igualmente: "🃏 Árbitro: No disponible"
+- Si arbitroStats tiene datos → línea header: "🃏 Árbitro: [nombre] ([X.X] amarillas/p)"
+- Si arbitroStats es null pero hay nombre de árbitro → "🃏 Árbitro: [nombre] (stats no disponibles)"
+- Si ni arbitroStats ni nombre → "🃏 Árbitro: No disponible"
 - amarillas > 4.5/partido: "árbitro permisivo → contexto de muchas tarjetas"
 - amarillas < 2.5/partido: "árbitro restrictivo → pick tarjetas con menor confianza"
-- Si el pick ES de tarjetas → el perfil del árbitro es el dato más importante del análisis.
+- Si el pick ES de tarjetas → el perfil del árbitro + las amarillasPorPartido de ambos equipos son los datos centrales del razonamiento.
 
 BAJAS (lesionadosLocal/lesionadosVisitante):
 - 1 baja relevante: mencionarla brevemente.
@@ -3089,28 +3089,25 @@ FORMATO OBLIGATORIO (Telegram Markdown)
 ━━━━━━━━━━━━━━━━━━━
 
 🔍 *CONTEXTO DEL PARTIDO*
-[OBLIGATORIO — mínimo 2 líneas. Explica QUÉ SE JUEGA cada equipo.]
+[MÁXIMO 2 líneas. Qué se juegan los equipos, urgencia táctica. SIN párrafos largos.]
 [Si hay contextoPartido.advertenciaStats → primera línea con ⚠️]
-[Si hay loQueSeJuega → incorpóralo como eje narrativo]
-[Si hay cansancio → menciónalo]
-[Sin contextoCopa ni loQueSeJuega → escribe situación de tabla: posición, puntos, lo que se juegan]
+[Si hay loQueSeJuega → incorpóralo en esas 2 líneas]
 
 📊 *ANÁLISIS*
-▸ [Local] (local): [golesAnotadosHome o golesAnotadosLocal]/partido | Forma: [forma5] | [1 dato relevante]
-▸ [Visitante] (visitante): [golesAnotadosAway o golesAnotadosVisitante]/partido | Forma: [forma5] | [1 dato relevante]
-[AMBAS LÍNEAS SON OBLIGATORIAS — nunca mostrar solo un equipo]
-[Si baseRatesLiga]: ▸ Liga [baseRatesLiga.liga]: [baseRatesLiga.over25]% Over 2.5 | [baseRatesLiga.btts]% BTTS
-[Si H2H ≥3 partidos]: ▸ H2H: [patrón concreto — "4 de los últimos 5 fueron Over 2.5"]
-[Si lesionados]: 🩹 Bajas: [equipo] → [jugadores + tipo]
-[Si diasDescanso ≤ 4]: ⏱️ Descanso: [equipo] jugó hace [N] días
+▸ [Local] (local): [golesAnotadosHome]/p | Forma: [forma5] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
+▸ [Visitante] (visit): [golesAnotadosAway]/p | Forma: [forma5] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
+[AMBAS LÍNEAS OBLIGATORIAS siempre]
+[Si baseRatesLiga]: ▸ Liga: [baseRatesLiga.over25]% Over 2.5 | [baseRatesLiga.btts]% BTTS | [baseRatesLiga.cards] tarj/p promedio
+[Si H2H ≥3 partidos]: ▸ H2H: [patrón en 1 línea]
+[Si bajas clave]: 🩹 Bajas: [máx 1-2 jugadores por equipo, los más importantes]
 
 🎯 *PICK*
 ┌ *[Mercado exacto]*
-├ [Razonamiento de 2-3 líneas: stats + contexto + por qué tiene valor AHORA en este partido]
-├ [Si pick de tarjetas → menciona árbitro y su media de tarjetas/partido obligatoriamente]
+├ [MÁXIMO 2 líneas — argumento central: el dato clave + por qué tiene valor AHORA]
+├ [Si pick de tarjetas → menciona árbitro y sus tarj/partido]
 ├ 🏆 Stake: *[X]/10*
 ├ 💡 Cuota mínima: *[X.XX]*
-└ ⚠️ Riesgo: [Factor concreto que podría invalidar el pick — no genérico]
+└ ⚠️ Riesgo: [1 línea máximo]
 
 ━━━━━━━━━━━━━━━━━━━
 
