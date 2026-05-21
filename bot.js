@@ -1551,20 +1551,41 @@ function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTe
 
   // ── 2. Contexto de ronda/competición ─────────────────────────────────────────
   if (round) {
-    // Champions/Europa — fase y número de partidos
     const roundLower = round.toLowerCase();
-    if (/group stage/i.test(round)) {
+
+    // ── PLAYOFFS y formatos especiales — SIEMPRE tienen prioridad ───────────────
+    if (/relegat/i.test(round)) {
+      // Playoff de descenso/ascenso (ej: Bundesliga vs 2.Bundesliga)
+      const leg = /1st|first|ida/i.test(round) ? ' — Partido de IDA' : /2nd|second|vuelta/i.test(round) ? ' — Partido de VUELTA' : '';
+      ctx.contextoCopa     = `⚠️ PLAYOFF DE DESCENSO/ASCENSO${leg} — eliminación directa. El perdedor baja de categoría o pierde el ascenso. Máxima presión en ambos equipos.`;
+      ctx.formatoEspecial  = 'playoff_relegacion';
+      ctx.advertenciaStats = '⚠️ Las estadísticas de temporada son de ligas DISTINTAS — comparación directa no es válida. Analizar por separado.';
+      ctx.urgencia         = 'maxima';
+    } else if (/promotion.?play.?off|play.?off.*promot|ascenso.*play/i.test(round)) {
+      ctx.contextoCopa    = '🚀 PLAYOFF DE ASCENSO — eliminación directa, el ganador sube de categoría';
+      ctx.formatoEspecial = 'playoff_ascenso';
+      ctx.urgencia        = 'maxima';
+    } else if (/championship.?play.?off|championship.?group|championship.?round|play.?off.*championship/i.test(round)) {
+      // Belgica, Noruega, etc. — grupos de playoff al final de temporada
+      ctx.contextoCopa    = `🏆 CHAMPIONSHIP PLAYOFFS — fase final post-temporada regular. Las estadísticas de liga regular NO reflejan la forma actual del equipo en esta fase. Los puntos se redistribuyen al inicio del playoff.`;
+      ctx.formatoEspecial = 'championship_playoffs';
+      ctx.advertenciaStats = '⚠️ IMPORTANTE: Estadísticas son de temporada regular completa. En Championship Playoffs los equipos pueden tener rendimiento diferente — contextualizar con forma reciente.';
+      ctx.urgencia        = 'alta';
+    } else if (/europa.?play.?off|european.?play.?off/i.test(round)) {
+      ctx.contextoCopa    = '🌍 PLAYOFF EUROPEO — partido decisivo para clasificación a competiciones europeas';
+      ctx.formatoEspecial = 'playoff_europeo';
+      ctx.urgencia        = 'alta';
+    } else if (/group stage/i.test(round)) {
       const match = round.match(/(\d+)/);
       const matchday = match ? parseInt(match[1]) : null;
-      // Copa Libertadores y Sudamericana tienen 6 jornadas de grupo
       const totalGroupGames = [11, 9].includes(leagueId) ? 6 : 6;
       if (matchday) {
         if (matchday === totalGroupGames) {
           ctx.contextoCopa = `🔥 ÚLTIMA JORNADA de fase de grupos — cada punto puede cambiar la clasificación`;
-          ctx.urgencia = 'maxima';
+          ctx.urgencia     = 'maxima';
         } else if (matchday === totalGroupGames - 1) {
           ctx.contextoCopa = `⚡ Penúltima jornada de grupos — partido decisivo para la clasificación`;
-          ctx.urgencia = 'alta';
+          ctx.urgencia     = 'alta';
         }
       }
     } else if (/round of 16|octavos/i.test(round)) {
@@ -1573,19 +1594,20 @@ function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTe
       ctx.contextoCopa = '🏆 Cuartos de final — eliminación directa';
     } else if (/semi.?final|semis/i.test(round)) {
       ctx.contextoCopa = '🏆 Semifinal — a un partido de la final';
-    } else if (/\bfinal\b/i.test(round)) {
+    } else if (/\bfinal\b/i.test(round) && !/semi/i.test(round)) {
       ctx.contextoCopa = '🏆 FINAL — partido único, todo en juego';
-      ctx.urgencia = 'maxima';
-    } else if (/2nd leg|vuelta|segundo partido/i.test(round)) {
-      ctx.contextoCopa = '⚽ PARTIDO DE VUELTA — considera el marcador del partido de ida';
-      ctx.urgencia = 'alta';
+      ctx.urgencia     = 'maxima';
+    } else if (/2nd.?leg|vuelta|segundo.?partido/i.test(round)) {
+      ctx.contextoCopa = '⚽ PARTIDO DE VUELTA — el análisis debe incluir el marcador del partido de ida';
+      ctx.urgencia     = 'alta';
     }
 
-    // Ligas de grupo con nombre explícito (Libertadores, Sudamericana, etc.)
+    // Cuadrangular colombiano
     if (/cuadrangular|cuadrang/i.test(round)) {
       const matchday = round.match(/(\d+)/)?.[1];
-      ctx.contextoCopa = `🇨🇴 CUADRANGULAR — fase semifinal del torneo colombiano${matchday ? ` (Fecha ${matchday})` : ''}`;
+      ctx.contextoCopa    = `🇨🇴 CUADRANGULAR — fase semifinal del torneo colombiano${matchday ? ` (Fecha ${matchday})` : ''}. Las estadísticas de la temporada regular NO aplican directamente — lo que importa es el rendimiento en el cuadrangular.`;
       ctx.formatoEspecial = 'cuadrangular_colombia';
+      ctx.urgencia        = 'alta';
     }
 
     // Temporada regular: detectar jornada y urgencia
@@ -1593,16 +1615,15 @@ function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTe
     if (jornada) {
       const n = parseInt(jornada[1]);
       ctx.jornadaNumero = n;
-      // Inferir jornadas totales según liga
       const totalesLiga = {
         39: 38, 140: 38, 135: 38, 78: 34, 61: 34,
         88: 34, 71: 38, 239: 20, 262: 17, 253: 34,
         144: 30, 94: 34, 11: 6, 9: 6,
       };
-      const total = totalesLiga[leagueId] || 38;
+      const total     = totalesLiga[leagueId] || 38;
       const restantes = total - n;
       ctx.jornadasRestantes = restantes;
-      if (restantes <= 0) ctx.contextoJornada = '🏁 ÚLTIMA JORNADA de la temporada regular';
+      if (restantes <= 0)      ctx.contextoJornada = '🏁 ÚLTIMA JORNADA de la temporada regular';
       else if (restantes <= 3) ctx.contextoJornada = `🔥 Últimas ${restantes} jornadas — definición de temporada en juego`;
       else if (restantes <= 6) ctx.contextoJornada = `Recta final: quedan ${restantes} jornadas`;
     }
@@ -2251,13 +2272,13 @@ function buildPickCandidates(enrichedFixtures) {
         marketLabel:  m.label,
         category:     m.cat,
         prob:         +(m.prob * 100).toFixed(1),
-        odds:         oddsDisplayed,   // cuota mostrada al usuario (real + buffer)
+        odds:         oddsDisplayed,
         ev:           ev,
         stake,
         xGLocal:      probs.homeLambda,
         xGVisitante:  probs.awayLambda,
         cornersLambda: probs.cornersLambda,
-        // ── Contexto enriquecido (necesario para el formateador) ──────────────
+        // ── Contexto enriquecido ──────────────────────────────────────────────
         motivacionLocal:     f.motivacionLocal     || null,
         motivacionVisitante: f.motivacionVisitante || null,
         posicionLocal:       f.posicionLocal       || null,
@@ -2269,6 +2290,17 @@ function buildPickCandidates(enrichedFixtures) {
         h2h:                 f.h2h                 || null,
         formaSofaLocal:      f.formaSofaLocal      || null,
         formaSofaVisitante:  f.formaSofaVisitante  || null,
+        // ── Contexto del partido (ronda, playoff, urgencia) ──────────────────
+        contextoPartido:     f.contextoPartido     || null,
+        prediccionAPI:       f.prediccionAPI       || null,
+        // ── Base rates de la liga (para que Claude use el número exacto) ─────
+        baseRatesLiga: baseRates ? {
+          over25:  baseRates.over25,
+          btts:    baseRates.btts,
+          cards:   baseRates.cards,
+          corners: baseRates.corners,
+          liga:    baseRates.name,
+        } : null,
       });
     }
   }
@@ -2998,33 +3030,45 @@ PRINCIPIOS DEL ANALISTA DE ÉLITE
 CÓMO USAR CADA CAMPO DE DATOS
 ═══════════════════════════════════════
 
-CONTEXTO (contextoPartido):
-- Si hay contextoCopa → es el primer bloque del análisis, antes de cualquier estadística
-- Si hay jornadasRestantes ≤ 4 → mencionar presión de final de temporada
-- Si hay loQueSeJuega → es el eje narrativo central del análisis
-- Si hay cansancioLocal/Visitante → mencionarlo como factor de riesgo explícito
+CONTEXTO (contextoPartido) — SECCIÓN OBLIGATORIA:
+- SIEMPRE existe un contexto. Si hay contextoCopa → es el primer bloque, antes de cualquier estadística.
+- Si hay loQueSeJuega → es el eje narrativo central del análisis.
+- Si hay jornadasRestantes ≤ 4 → mencionar presión de final de temporada.
+- Si hay cansancioLocal/Visitante → mencionarlo como factor de riesgo explícito.
+- Si contextoPartido.advertenciaStats existe → MUÉSTRALO CON ⚠️ antes de las stats. Ej: "⚠️ Playoff de descenso — las estadísticas de liga regular NO reflejan el nivel real de este partido".
+- Si NO hay contextoPartido → escribe igualmente la situación en tabla de ambos equipos (posición, puntos, si están en zona de descenso, zona europea, etc.).
 
-ÁRBITRO (arbitroStats):
-- amarillas > 4.5/partido: "árbitro permisivo — ambiente esperado de muchas tarjetas"
-- amarillas < 2.5/partido: "árbitro restrictivo — pick Over tarjetas con menor seguridad"
-- Si hay datos de árbitro y el pick ES de tarjetas → el árbitro es parte central del razonamiento
+BASE RATES DE LIGA (baseRatesLiga) — USO OBLIGATORIO:
+- El campo baseRatesLiga.over25 es el % histórico real de Over 2.5 en ESA liga. ÚSALO EXACTAMENTE.
+  Correcto: "La [liga] tiene 56% Over 2.5 históricamente" — usando baseRatesLiga.over25
+  INCORRECTO: inventar porcentajes de tu propio conocimiento (ej. "Premier tiene ~52% Over 2.5")
+- El campo baseRatesLiga.btts es el % de BTTS en ESA liga. ÚSALO EXACTAMENTE.
+- El campo baseRatesLiga.cards es el promedio de tarjetas por partido en ESA liga. ÚSALO EXACTAMENTE.
+- Si baseRatesLiga es null → no menciones porcentajes de liga.
+
+ÁRBITRO (arbitroStats) — SIEMPRE MOSTRAR:
+- Si arbitroStats tiene datos → línea header obligatoria: "🃏 Árbitro: [nombre] ([X.X]/partido)"
+- Si arbitroStats es null → escribe igualmente: "🃏 Árbitro: No disponible"
+- amarillas > 4.5/partido: "árbitro permisivo → contexto de muchas tarjetas"
+- amarillas < 2.5/partido: "árbitro restrictivo → pick tarjetas con menor confianza"
+- Si el pick ES de tarjetas → el perfil del árbitro es el dato más importante del análisis.
 
 BAJAS (lesionadosLocal/lesionadosVisitante):
-- 1 baja relevante: mencionarla brevemente
-- ≥2 bajas: bloque propio con 🩹, mención en Riesgo
-- Si un portero titular está lesionado → impacto enorme en goles esperados → menciónalo
+- 1 baja relevante: mencionarla brevemente.
+- ≥2 bajas: bloque propio con 🩹, mención en Riesgo.
+- Si un portero titular está lesionado → impacto enorme en goles esperados → menciónalo.
 
 DESCANSO (diasDescansoLocal/Visitante):
 - 3-4 días de descanso: "partido de mitad de semana → posibles rotaciones"
-- ≤2 días: "fatiga alta → velocidad e intensidad reducidas en 2T → favorece Under"
+- ≤2 días: "fatiga alta → velocidad reducida en 2T → favorece Under"
 
 H2H (h2h):
-- Si 4/5 últimos partidos terminaron Over → refuerzo sólido para Over
-- Si ambos equipos se bloquean mutuamente en H2H → argumento para Under/BTTS No
+- Si 4/5 últimos partidos terminaron Over → refuerzo sólido para Over.
+- Si ambos equipos se bloquean mutuamente en H2H → argumento para Under/BTTS No.
 
 PREDICCIÓN API (prediccionAPI):
-- Si goals_home > 1.8: "el modelo de la API proyecta ataque fuerte del local"
-- Úsalo como segunda fuente para el razonamiento, no como primera
+- Si goals_home > 1.8: "el modelo proyecta ataque fuerte del local"
+- Úsalo como segunda fuente para el razonamiento, no como primera.
 
 ═══════════════════════════════════════
 FORMATO OBLIGATORIO (Telegram Markdown)
@@ -3032,18 +3076,21 @@ FORMATO OBLIGATORIO (Telegram Markdown)
 
 🌍 [País] — [Liga]
 ⚽ [Local] vs [Visitante] | ⏰ [Hora Colombia]
-📍 [Estadio si disponible] | 🃏 Árbitro: [Nombre] ([X.X]/partido) o "No disponible"
+📍 [Estadio o "No disponible"] | 🃏 Árbitro: [Nombre ([X.X] tarj/p)] o "No disponible"
 ━━━━━━━━━━━━━━━━━━━
 
 🔍 *CONTEXTO DEL PARTIDO*
-[1-3 líneas que expliquen QUÉ SE JUEGA cada equipo — la historia del partido]
-[Si contextoCopa existe → empieza aquí]
-[Si hay loQueSeJuega → incorpóralo]
+[OBLIGATORIO — mínimo 2 líneas. Explica QUÉ SE JUEGA cada equipo.]
+[Si hay contextoPartido.advertenciaStats → primera línea con ⚠️]
+[Si hay loQueSeJuega → incorpóralo como eje narrativo]
 [Si hay cansancio → menciónalo]
+[Sin contextoCopa ni loQueSeJuega → escribe situación de tabla: posición, puntos, lo que se juegan]
 
 📊 *ANÁLISIS*
-▸ [Local] (local): [goles en casa]/partido | Forma: [forma5] | [dato relevante adicional]
-▸ [Visitante] (visitante): [goles fuera]/partido | Forma: [forma5] | [dato relevante]
+▸ [Local] (local): [golesAnotadosHome o golesAnotadosLocal]/partido | Forma: [forma5] | [1 dato relevante]
+▸ [Visitante] (visitante): [golesAnotadosAway o golesAnotadosVisitante]/partido | Forma: [forma5] | [1 dato relevante]
+[AMBAS LÍNEAS SON OBLIGATORIAS — nunca mostrar solo un equipo]
+[Si baseRatesLiga]: ▸ Liga [baseRatesLiga.liga]: [baseRatesLiga.over25]% Over 2.5 | [baseRatesLiga.btts]% BTTS
 [Si H2H ≥3 partidos]: ▸ H2H: [patrón concreto — "4 de los últimos 5 fueron Over 2.5"]
 [Si lesionados]: 🩹 Bajas: [equipo] → [jugadores + tipo]
 [Si diasDescanso ≤ 4]: ⏱️ Descanso: [equipo] jugó hace [N] días
@@ -3051,7 +3098,7 @@ FORMATO OBLIGATORIO (Telegram Markdown)
 🎯 *PICK*
 ┌ *[Mercado exacto]*
 ├ [Razonamiento de 2-3 líneas: stats + contexto + por qué tiene valor AHORA en este partido]
-├ [Mención del árbitro si pick es de tarjetas]
+├ [Si pick de tarjetas → menciona árbitro y su media de tarjetas/partido obligatoriamente]
 ├ 🏆 Stake: *[X]/10*
 ├ 💡 Cuota mínima: *[X.XX]*
 └ ⚠️ Riesgo: [Factor concreto que podría invalidar el pick — no genérico]
@@ -3067,7 +3114,11 @@ FORMATO OBLIGATORIO (Telegram Markdown)
 REGLAS IRROMPIBLES:
 - NO uses # ## ### en ningún momento
 - NO menciones EV%, lambda, Poisson, xG, API, motor, ni tecnicismos
-- NO inventes estadísticas — solo usa números que estén explícitamente en los datos
+- NO inventes estadísticas — SOLO usa números que estén explícitamente en los datos recibidos
+- Para Over 2.5, BTTS, tarjetas de liga: usa EXACTAMENTE los números de baseRatesLiga — NUNCA los de tu propio conocimiento
+- La sección 🔍 CONTEXTO DEL PARTIDO es OBLIGATORIA en todos los picks — nunca la omitas
+- La línea 📍 Estadio | 🃏 Árbitro es OBLIGATORIA — si no hay datos, escribe "No disponible"
+- La sección 📊 ANÁLISIS siempre muestra AMBOS equipos (▸ Local y ▸ Visitante) — nunca solo uno
 - NO cambies el stake ni la cuota que viene en los datos
 - NO añadas ni elimines picks — publicas exactamente los que recibes
 - El razonamiento debe conectar los números con la situación real del partido
