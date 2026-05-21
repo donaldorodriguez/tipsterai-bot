@@ -5778,7 +5778,17 @@ bot.on('message', async (msg) => {
       }
 
       // Picks del día general
-      if (/^(picks?|apuestas?)\s*(de\s*)?(hoy|del\s*dia|para\s*hoy)/.test(q) || q === 'picks' || q === 'picks hoy') {
+      const isPicksHoy =
+        /^(picks?|apuestas?)\s*(de\s*)?(hoy|del\s*dia|para\s*hoy)/.test(q) ||
+        q === 'picks' ||
+        q === 'picks hoy' ||
+        // "actualizar picks", "refresh picks", "dame picks", "ver picks", etc.
+        /\b(actualizar|refresh|forzar|nuevo|recalcul|regenera|dame|ver|muestra|quiero)\b.*\bpicks?\b/.test(q) ||
+        /\bpicks?\b.*\b(actualizar|refresh|forzar|nuevo|recalcul|regenera|globales?|del\s*d[íi]a|de\s*hoy)\b/.test(q) ||
+        // "top 3 global", "top picks", "mejores picks"
+        /^top\s*\d*\s*(global|picks?|apuestas?)/.test(q) ||
+        /^(mejores?|top)\s*(picks?|apuestas?)/.test(q);
+      if (isPicksHoy) {
         return { intencion: 'picks_hoy', pregunta_especifica: t };
       }
 
