@@ -1208,13 +1208,15 @@ async function getSofaMatchContext(homeTeam, awayTeam, sofaEvents) {
       const ev = detailRes.value.data?.event;
       const ref = ev?.referee;
       if (ref) {
-        const games = ref.gamesCount || 1;
+        const games = ref.games || ref.gamesCount || 1;
+        const amarPP = (ref.yellowCards && games > 1) ? +(ref.yellowCards / games).toFixed(2) : null;
+        const rojPP  = (ref.redCards    && games > 1) ? +(ref.redCards    / games).toFixed(2) : null;
         result.arbitro = {
-          nombre: ref.name,
-          partidos: games,
-          amarillas_por_partido: ref.yellowCards ? (ref.yellowCards / games).toFixed(2) : null,
-          rojas_por_partido:     ref.redCards    ? (ref.redCards    / games).toFixed(2) : null,
-          penaltis_por_partido:  ref.penaltyCount ? (ref.penaltyCount / games).toFixed(2) : null,
+          nombre:                ref.name,
+          partidos:              games,
+          amarillas_por_partido: (amarPP !== null && amarPP < 15) ? amarPP : null,
+          rojas_por_partido:     (rojPP  !== null && rojPP  < 3)  ? rojPP  : null,
+          penaltis_por_partido:  (ref.penaltyCount && games > 1) ? +(ref.penaltyCount / games).toFixed(2) : null,
         };
       }
     }
@@ -2898,6 +2900,7 @@ REGLAS DE FORMATO — OBLIGATORIAS SIN EXCEPCIÓN:
 - ⛔ NUNCA escribas "Probabilidad: X%" en los picks — es un valor interno, no va en la respuesta al usuario
 - ⛔ NUNCA empieces la respuesta con meta-comentarios del proceso ("Analizo todos los partidos...", "Los casos con statsLocal null...", "Partidos con valor identificados:") — empieza DIRECTAMENTE con el encabezado del primer pick (🌍 País — Liga)
 - ⛔ El mercado del pick y su cuota DEBEN ser el MISMO mercado. Si el título dice "Gana X", la cuota es la de "Gana X". Si el título dice "Over 3.5", la cuota es la de "Over 3.5". NUNCA mezcles cuota de un mercado con el header de otro.
+- ⛔ Si motivacionLocal.estado o motivacionVisitante.estado es "desconocido" → NO escribas "Sin datos de posición" al usuario. En su lugar usa el campo posicionLocal/posicionVisitante directamente, o infiere el contexto de la jornada (round) y los puntos si están disponibles.
 - La forma reciente SIEMPRE con guiones: *G-G-P-E-G* (máximo 6 resultados, nunca más)
 - Si la muestra de partidos es menor a 5, NO uses ese promedio como argumento principal — menciónalo como "datos limitados (N partidos)"
 - CUANDO NO HAY PICKS VÁLIDOS: escribe solo "⛔ Sin picks de valor. Mejor no apostar." — sin listar mercados descartados, sin mostrar cálculos, sin análisis de los partidos revisados
@@ -3125,6 +3128,7 @@ REGLAS IRROMPIBLES:
 - La sección 🔍 CONTEXTO DEL PARTIDO es OBLIGATORIA en todos los picks — nunca la omitas
 - La línea 📍 Estadio | 🃏 Árbitro es OBLIGATORIA — si no hay datos, escribe "No disponible"
 - La sección 📊 ANÁLISIS siempre muestra AMBOS equipos (▸ Local y ▸ Visitante) — nunca solo uno
+- Si motivacionLocal.estado o motivacionVisitante.estado es "desconocido" → no escribas "Sin datos de posición" — usa posicionLocal/posicionVisitante directamente o infiere del contexto
 - NO cambies el stake ni la cuota que viene en los datos
 - NO añadas ni elimines picks — publicas exactamente los que recibes
 - El razonamiento debe conectar los números con la situación real del partido
@@ -3874,9 +3878,23 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   // ── FASE 3: H2H, standings, predicciones y contexto ─────────────────────────
   await bot.sendMessage(chatId, `🔢 Consultando H2H, tabla de posiciones y predicciones de la API...`);
   const uniqueLeagueIds = [...new Set(selected.map(f => f.leagueId))];
+
+  // Standings en lotes de 5 para evitar rate limit (20+ llamadas simultáneas causan 429)
+  async function fetchStandingsThrottled(leagueIds) {
+    const results = [];
+    const BATCH = 5;
+    for (let i = 0; i < leagueIds.length; i += BATCH) {
+      const batch = leagueIds.slice(i, i + BATCH);
+      const batchRes = await Promise.allSettled(batch.map(lid => getLeagueStandings(lid)));
+      results.push(...batchRes);
+      if (i + BATCH < leagueIds.length) await new Promise(r => setTimeout(r, 200));
+    }
+    return results;
+  }
+
   const [h2hResults, standingsArray, predResults] = await Promise.all([
     Promise.allSettled(selected.map(f => getH2H(f.homeId, f.awayId))),
-    Promise.allSettled(uniqueLeagueIds.map(lid => getLeagueStandings(lid))),
+    fetchStandingsThrottled(uniqueLeagueIds),
     // Predicciones solo para partidos con cuotas (máx 40, priorizados por tier)
     Promise.allSettled(selected.map(f => getApiPrediction(f.fixtureId))),
   ]);
