@@ -1169,6 +1169,7 @@ async function fetchSofaScoreEvents(date) {
 
 function sofaNormalize(str) {
   return (str || '').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')  // diacríticos: ü→u, é→e, etc.
     .replace(/\bfc\b|\baf\b|\bac\b|\bsc\b|\bsk\b|\bcf\b|\bfk\b|\bif\b|\bbk\b|\bcd\b|\bsd\b|\bud\b|\brcd\b|\bas\b|\bss\b|\bus\b|\bsv\b|\bbv\b/g, '')
     .replace(/[^a-z0-9]/g, '')
     .trim();
@@ -1191,11 +1192,23 @@ async function getSofaMatchContext(homeTeam, awayTeam, sofaEvents) {
     const event = sofaEvents.find(e =>
       sofaTeamMatch(homeTeam, e.homeTeam?.name) && sofaTeamMatch(awayTeam, e.awayTeam?.name)
     );
-    if (!event) return null;
+    if (!event) {
+      console.log(`SofaScore: sin match para ${homeTeam} vs ${awayTeam}`);
+      return null;
+    }
 
+    // Headers completos estilo browser — necesarios para pasar Cloudflare en Railway
     const headers = {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36',
+      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+      'Accept': 'application/json, text/plain, */*',
+      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
       'Referer': 'https://www.sofascore.com/',
+      'Origin': 'https://www.sofascore.com',
+      'Cache-Control': 'no-cache',
+      'Sec-Fetch-Dest': 'empty',
+      'Sec-Fetch-Mode': 'cors',
+      'Sec-Fetch-Site': 'same-site',
     };
 
     const [detailRes, homeFormRes, awayFormRes] = await Promise.allSettled([
@@ -1221,7 +1234,12 @@ async function getSofaMatchContext(homeTeam, awayTeam, sofaEvents) {
           rojas_por_partido:     (rojPP  !== null && rojPP  < 3)  ? rojPP  : null,
           penaltis_por_partido:  (ref.penaltyCount && games > 1) ? +(ref.penaltyCount / games).toFixed(2) : null,
         };
+        console.log(`🃏 Árbitro [${homeTeam}]: ${ref.name} | games=${games} | amarPP=${amarPP}`);
+      } else {
+        console.log(`⚠️ Árbitro sin datos para ${homeTeam} vs ${awayTeam} (ref=${JSON.stringify(ref)})`);
       }
+    } else {
+      console.log(`❌ SofaScore /event/${event.id} falló: ${detailRes.reason?.message || detailRes.status} (status: ${detailRes.reason?.response?.status})`);
     }
 
     // Forma reciente del local
