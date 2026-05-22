@@ -2738,6 +2738,8 @@ REGLA ABSOLUTA — DATOS Y ESTADÍSTICAS:
 - Las estadísticas del JSON son promedios de TEMPORADA COMPLETA en TODAS las competiciones. NUNCA las etiquetes como "en Champions", "en FA Cup", "en copa" — son datos globales de temporada.
 - Si un dato no está en el JSON (árbitro, clima, alineación, estadística específica), escribe "sin datos disponibles" — nunca lo rellenes con suposiciones.
 - El campo "_aviso" del JSON es una instrucción de sistema: léela y cúmplela.
+- CONTEXTO DEL PARTIDO: usa ÚNICAMENTE los campos contextoPartido, jornada/round, motivacionLocal/Visitante del JSON. NUNCA uses tu conocimiento de entrenamiento para etiquetar un partido como "final de copa", "playoff por Champions" u otro contexto que no esté explícitamente en los datos. Si el campo jornada dice "Relegation Round" → dilo tal cual. Si no hay contexto claro → describe la situación numérica en tabla sin inventar narrativa.
+- MUESTRA PEQUEÑA DE H2H: si el H2H tiene ≤5 partidos, NUNCA des stake 9 o 10 basándote solo en ese patrón. 5 partidos no es muestra suficiente para alta confianza estadística. Stake máximo con solo H2H de 5 partidos = 7/10.
 
 PICKS QUE NUNCA DAS — aplica estos criterios internamente, sin mencionarlos al usuario:
 - Gana el favorito obvio a cuota menor de 1.80 (gana Bayern, gana Madrid, gana City, gana Barcelona, gana PSG etc)
@@ -2926,8 +2928,11 @@ INSTRUCCIONES ESPECIALES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
 - CONSISTENCIA PICK/CUOTA: si el título del pick dice "Gana X", la cuota mínima es la de "Gana X". Si dices "Over 3.5", la cuota es la de "Over 3.5". Nunca mezcles mercados dentro del mismo pick.
 - CUOTA MÁXIMA ABSOLUTA: 2.30. Cualquier pick que solo exista a cuota mayor se descarta — no importa el EV teórico, con muestra reducida las probabilidades son poco confiables.
 - STAKE MÍNIMO PUBLICABLE: 5/10. Publica picks con el stake que corresponda al EV real calculado. Stake 5-6 son picks válidos con valor marginal.
+- STAKE MÁXIMO EN MODO FALLBACK: 8/10. Cuando el motor Poisson no encontró picks con EV confirmado y eres tú quien selecciona, el stake máximo publicable es 8/10. Stake 9 o 10 requieren validación matemática del motor — con solo tu análisis y un H2H de 5 partidos, la incertidumbre es demasiado alta para esa confianza.
 - PROHIBIDO dar picks de partidos donde statsLocal y statsVisitante son null o muestran datos limitados en más de 3 de los 5 indicadores clave (goles anotados, goles recibidos, forma reciente, porcentaje BTTS, porcentaje Over 2.5). Si no hay base estadística real, DESCARTA el partido completamente.
 - PARTIDOS CON MUESTRA REDUCIDA EN LA COMPETICIÓN ACTUAL: Si un equipo tiene menos de 5 partidos en esa copa/torneo específico, usa su liga doméstica como fuente principal de estadísticas. Si no hay NINGÚN dato adicional (ni liga doméstica ni H2H), descarta ese partido de los picks automáticos del día — el usuario puede preguntar por él directamente y el bot lo analiza con todos los factores disponibles.
+- PROHIBIDO inventar contexto del partido: solo usa el campo jornada/round, contextoPartido, motivacionLocal/Visitante que vienen en los datos. NUNCA uses tu conocimiento de entrenamiento para deducir si es una "final de copa", un "playoff por Champions" u otro contexto que no aparezca explícitamente en el JSON. Si no hay contexto claro → simplemente omite ese dato y describe la situación en tabla.
+- ESTADÍSTICAS DE TEMPORADA: solo usa los números que aparecen en los campos statsLocal y statsVisitante del JSON. Si esos campos son null o tienen datos del año anterior (temporada distinta a la actual), MENCIONA "datos limitados de temporada actual" — NUNCA rellenes con estadísticas de tu entrenamiento.
 - Siempre busca llegar a 3 picks — solo da menos si genuinamente no hay suficientes partidos con datos mínimos.
 
 INSTRUCCIÓN ESPECIAL PARA PICKS DEL DÍA:
