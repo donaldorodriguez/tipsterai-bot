@@ -3766,10 +3766,13 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   if (!forceRefresh) {
     const cached = getPicksCache('all');
     if (cached) {
-      console.log(`📦 Cache hit — picks del día ya generados a las ${cached.generadoAt}`);
+      const generadoCol = new Date(cached.generadoAt).toLocaleTimeString('es-CO', {
+        timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit', hour12: true,
+      });
+      console.log(`📦 Cache hit — picks del día ya generados a las ${generadoCol} (Col)`);
       await bot.sendMessage(
         chatId,
-        `📦 _Picks ya generados hoy (${cached.generadoAt.slice(11, 16)} hora UTC). Mostrando análisis guardado:_`,
+        `📦 _Análisis generado hoy a las ${generadoCol} (Col). Escribe *"Actualizar picks"* para regenerar con datos frescos._`,
         { parse_mode: 'Markdown' }
       );
       return sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${cached.picksText}`, { parse_mode: 'Markdown' });
