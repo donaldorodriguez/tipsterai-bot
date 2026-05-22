@@ -477,9 +477,11 @@ function getPicksCache(scope) {
   const entry = cache[`${today}_${scope}`];
   if (!entry) return null;
   if (entry.fecha !== today) return null;
-  // Invalidar si el caché tiene más de 3 horas — los partidos pueden haber empezado o terminado
   const ageMs = Date.now() - new Date(entry.generadoAt).getTime();
-  if (ageMs > 3 * 60 * 60 * 1000) return null;
+  // Caché corto (45 min) si no hubo picks del motor — para reintentar cuando lleguen las cuotas
+  // Caché normal (3 horas) si hubo picks reales del motor
+  const maxAge = entry.noPicksEngine ? 45 * 60 * 1000 : 3 * 60 * 60 * 1000;
+  if (ageMs > maxAge) return null;
   return entry;
 }
 
@@ -491,10 +493,11 @@ function setPicksCache(scope, picksText, fixtureIds) {
     if (!key.startsWith(today)) delete cache[key];
   }
   cache[`${today}_${scope}`] = {
-    fecha:      today,
-    generadoAt: new Date().toISOString(),
+    fecha:         today,
+    generadoAt:    new Date().toISOString(),
     picksText,
-    fixtureIds: fixtureIds || [],
+    fixtureIds:    fixtureIds || [],
+    noPicksEngine: (fixtureIds || []).length === 0, // true cuando no hubo picks del motor
   };
   savePicksCache(cache);
 }
@@ -3820,12 +3823,45 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   console.log(`✅ Cuotas encontradas: ${withOdds.length} / ${oddsPool.length} partidos`);
 
-  // Si nadie tiene cuotas, continuar con los top 20 sin cuotas (modo fallback)
-  const selected = withOdds.length > 0
-    ? withOdds.slice(0, 40).map(x => x.fixture)
-    : oddsPool.slice(0, 20);
+  // Si hay pocos partidos con cuotas (<10), intentar cuotas implícitas desde predicciones de la API
+  // La API de predicciones da win_or_draw % → podemos derivar cuotas implícitas para EV
+  let selected, oddsPreFetched;
+  if (withOdds.length >= 3) {
+    selected = withOdds.slice(0, 40).map(x => x.fixture);
+    oddsPreFetched = new Map(withOdds.slice(0, 40).map(x => [x.fixture.fixtureId, x.odds]));
+  } else {
+    // Pocas/ninguna cuota real → usar predicciones API para derivar cuotas implícitas
+    console.log(`⚠️ Pocas cuotas reales (${withOdds.length}). Derivando cuotas implícitas desde predicciones API...`);
+    const predPool = oddsPool.slice(0, 30);
+    const predStage = await Promise.allSettled(predPool.map(f => getApiPrediction(f.fixtureId)));
+    const withImplied = predPool
+      .map((f, i) => {
+        const pred = predStage[i].status === 'fulfilled' ? predStage[i].value : null;
+        if (!pred?.percent_home || !pred?.percent_away || !pred?.percent_draw) return null;
+        // Convertir % de predicción a cuotas implícitas (con margen del 7%)
+        const margin = 1.07;
+        const implied = {
+          homeWin: +(margin / (pred.percent_home / 100)).toFixed(2),
+          draw:    +(margin / (pred.percent_draw / 100)).toFixed(2),
+          awayWin: +(margin / (pred.percent_away / 100)).toFixed(2),
+          // Over 2.5 aproximado desde goles esperados de la API
+          over25:  pred.goals_home != null && pred.goals_away != null
+            ? +(margin / Math.max(0.1, 1 - Math.exp(-(pred.goals_home + pred.goals_away)) * (1 + (pred.goals_home + pred.goals_away)))).toFixed(2)
+            : null,
+          _source: 'predicted',
+        };
+        // Solo incluir si al menos homeWin o awayWin tienen cuotas razonables (1.50-3.50)
+        if (implied.homeWin < 1.40 || implied.homeWin > 4.0) return null;
+        return { fixture: f, odds: implied };
+      })
+      .filter(Boolean);
 
-  const oddsPreFetched = new Map(withOdds.slice(0, 40).map(x => [x.fixture.fixtureId, x.odds]));
+    // Mezclar cuotas reales + cuotas implícitas, priorizando reales
+    const combined = [...withOdds, ...withImplied].slice(0, 40);
+    selected = combined.map(x => x.fixture);
+    oddsPreFetched = new Map(combined.map(x => [x.fixture.fixtureId, x.odds]));
+    console.log(`📊 ${withOdds.length} cuotas reales + ${withImplied.length} implícitas = ${combined.length} total`);
+  }
 
   await bot.sendMessage(chatId, `📈 ${withOdds.length} partidos con cuotas reales. Analizando ${selected.length}...`);
 
@@ -4135,38 +4171,25 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       `Fecha: ${today} (hora Colombia)\n\nPICKS SELECCIONADOS POR EL MOTOR MATEMÁTICO — NO añadas ni elimines ninguno:\n\n${JSON.stringify(topPicks, null, 2)}`
     );
   } else {
-    // ── Motor no encontró EV suficiente O sin cuotas → Claude analiza todo y decide
+    // ── Motor no encontró picks con EV validado → NO inventar, reportar estado real
     const sinCuotas = conOdds === 0;
-    console.log(`📡 Motor: 0 picks válidos (sinCuotas=${sinCuotas}, partidos=${enriched.length}) — Claude analiza`);
-    await bot.sendMessage(chatId, '🧠 Analizando opciones con IA...');
-    const fixturesParaClaude = enriched.map(e => ({
-      local:            e.local,
-      visitante:        e.visitante,
-      liga:             e.liga,
-      country:          e.country,
-      hora:             e.hora,
-      jornada:          e.jornada,
-      estadio:          e.estadio,
-      arbitro:          e.arbitro || null,
-      arbitroStats:     e.arbitroStats || null,
-      statsLocal:       e.statsLocal,
-      statsVisitante:   e.statsVisitante,
-      h2h:              e.h2h,
-      cuotasReales:     e.cuotasReales || null,
-      posicionLocal:    e.posicionLocal,
-      posicionVisitante:e.posicionVisitante,
-      motivacionLocal:  e.motivacionLocal,
-      motivacionVisitante: e.motivacionVisitante,
-      formaSofaLocal:   e.formaSofaLocal || null,
-      formaSofaVisitante: e.formaSofaVisitante || null,
-      fuenteStats:      e._statsSource,
-      probabilidadesCalculadas: e._extendedProbs,
-    }));
-    const systemPrompt = sinCuotas ? PICKS_LLM_FALLBACK_SYSTEM : PICKS_HOY_SYSTEM;
-    picksText = await sonnet(
-      systemPrompt,
-      `Fecha: ${today} (hora Colombia)\n\nNota: el motor matemático no encontró picks con EV alto. Analiza estos partidos con todos los datos disponibles (stats, cuotas, H2H, motivación, árbitro) y selecciona los mejores picks disponibles. Si genuinamente no hay nada con valor, dilo claramente.\n\n${JSON.stringify(fixturesParaClaude, null, 2)}`
-    );
+    console.log(`📡 Motor: 0 picks válidos (sinCuotas=${sinCuotas}, partidos=${enriched.length}) — sin picks hoy`);
+
+    if (sinCuotas) {
+      // Sin cuotas reales: no hay forma de calcular EV — inténtalo más tarde
+      picksText = `⏳ *Las cuotas del día aún no están disponibles en los mercados.*\n\nEl motor necesita cuotas reales para calcular valor esperado. Esto es normal en las primeras horas del día.\n\n📲 Vuelve a pedir los picks en *1-2 horas* cuando las casas hayan publicado sus líneas, o pide el análisis de un partido específico: _"analiza Real Madrid vs Barcelona"_`;
+    } else {
+      // Hay cuotas pero ningún mercado superó los umbrales de EV — honestidad total
+      picksText = `🔍 *El motor analizó ${enriched.length} partidos con cuotas reales y no encontró valor matemático suficiente hoy.*\n\nEsto significa que las casas tienen precios correctos o ligeramente favorables para ellas en todos los mercados disponibles. Mejor no apostar que apostar sin ventaja real.\n\n💡 Puedes pedir el análisis de un partido específico: _"analiza [Equipo A] vs [Equipo B]"_\n\n📲 O intenta de nuevo más tarde si los partidos del día aún no tienen cuotas finales.`;
+    }
+    // Caché corto cuando no hay picks del motor (30 min) para reintentar pronto
+    setPicksCache('all', picksText, []);
+    try {
+      await sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
+    } catch {
+      await sendLong(chatId, `📅 PICKS DEL DÍA — ${today}\n\n${picksText.replace(/[*_`]/g, '')}`);
+    }
+    return;
   }
 
   // Validador mínimo: solo rechaza si la cuota es absurda (>3.50 o <1.30)
