@@ -1472,6 +1472,205 @@ async function getRealOdds(fixtureId) {
   } catch { return null; }
 }
 
+// ─── The Odds API — cuotas bulk (1 request/deporte, no por partido) ───────────
+// Free tier: 500 req/mes. Mucho más confiable y disponible desde temprano.
+// Registro gratis: https://the-odds-api.com/
+
+// API-Football leagueId → The Odds API sport key
+const LEAGUE_TO_ODDS_SPORT = {
+  39:  'soccer_england_premier_league',
+  40:  'soccer_efl_champ',
+  140: 'soccer_spain_la_liga',
+  141: 'soccer_spain_segunda_division',
+  135: 'soccer_italy_serie_a',
+  136: 'soccer_italy_serie_b',
+  78:  'soccer_germany_bundesliga',
+  79:  'soccer_germany_2_bundesliga',
+  61:  'soccer_france_ligue_one',
+  62:  'soccer_france_ligue_deux',
+  2:   'soccer_uefa_champs_league',
+  3:   'soccer_uefa_europa_league',
+  848: 'soccer_uefa_europa_conference_league',
+  88:  'soccer_netherlands_eredivisie',
+  89:  'soccer_netherlands_eerste_divisie',
+  94:  'soccer_portugal_primeira_liga',
+  95:  'soccer_portugal_segunda_liga',
+  197: 'soccer_greece_super_league',
+  203: 'soccer_turkey_super_league',
+  144: 'soccer_belgium_first_div',
+  119: 'soccer_denmark_superliga',
+  113: 'soccer_sweden_allsvenskan',
+  103: 'soccer_norway_eliteserien',
+  106: 'soccer_poland_ekstraklasa',
+  283: 'soccer_romania_liga_1',
+  207: 'soccer_switzerland_super_league',
+  179: 'soccer_scotland_premiership',
+  98:  'soccer_japan_j_league',
+  292: 'soccer_south_korea_kleague1',
+  71:  'soccer_brazil_campeonato',
+  72:  'soccer_brazil_campeonato_b',
+  128: 'soccer_argentina_primera_division',
+  239: 'soccer_colombia_primera_a',
+  262: 'soccer_mexico_ligamx',
+  253: 'soccer_usa_mls',
+  307: 'soccer_saudi_professional_league',
+};
+
+// Cache en memoria: key = `${sportKey}_${dateStr}`, valor = { ts, events }
+const _oddsApiCache = new Map();
+
+function _normalizeTeamOdds(name) {
+  return (name || '')
+    .toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')   // quitar diacríticos (rango Unicode correcto)
+    // quitar sufijos/prefijos de club y preposiciones
+    .replace(/\b(fc|cf|sc|ac|rc|cd|sd|sk|bk|fk|nk|as|ss|sv|vv|vs|if|dk|ik|rb|afc|utd|united|de|del|la|el|los|las|do|da|dos|das|van|den|het)\b/g, '')
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function _teamsMatchOdds(a, b) {
+  const na = _normalizeTeamOdds(a);
+  const nb = _normalizeTeamOdds(b);
+  if (na === nb) return true;
+  if (na.length > 4 && nb.includes(na)) return true;
+  if (nb.length > 4 && na.includes(nb)) return true;
+  // coincidencia por palabras significativas (≥5 chars) — cubre "Atletico Madrid" vs "Atletico de Madrid"
+  const sigWords = (s) => s.split(' ').filter(w => w.length >= 5);
+  const wa = sigWords(na), wb = sigWords(nb);
+  const shared = wa.filter(w => wb.includes(w));
+  if (shared.length >= 2) return true;                 // al menos 2 palabras clave comunes
+  if (shared.length === 1 && wa.length <= 2 && wb.length <= 2) return true; // equipos de 1 palabra
+  return false;
+}
+
+async function _fetchOddsApiBulk(sportKey, dateStr) {
+  const cacheKey = `${sportKey}_${dateStr}`;
+  const cached = _oddsApiCache.get(cacheKey);
+  // TTL: 2 horas (cuotas no cambian drásticamente en ese tiempo)
+  if (cached && (Date.now() - cached.ts) < 2 * 60 * 60 * 1000) return cached.events;
+
+  const apiKey = process.env.THE_ODDS_API_KEY;
+  if (!apiKey) return [];
+
+  try {
+    // Ventana de tiempo: día solicitado + día siguiente (cubre zonas horarias)
+    const from = `${dateStr}T00:00:00Z`;
+    const nextDay = new Date(new Date(dateStr + 'T12:00:00Z').getTime() + 24 * 60 * 60 * 1000)
+      .toISOString().split('T')[0];
+    const to = `${nextDay}T23:59:59Z`;
+
+    const { data, headers } = await axios.get(
+      `https://api.the-odds-api.com/v4/sports/${sportKey}/odds/`,
+      {
+        params: {
+          apiKey,
+          regions: 'eu',
+          markets: 'h2h,totals,btts',
+          oddsFormat: 'decimal',
+          dateFormat: 'iso',
+          commenceTimeFrom: from,
+          commenceTimeTo: to,
+        },
+        timeout: 12000,
+      }
+    );
+    const remaining = headers['x-requests-remaining'];
+    console.log(`🎰 OddsAPI [${sportKey}] → ${(data||[]).length} eventos | Requests restantes: ${remaining ?? '?'}`);
+    _oddsApiCache.set(cacheKey, { ts: Date.now(), events: data || [] });
+    return data || [];
+  } catch (err) {
+    console.warn(`⚠️ OddsAPI error [${sportKey}]: ${err.message}`);
+    _oddsApiCache.set(cacheKey, { ts: Date.now(), events: [] }); // caché vacío para no reintentar
+    return [];
+  }
+}
+
+function _parseOddsApiEvent(event) {
+  // Bookmaker priority: bet365 > pinnacle > betfair > unibet > cualquiera
+  const PRIO = ['bet365', 'pinnacle', 'betfair', 'unibet', 'williamhill', 'bwin', 'marathonbet'];
+  const bm = PRIO.reduce((best, key) => best || (event.bookmakers || []).find(b => b.key === key), null)
+    || (event.bookmakers || [])[0];
+  if (!bm) return null;
+
+  const odds = {};
+  for (const market of bm.markets || []) {
+    if (market.key === 'h2h') {
+      for (const o of market.outcomes) {
+        if (o.name === 'Draw')             odds.draw    = o.price;
+        else if (o.name === event.home_team) odds.homeWin = o.price;
+        else if (o.name === event.away_team) odds.awayWin = o.price;
+      }
+    }
+    if (market.key === 'totals') {
+      for (const o of market.outcomes) {
+        const pt = o.point;
+        if (o.name === 'Over')  {
+          if (pt === 0.5) odds.over05  = o.price;
+          if (pt === 1.5) odds.over15  = o.price;
+          if (pt === 2.5) odds.over25  = o.price;
+          if (pt === 3.5) odds.over35  = o.price;
+        } else if (o.name === 'Under') {
+          if (pt === 2.5) odds.under25 = o.price;
+          if (pt === 3.5) odds.under35 = o.price;
+        }
+      }
+    }
+    if (market.key === 'btts') {
+      for (const o of market.outcomes) {
+        if (o.name === 'Yes') odds.bttsYes = o.price;
+        if (o.name === 'No')  odds.bttsNo  = o.price;
+      }
+    }
+  }
+  return Object.keys(odds).length >= 2 ? odds : null;
+}
+
+/**
+ * Pre-fetches odds from The Odds API for all sport keys relevant to the given fixtures.
+ * Returns a Map<fixtureId, odds_object>. Each sport key uses 1 API request (not per fixture).
+ */
+async function prefetchOddsApi(fixtures, dateStr) {
+  if (!process.env.THE_ODDS_API_KEY) return new Map();
+
+  // Agrupar fixtures por sport key (solo los que tienen mapping)
+  const bySport = new Map();
+  for (const f of fixtures) {
+    const sportKey = LEAGUE_TO_ODDS_SPORT[f.leagueId];
+    if (!sportKey) continue;
+    if (!bySport.has(sportKey)) bySport.set(sportKey, []);
+    bySport.get(sportKey).push(f);
+  }
+  if (bySport.size === 0) return new Map();
+
+  console.log(`🎰 OddsAPI: pre-fetching ${bySport.size} sports para ${fixtures.length} fixtures...`);
+
+  const sportKeys = [...bySport.keys()];
+  const results = await Promise.allSettled(sportKeys.map(sk => _fetchOddsApiBulk(sk, dateStr)));
+
+  const oddsMap = new Map();
+  for (let i = 0; i < sportKeys.length; i++) {
+    if (results[i].status !== 'fulfilled') continue;
+    const events  = results[i].value;
+    const myFixts = bySport.get(sportKeys[i]);
+
+    for (const fixture of myFixts) {
+      // Buscar el evento que coincide por nombres de equipo
+      const match = events.find(e =>
+        _teamsMatchOdds(e.home_team, fixture.homeTeam) &&
+        _teamsMatchOdds(e.away_team, fixture.awayTeam)
+      );
+      if (!match) continue;
+      const parsedOdds = _parseOddsApiEvent(match);
+      if (parsedOdds) oddsMap.set(fixture.fixtureId, { ...parsedOdds, _source: 'theOddsApi' });
+    }
+  }
+
+  console.log(`🎰 OddsAPI: ${oddsMap.size} / ${fixtures.length} fixtures con cuotas`);
+  return oddsMap;
+}
+
 async function getLiveOdds(fixtureId) {
   try {
     const { data } = await API.get('/odds/live', { params: { fixture: fixtureId } });
@@ -3800,37 +3999,55 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     return bot.sendMessage(chatId, `😔 No hay partidos no iniciados en las ligas monitoreadas hoy (${today}).`);
   }
 
-  // ── FASE 1: verificar cuotas para el mayor número de partidos posible ────────
+  // ── FASE 1: cuotas — The Odds API (bulk) + API-Football (fallback) ───────────
   // Ordenar todos los partidos disponibles por prioridad de liga
   const oddsPool = [...fixtures]
     .sort((a, b) => (LEAGUE_PRIORITY[b.leagueId] || 0) - (LEAGUE_PRIORITY[a.leagueId] || 0))
     .slice(0, 80); // revisar hasta 80 partidos buscando cuotas
 
-  await bot.sendMessage(chatId, `📊 ${fixtures.length} partidos en ligas monitoreadas. Verificando cuotas en ${oddsPool.length} partidos...`);
+  await bot.sendMessage(chatId, `📊 ${fixtures.length} partidos en ligas monitoreadas. Consultando cuotas...`);
 
-  // Cuotas en lotes de 20 para no saturar la API
-  const oddsStage1 = [];
-  for (let i = 0; i < oddsPool.length; i += 20) {
-    const batch = await Promise.allSettled(oddsPool.slice(i, i + 20).map(f => getRealOdds(f.fixtureId)));
-    oddsStage1.push(...batch);
-    if (i + 20 < oddsPool.length) await new Promise(r => setTimeout(r, 2000));
+  // Paso 1a: The Odds API — 1 request por deporte, cubre múltiples partidos de golpe
+  const theOddsApiMap = await prefetchOddsApi(oddsPool, today);
+  const countFromOddsApi = theOddsApiMap.size;
+
+  // Paso 1b: Para partidos SIN cuota de The Odds API, intentar API-Football (per fixture)
+  const missingFromOddsApi = oddsPool.filter(f => !theOddsApiMap.has(f.fixtureId));
+  const apiFbOddsMap = new Map();
+
+  if (missingFromOddsApi.length > 0) {
+    const oddsStage1 = [];
+    for (let i = 0; i < missingFromOddsApi.length; i += 20) {
+      const batch = await Promise.allSettled(
+        missingFromOddsApi.slice(i, i + 20).map(f => getRealOdds(f.fixtureId))
+      );
+      oddsStage1.push(...batch);
+      if (i + 20 < missingFromOddsApi.length) await new Promise(r => setTimeout(r, 2000));
+    }
+    missingFromOddsApi.forEach((f, i) => {
+      const odds = oddsStage1[i].status === 'fulfilled' ? oddsStage1[i].value : null;
+      if (odds) apiFbOddsMap.set(f.fixtureId, odds);
+    });
+    console.log(`📊 API-Football cubrió ${apiFbOddsMap.size}/${missingFromOddsApi.length} partidos restantes`);
   }
 
-  // Quedarnos solo con los que tienen cuotas reales — sin cuotas no hay EV
+  // Combinar ambas fuentes (The Odds API tiene prioridad)
   const withOdds = oddsPool
-    .map((f, i) => ({ fixture: f, odds: oddsStage1[i].status === 'fulfilled' ? oddsStage1[i].value : null }))
+    .map(f => {
+      const odds = theOddsApiMap.get(f.fixtureId) || apiFbOddsMap.get(f.fixtureId) || null;
+      return { fixture: f, odds };
+    })
     .filter(x => x.odds !== null);
 
-  console.log(`✅ Cuotas encontradas: ${withOdds.length} / ${oddsPool.length} partidos`);
+  console.log(`✅ Cuotas totales: ${withOdds.length}/${oddsPool.length} (${countFromOddsApi} OddsAPI + ${apiFbOddsMap.size} API-Football)`);
 
-  // Si hay pocos partidos con cuotas (<10), intentar cuotas implícitas desde predicciones de la API
-  // La API de predicciones da win_or_draw % → podemos derivar cuotas implícitas para EV
+  // Si hay pocos partidos con cuotas (<3), derivar cuotas implícitas desde predicciones de la API
   let selected, oddsPreFetched;
   if (withOdds.length >= 3) {
     selected = withOdds.slice(0, 40).map(x => x.fixture);
     oddsPreFetched = new Map(withOdds.slice(0, 40).map(x => [x.fixture.fixtureId, x.odds]));
   } else {
-    // Pocas/ninguna cuota real → usar predicciones API para derivar cuotas implícitas
+    // Muy pocas cuotas reales → derivar cuotas implícitas desde % de predicción
     console.log(`⚠️ Pocas cuotas reales (${withOdds.length}). Derivando cuotas implícitas desde predicciones API...`);
     const predPool = oddsPool.slice(0, 30);
     const predStage = await Promise.allSettled(predPool.map(f => getApiPrediction(f.fixtureId)));
@@ -3838,32 +4055,31 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       .map((f, i) => {
         const pred = predStage[i].status === 'fulfilled' ? predStage[i].value : null;
         if (!pred?.percent_home || !pred?.percent_away || !pred?.percent_draw) return null;
-        // Convertir % de predicción a cuotas implícitas (con margen del 7%)
         const margin = 1.07;
         const implied = {
           homeWin: +(margin / (pred.percent_home / 100)).toFixed(2),
           draw:    +(margin / (pred.percent_draw / 100)).toFixed(2),
           awayWin: +(margin / (pred.percent_away / 100)).toFixed(2),
-          // Over 2.5 aproximado desde goles esperados de la API
           over25:  pred.goals_home != null && pred.goals_away != null
             ? +(margin / Math.max(0.1, 1 - Math.exp(-(pred.goals_home + pred.goals_away)) * (1 + (pred.goals_home + pred.goals_away)))).toFixed(2)
             : null,
           _source: 'predicted',
         };
-        // Solo incluir si al menos homeWin o awayWin tienen cuotas razonables (1.50-3.50)
         if (implied.homeWin < 1.40 || implied.homeWin > 4.0) return null;
         return { fixture: f, odds: implied };
       })
       .filter(Boolean);
 
-    // Mezclar cuotas reales + cuotas implícitas, priorizando reales
     const combined = [...withOdds, ...withImplied].slice(0, 40);
     selected = combined.map(x => x.fixture);
     oddsPreFetched = new Map(combined.map(x => [x.fixture.fixtureId, x.odds]));
-    console.log(`📊 ${withOdds.length} cuotas reales + ${withImplied.length} implícitas = ${combined.length} total`);
+    console.log(`📊 ${withOdds.length} reales + ${withImplied.length} implícitas = ${combined.length} total`);
   }
 
-  await bot.sendMessage(chatId, `📈 ${withOdds.length} partidos con cuotas reales. Analizando ${selected.length}...`);
+  const srcMsg = countFromOddsApi > 0
+    ? `🎰 ${countFromOddsApi} cuotas vía The Odds API`
+    : `📊 ${withOdds.length} cuotas vía API-Football`;
+  await bot.sendMessage(chatId, `${srcMsg} | Analizando ${selected.length} partidos con el motor matemático...`);
 
   // ── FASE 2: stats de equipo solo para partidos con cuotas ────────────────────
   const statsPairs = selected.flatMap(f => [
