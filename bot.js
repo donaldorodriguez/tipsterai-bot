@@ -5801,17 +5801,20 @@ bot.on('message', async (msg) => {
         return { intencion: 'alerta_gol', pregunta_especifica: t };
       }
 
+      // Normalizar variantes de "picks": pics, pick, pix → picks
+      const qNorm = q.replace(/\bpics?\b/g, 'picks').replace(/\bpix\b/g, 'picks');
+
       // Picks del día general
       const isPicksHoy =
-        /^(picks?|apuestas?)\s*(de\s*)?(hoy|del\s*dia|para\s*hoy)/.test(q) ||
-        q === 'picks' ||
-        q === 'picks hoy' ||
+        /^(picks?|apuestas?)\s*(de\s*)?(hoy|del\s*dia|para\s*hoy)/.test(qNorm) ||
+        qNorm === 'picks' ||
+        qNorm === 'picks hoy' ||
         // "actualizar picks", "refresh picks", "dame picks", "ver picks", etc.
-        /\b(actualizar|refresh|forzar|nuevo|recalcul|regenera|dame|ver|muestra|quiero)\b.*\bpicks?\b/.test(q) ||
-        /\bpicks?\b.*\b(actualizar|refresh|forzar|nuevo|recalcul|regenera|globales?|del\s*d[íi]a|de\s*hoy)\b/.test(q) ||
+        /\b(actualizar|refresh|forzar|nuevo|recalcul|regenera|dame|ver|muestra|quiero)\b.*\bpicks?\b/.test(qNorm) ||
+        /\bpicks?\b.*\b(actualizar|refresh|forzar|nuevo|recalcul|regenera|globales?|del\s*d[íi]a|de\s*hoy)\b/.test(qNorm) ||
         // "top 3 global", "top picks", "mejores picks"
-        /^top\s*\d*\s*(global|picks?|apuestas?)/.test(q) ||
-        /^(mejores?|top)\s*(picks?|apuestas?)/.test(q);
+        /^top\s*\d*\s*(global|picks?|apuestas?)/.test(qNorm) ||
+        /^(mejores?|top)\s*(picks?|apuestas?)/.test(qNorm);
       if (isPicksHoy) {
         return { intencion: 'picks_hoy', pregunta_especifica: t };
       }
