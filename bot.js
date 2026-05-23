@@ -1106,6 +1106,7 @@ function getTeamMotivation(standing, totalTeams) {
   const desc = (description || '').toLowerCase();
   const remainingGames = Math.max(0, 38 - (played || 0));
   const isEndOfSeason = remainingGames <= 5;
+  const isLastMatchday = remainingGames <= 1;
 
   let estado, texto;
   if (desc.includes('champion') && rank <= 2) {
@@ -1136,6 +1137,25 @@ function getTeamMotivation(standing, totalTeams) {
       ? '😴 Sin nada en juego al final de temporada — ALERTA: posibles rotaciones o bajas motivación'
       : '📊 Posición media, sin objetivo urgente';
   }
+
+  // ── Corrección crítica: última jornada con posición clasificatoria ya asegurada ──
+  // Si es la última jornada y el equipo está en zona europea/title pero NO está
+  // luchando activamente (no hay presión de descenso ni de último puesto que da CL),
+  // marcar como posible "plaza asegurada" para que Claude no invente urgencia.
+  if (isLastMatchday) {
+    if (estado === 'clasifica_champions') {
+      texto = '⭐ En zona Champions — ÚLTIMA JORNADA: verificar si plaza ya está matemáticamente asegurada (posibles rotaciones)';
+      estado = 'clasifica_champions_posible_asegurado';
+    } else if (estado === 'lucha_titulo') {
+      // El título solo tiene urgencia real si sigue en disputa
+      texto = '🏆 En zona de título — ÚLTIMA JORNADA: verificar si campeonato sigue en disputa';
+    } else if (estado === 'clasifica_europa' || estado === 'clasifica_conference') {
+      texto = texto + ' — ÚLTIMA JORNADA: verificar si plaza europea ya está asegurada';
+    } else if (estado === 'nada_en_juego') {
+      texto = '😴 Sin objetivo en juego — última jornada, máximo riesgo de rotaciones masivas';
+    }
+  }
+
   return { estado, texto, rank, puntos: points, jugados: played, forma_api: form, jornadas_restantes: remainingGames };
 }
 
@@ -3184,6 +3204,7 @@ INSTRUCCIONES ESPECIALES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
 - PROHIBIDO dar picks de partidos donde statsLocal y statsVisitante son null o muestran datos limitados en más de 3 de los 5 indicadores clave (goles anotados, goles recibidos, forma reciente, porcentaje BTTS, porcentaje Over 2.5). Si no hay base estadística real, DESCARTA el partido completamente.
 - PARTIDOS CON MUESTRA REDUCIDA EN LA COMPETICIÓN ACTUAL: Si un equipo tiene menos de 5 partidos en esa copa/torneo específico, usa su liga doméstica como fuente principal de estadísticas. Si no hay NINGÚN dato adicional (ni liga doméstica ni H2H), descarta ese partido de los picks automáticos del día — el usuario puede preguntar por él directamente y el bot lo analiza con todos los factores disponibles.
 - PROHIBIDO inventar contexto del partido: solo usa el campo jornada/round, contextoPartido, motivacionLocal/Visitante que vienen en los datos. NUNCA uses tu conocimiento de entrenamiento para deducir si es una "final de copa", un "playoff por Champions" u otro contexto que no aparezca explícitamente en el JSON. Si no hay contexto claro → simplemente omite ese dato y describe la situación en tabla.
+- ÚLTIMA JORNADA / FIN DE TEMPORADA — REGLA CRÍTICA: Si motivacionLocal.estado o motivacionVisitante.estado contiene "posible_asegurado" o "última jornada", NO escribas que el equipo "necesita ganar" ni que "lucha por" esa plaza. Escribe en su lugar: "[Equipo] (Xº, Y pts) — plaza [Champions/Europa] posiblemente ya asegurada, posibles rotaciones". Si la clasificación ya NO está en disputa ese día, la motivación es BAJA, no alta. Un equipo que ya clasificó puede alinear suplentes y gestionar esfuerzo — el razonamiento de pick debe reflejar esto, NO lo contrario.
 - ESTADÍSTICAS DE TEMPORADA: solo usa los números que aparecen en los campos statsLocal y statsVisitante del JSON. Si esos campos son null o tienen datos del año anterior (temporada distinta a la actual), MENCIONA "datos limitados de temporada actual" — NUNCA rellenes con estadísticas de tu entrenamiento.
 - Siempre busca llegar a 3 picks — solo da menos si genuinamente no hay suficientes partidos con datos mínimos.
 
