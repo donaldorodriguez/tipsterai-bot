@@ -2454,6 +2454,16 @@ function buildPickCandidates(enrichedFixtures) {
     const awayCardsAvg  = parseFloat(f.statsVisitante?.amarillasPorPartido) || null;
     const refCardsAvg   = parseFloat(f.arbitroStats?.amarillas_por_partido) || null;
     const leagueCardsAvg = baseRates?.cards || 4.0;  // promedio de la liga o 4.0 global
+    const sinDatosArbitro = refCardsAvg === null; // true = árbitro sin stats confirmadas
+
+    // ── Contexto de motivación: fin de temporada sin nada en juego = menos tarjetas ──
+    const motivLocal = f.motivacionLocal?.estado || 'desconocido';
+    const motivVisit = f.motivacionVisitante?.estado || 'desconocido';
+    const sinPension = [motivLocal, motivVisit].every(m =>
+      ['nada_en_juego','clasifica_champions_posible_asegurado','desconocido'].includes(m)
+    );
+    // Si ambos equipos sin presión real → el partido es relajado → -15% en lambda de tarjetas
+    const motivFactor = sinPension ? 0.85 : 1.0;
 
     // Lambda de tarjetas: promedio de ambos equipos, ajustado por árbitro si disponible
     let cardsLambda;
@@ -2461,12 +2471,13 @@ function buildPickCandidates(enrichedFixtures) {
       // Datos reales de equipo disponibles
       const teamAvg = homeCardsAvg + awayCardsAvg;
       // Árbitro: normalizar vs promedio liga → factor de corrección
-      const refFactor = refCardsAvg != null ? refCardsAvg / leagueCardsAvg : 1.0;
-      cardsLambda = teamAvg * Math.max(0.60, Math.min(1.60, refFactor));
+      // Sin datos de árbitro: usamos factor 0.90 (penalización por incertidumbre, no 1.0 neutro)
+      const refFactor = refCardsAvg != null ? refCardsAvg / leagueCardsAvg : 0.90;
+      cardsLambda = teamAvg * Math.max(0.60, Math.min(1.60, refFactor)) * motivFactor;
     } else {
       // Sin datos de equipo → usar base rate de liga ajustada por árbitro
-      const refFactor = refCardsAvg != null ? refCardsAvg / leagueCardsAvg : 1.0;
-      cardsLambda = leagueCardsAvg * Math.max(0.60, Math.min(1.60, refFactor));
+      const refFactor = refCardsAvg != null ? refCardsAvg / leagueCardsAvg : 0.90;
+      cardsLambda = leagueCardsAvg * Math.max(0.60, Math.min(1.60, refFactor)) * motivFactor;
     }
     // P(X >= N) usando Poisson con lambda = cardsLambda
     const pCardsOver25 = poissonCDF_above(cardsLambda, 3);  // >= 3 tarjetas
@@ -2526,6 +2537,16 @@ function buildPickCandidates(enrichedFixtures) {
       if (partialStats && stake > 4) stake = Math.max(4, stake - 1);
       // Respetar el tope de stake impuesto antes del motor (ej: _maxStake=5 para datos parciales)
       if (f._maxStake && stake > f._maxStake) stake = f._maxStake;
+
+      // ── Tope de stake para mercados de tarjetas sin datos del árbitro confirmados ──
+      // Sin saber el perfil del árbitro, el mercado de tarjetas es demasiado incierto.
+      // Máximo 6/10. Con árbitro confirmado puede llegar hasta 8/10 máximo.
+      if (m._cardsBlock) {
+        const maxCardsStake = sinDatosArbitro ? 6 : 8;
+        if (stake > maxCardsStake) stake = maxCardsStake;
+        // Si ambos equipos sin presión (nada en juego), el partido será relajado → -1 nivel más
+        if (sinPension && stake > 5) stake = Math.max(5, stake - 1);
+      }
 
       // La cuota mostrada al usuario lleva el buffer (+0.15).
       // La cuota real (o) se usó para el cálculo de EV — es correcta internamente.
@@ -3342,6 +3363,8 @@ BASE RATES DE LIGA (baseRatesLiga) — USO OBLIGATORIO:
 - amarillas > 4.5/partido: "árbitro permisivo → contexto de muchas tarjetas"
 - amarillas < 2.5/partido: "árbitro restrictivo → pick tarjetas con menor confianza"
 - Si el pick ES de tarjetas → el perfil del árbitro + las amarillasPorPartido de ambos equipos son los datos centrales del razonamiento.
+- ⛔ REGLA DURA TARJETAS: Si arbitroStats es null (stats no disponibles), el pick de tarjetas tiene MÁXIMO stake 6/10 — nunca 7, 8, 9 o 10. Sin datos del árbitro, la incertidumbre es demasiado alta para alta confianza.
+- ⛔ REGLA DURA TARJETAS FIN DE TEMPORADA: Si ambos equipos tienen motivacionLocal/Visitante con estado "nada_en_juego" o "clasifica_champions_posible_asegurado", los partidos relajados producen MENOS tarjetas que el promedio de temporada. En ese contexto, picks de Over tarjetas tienen stake máximo 5/10 y deben mencionarse como "contexto de baja intensidad esperada".
 
 BAJAS (lesionadosLocal/lesionadosVisitante):
 - 1 baja relevante: mencionarla brevemente.
