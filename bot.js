@@ -1142,29 +1142,61 @@ function getTeamMotivation(standing, totalTeams) {
 // ─── SofaScore Unofficial API ─────────────────────────────────────────────────
 const sofaEventCache = new Map();
 
+// Rotación de User-Agents para evitar Cloudflare 403 en Railway
+const SOFA_USER_AGENTS = [
+  // Mobile Android Chrome — suele pasar Cloudflare cuando el desktop falla
+  'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+  // iOS Safari
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1',
+  // Desktop Chrome con sec-ch-ua headers completos
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Safari/537.36',
+  // Firefox
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+];
+let _sofaUaIndex = 0;
+
+function _sofaHeaders() {
+  const ua = SOFA_USER_AGENTS[_sofaUaIndex % SOFA_USER_AGENTS.length];
+  return {
+    'User-Agent': ua,
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Referer': 'https://www.sofascore.com/',
+    'Origin': 'https://www.sofascore.com',
+    'Cache-Control': 'no-cache',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site',
+    'Connection': 'keep-alive',
+  };
+}
+
 async function fetchSofaScoreEvents(date) {
   if (sofaEventCache.has(date)) return sofaEventCache.get(date);
-  try {
-    const { data } = await axios.get(
-      `https://api.sofascore.com/api/v1/sport/football/scheduled-events/${date}`,
-      {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-          'Accept': 'application/json, text/plain, */*',
-          'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-          'Referer': 'https://www.sofascore.com/',
-          'Origin': 'https://www.sofascore.com',
-        },
-        timeout: 12000,
-      }
-    );
-    const events = data.events || [];
-    sofaEventCache.set(date, events);
-    return events;
-  } catch (e) {
-    console.warn('SofaScore events fetch error:', e.message);
-    return [];
+
+  // Intentar con hasta 4 User-Agents distintos antes de rendirse
+  for (let attempt = 0; attempt < SOFA_USER_AGENTS.length; attempt++) {
+    _sofaUaIndex = attempt;
+    try {
+      const { data } = await axios.get(
+        `https://api.sofascore.com/api/v1/sport/football/scheduled-events/${date}`,
+        { headers: _sofaHeaders(), timeout: 12000 }
+      );
+      const events = data.events || [];
+      sofaEventCache.set(date, events);
+      if (attempt > 0) console.log(`🔄 SofaScore OK con UA #${attempt}: ${events.length} eventos`);
+      else console.log(`✅ SofaScore: ${events.length} eventos para ${date}`);
+      return events;
+    } catch (e) {
+      const status = e.response?.status;
+      console.warn(`⚠️ SofaScore intento ${attempt + 1}/4 (UA#${attempt}) → ${status || e.message}`);
+      if (status !== 403 && status !== 429) break; // solo reintentar en bloqueos, no en errores de red
+      await new Promise(r => setTimeout(r, 800 * (attempt + 1))); // backoff: 800ms, 1600ms, 2400ms
+    }
   }
+  console.warn('❌ SofaScore bloqueado en todos los intentos — sin datos de árbitro');
+  return [];
 }
 
 function sofaNormalize(str) {
@@ -3626,6 +3658,102 @@ function persistPicks(picks) {
   fs.writeFileSync(PICKS_FILE, JSON.stringify(picks, null, 2));
 }
 
+// ─── Airtable Picks (persistencia entre deploys) ──────────────────────────────
+// Tabla "Picks" en Airtable — sobrevive reinicios de Railway
+const AIRTABLE_PICKS_TABLE = process.env.AIRTABLE_PICKS_TABLE || 'Picks';
+
+async function savePicksToAirtable(picks) {
+  if (!process.env.AIRTABLE_API_KEY || !process.env.AIRTABLE_BASE_ID) return;
+  try {
+    const base = getAirtableBase();
+    // Solo guardar picks nuevos (que no tengan airtable_id)
+    const nuevos = picks.filter(p => !p._airtableId);
+    if (!nuevos.length) return;
+
+    // Airtable permite máx 10 registros por batch
+    for (let i = 0; i < nuevos.length; i += 10) {
+      const batch = nuevos.slice(i, i + 10);
+      const records = await base(AIRTABLE_PICKS_TABLE).create(
+        batch.map(p => ({
+          fields: {
+            pick_id:     p.id,
+            fecha:       p.fecha,
+            liga:        p.liga || '',
+            local:       p.local || '',
+            visitante:   p.visitante || '',
+            mercado:     p.mercado || '',
+            seleccion:   p.seleccion || '',
+            cuota:       p.cuota || null,
+            stake:       p.stake || null,
+            resultado:   p.resultado || '',
+            score_final: p.scoresFinal ? `${p.scoresFinal.home}-${p.scoresFinal.away}` : '',
+            fixtureId:   p.fixtureId || null,
+            emitidoAt:   p.emitidoAt || '',
+          }
+        }))
+      );
+      // Guardar el ID de Airtable en el pick local para no duplicar
+      records.forEach((rec, idx) => { batch[idx]._airtableId = rec.id; });
+    }
+    persistPicks(picks); // actualizar JSON local con los _airtableId nuevos
+    console.log(`☁️ ${nuevos.length} picks guardados en Airtable`);
+  } catch (e) {
+    // Si la tabla no existe, lo reportamos sin crashear
+    if (e.message?.includes('TABLE_NOT_FOUND') || e.message?.includes('not authorized') || e.statusCode === 404) {
+      console.warn(`⚠️ Airtable Picks: tabla "${AIRTABLE_PICKS_TABLE}" no existe — usando solo JSON local`);
+    } else {
+      console.warn('⚠️ Airtable Picks save error:', e.message);
+    }
+  }
+}
+
+async function updatePickInAirtable(pick) {
+  if (!pick._airtableId || !process.env.AIRTABLE_API_KEY) return;
+  try {
+    const base = getAirtableBase();
+    await base(AIRTABLE_PICKS_TABLE).update(pick._airtableId, {
+      resultado:   pick.resultado || '',
+      score_final: pick.scoresFinal ? `${pick.scoresFinal.home}-${pick.scoresFinal.away}` : '',
+    });
+    console.log(`☁️ Resultado actualizado en Airtable: ${pick.local} vs ${pick.visitante} → ${pick.resultado}`);
+  } catch (e) {
+    console.warn('⚠️ Airtable update error:', e.message);
+  }
+}
+
+async function loadPicksFromAirtable() {
+  if (!process.env.AIRTABLE_API_KEY || !process.env.AIRTABLE_BASE_ID) return null;
+  try {
+    const base = getAirtableBase();
+    const records = await base(AIRTABLE_PICKS_TABLE)
+      .select({ sort: [{ field: 'emitidoAt', direction: 'asc' }] })
+      .all();
+    return records.map(r => ({
+      _airtableId: r.id,
+      id:          r.fields.pick_id || r.id,
+      fecha:       r.fields.fecha || null,
+      liga:        r.fields.liga || null,
+      local:       r.fields.local || null,
+      visitante:   r.fields.visitante || null,
+      mercado:     r.fields.mercado || null,
+      seleccion:   r.fields.seleccion || null,
+      cuota:       r.fields.cuota || null,
+      stake:       r.fields.stake || null,
+      resultado:   r.fields.resultado || null,
+      scoresFinal: r.fields.score_final ? { raw: r.fields.score_final } : null,
+      fixtureId:   r.fields.fixtureId || null,
+      emitidoAt:   r.fields.emitidoAt || null,
+    }));
+  } catch (e) {
+    if (e.message?.includes('TABLE_NOT_FOUND') || e.message?.includes('not authorized')) {
+      console.warn(`⚠️ Airtable Picks: tabla no existe aún — usando JSON local`);
+    } else {
+      console.warn('⚠️ Airtable load error:', e.message);
+    }
+    return null;
+  }
+}
+
 const EXTRACT_PICKS_SYSTEM = `Eres un extractor de picks de apuestas deportivas. Dado un texto de análisis de tipster, extrae TODOS los picks concretos emitidos.
 Para cada pick devuelve un objeto JSON con estos campos:
 - local: nombre del equipo local (string)
@@ -3690,8 +3818,11 @@ async function recordPicks(analysisText, matchesCtx) {
       };
     });
 
-    persistPicks([...existing, ...newPicks]);
+    const allPicks = [...existing, ...newPicks];
+    persistPicks(allPicks);
     console.log(`📝 ${newPicks.length} picks guardados en picks.json`);
+    // Guardar también en Airtable (no bloquea si falla)
+    savePicksToAirtable(allPicks).catch(e => console.warn('Airtable picks:', e.message));
   } catch (e) {
     console.error('recordPicks error:', e.message);
   }
@@ -3839,6 +3970,7 @@ async function evaluatePendingPicks() {
     }
   }));
 
+  const actualizados = [];
   for (const pick of picks) {
     if (pick.resultado !== null || !pick.fixtureId) continue;
     const entry = fixtureMap[pick.fixtureId];
@@ -3846,9 +3978,14 @@ async function evaluatePendingPicks() {
     pick.resultado = await evaluatePickResult(pick, entry.fixture, entry.stats);
     pick.scoresFinal = { home: entry.fixture.goals?.home, away: entry.fixture.goals?.away };
     console.log(`📊 Pick evaluado: ${pick.local} vs ${pick.visitante} — ${pick.seleccion} → ${pick.resultado}`);
+    actualizados.push(pick);
   }
 
   persistPicks(picks);
+  // Actualizar resultados en Airtable
+  for (const pick of actualizados) {
+    updatePickInAirtable(pick).catch(() => {});
+  }
   return picks;
 }
 
