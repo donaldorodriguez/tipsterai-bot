@@ -4695,38 +4695,44 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   });
   console.log(`   Picks seleccionados: ${topPicks.length}`);
 
-  // ── Filtro ZCode: elimina picks donde el modelo externo contradice el nuestro ──
-  // Solo aplica cuando hay datos de ZCode (store no vacío). Contradicción = señales opuestas.
+  // ── Filtro ZCode: marca picks contradichos pero NO bloquea si dejaría 0 picks ──
+  // ZCode es señal de confirmación, no árbitro final. Si contradice todo → nuestro modelo gana.
+  // Umbral alto (70%) para reducir falsos positivos con datos parciales del free tier.
   const zbHayDatos = _zbStore.size > 0;
-  const topPicksFinal = zbHayDatos ? topPicks.filter(pick => {
+  const topPicksZbFiltrados = zbHayDatos ? topPicks.filter(pick => {
     const zb = getZbSignals(pick.local, pick.visitante);
-    if (!zb) return true; // sin datos ZCode para este partido → mantener
-    const market = pick.market;
-    // Under 2.5 con ZCode proyectando Over fuerte
-    if (market === 'under25' && zb.over25_pct !== null && zb.over25_pct >= 65) {
-      console.log(`🚫 ZCode bloquea pick: ${pick.local} vs ${pick.visitante} — under25 vs ZCode over25_pct=${zb.over25_pct}%`);
+    if (!zb) return true;
+    const m = pick.market;
+    if (m === 'under25' && zb.over25_pct !== null && zb.over25_pct >= 70) {
+      console.log(`🚫 ZCode contradice: ${pick.local} vs ${pick.visitante} — under25 vs over25_pct=${zb.over25_pct}%`);
       return false;
     }
-    // Over 2.5 con ZCode proyectando Under fuerte
-    if (market === 'over25' && zb.over25_pct !== null && zb.over25_pct <= 35) {
-      console.log(`🚫 ZCode bloquea pick: ${pick.local} vs ${pick.visitante} — over25 vs ZCode over25_pct=${zb.over25_pct}%`);
+    if (m === 'over25' && zb.over25_pct !== null && zb.over25_pct <= 30) {
+      console.log(`🚫 ZCode contradice: ${pick.local} vs ${pick.visitante} — over25 vs over25_pct=${zb.over25_pct}%`);
       return false;
     }
-    // BTTS Sí con ZCode diciendo BTTS No fuerte
-    if (market === 'btts' && zb.btts_pct !== null && zb.btts_pct <= 30) {
-      console.log(`🚫 ZCode bloquea pick: ${pick.local} vs ${pick.visitante} — btts vs ZCode btts_pct=${zb.btts_pct}%`);
+    if (m === 'btts' && zb.btts_pct !== null && zb.btts_pct <= 30) {
+      console.log(`🚫 ZCode contradice: ${pick.local} vs ${pick.visitante} — btts vs btts_pct=${zb.btts_pct}%`);
       return false;
     }
-    // BTTS No con ZCode proyectando BTTS fuerte
-    if (market === 'bttsNo' && zb.btts_pct !== null && zb.btts_pct >= 70) {
-      console.log(`🚫 ZCode bloquea pick: ${pick.local} vs ${pick.visitante} — bttsNo vs ZCode btts_pct=${zb.btts_pct}%`);
+    if (m === 'bttsNo' && zb.btts_pct !== null && zb.btts_pct >= 70) {
+      console.log(`🚫 ZCode contradice: ${pick.local} vs ${pick.visitante} — bttsNo vs btts_pct=${zb.btts_pct}%`);
       return false;
     }
     return true;
   }) : topPicks;
 
-  if (zbHayDatos && topPicksFinal.length < topPicks.length) {
-    console.log(`🔮 ZCode bloqueó ${topPicks.length - topPicksFinal.length} pick(s) por contradicción`);
+  // Válvula de seguridad: si ZCode bloquea TODO, usar los picks del motor igual.
+  // ZCode con free tier tiene datos parciales — no puede dejar al usuario sin picks.
+  const topPicksFinal = (zbHayDatos && topPicksZbFiltrados.length === 0 && topPicks.length > 0)
+    ? (() => {
+        console.log(`⚠️ ZCode bloqueó todos los picks (${topPicks.length}) — usando motor Poisson como fuente principal`);
+        return topPicks; // nuestro modelo prevalece
+      })()
+    : topPicksZbFiltrados;
+
+  if (zbHayDatos && topPicksFinal.length < topPicks.length && topPicksFinal.length > 0) {
+    console.log(`🔮 ZCode filtró ${topPicks.length - topPicksFinal.length} pick(s), quedan ${topPicksFinal.length}`);
   }
 
   let picksText;
