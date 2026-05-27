@@ -5670,12 +5670,14 @@ async function handleRachas(chatId, intent) {
   const isHoy    = pd === 'hoy'    || /\bhoy\b/.test(q);
   const isManana = pd === 'manana' || /\bma[nñ]ana\b/.test(q);
   if (isHoy || isManana) {
-    const bogotaNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bogota' }));
-    let dateStr = bogotaNow.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    // ── Fecha en Bogotá (UTC-5) — sin depender del timezone del servidor ──────
+    const todayBogota = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    let dateStr = todayBogota;
     let label = 'de hoy';
     if (isManana) {
-      bogotaNow.setDate(bogotaNow.getDate() + 1);
-      dateStr = bogotaNow.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+      // Sumar 1 día usando UTC puro para evitar DST/server-timezone issues
+      const [y, m, d] = todayBogota.split('-').map(Number);
+      dateStr = new Date(Date.UTC(y, m - 1, d + 1)).toISOString().split('T')[0];
       label = 'de mañana';
     }
     return handleRachasFecha(chatId, dateStr, label);
@@ -5839,12 +5841,18 @@ async function getTeamLastFixturesCached(teamId, last = 12) {
 async function handleRachasFecha(chatId, dateStr, label) {
   await bot.sendMessage(chatId, `🔍 Obteniendo partidos ${label} (${dateStr})...`);
 
-  // All raw fixtures for that date (API-Football, no filter)
+  // API returns fixtures by UTC date; we need to verify each fixture's Bogotá date
+  // (e.g. a game at 7:30 PM Colombia = 12:30 AM UTC next day → wrong UTC bucket)
   const allRaw = await fetchFixturesByDate(dateStr).catch(() => []);
 
-  // Filter to top-tier leagues + not yet started (or today = include all statuses)
   const fixtures = allRaw
-    .filter(f => RACHAS_FECHA_LEAGUES.has(f.league.id))
+    .filter(f => {
+      if (!RACHAS_FECHA_LEAGUES.has(f.league.id)) return false;
+      // Key fix: validate that this fixture actually falls on dateStr in Bogotá time
+      const fxBogotaDate = new Date(f.fixture.date)
+        .toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+      return fxBogotaDate === dateStr;
+    })
     .map(parseFixture);
 
   if (fixtures.length === 0) {
