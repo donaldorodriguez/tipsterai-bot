@@ -2271,6 +2271,7 @@ function calcLiveMomentum(stats, homeName, awayName) {
  * @param {number} total    - Minutos totales del partido (90 o 120)
  * @returns {object} proyección con valor estimado y confianza
  */
+// Generic linear projection (kept for backward compatibility only)
 function calcLiveProjection(current, elapsed, total = 90) {
   if (!elapsed || elapsed <= 0) return null;
   const pace = current / elapsed;
@@ -2278,10 +2279,68 @@ function calcLiveProjection(current, elapsed, total = 90) {
   const remaining = (total - elapsed) * pace;
   const confidence = elapsed >= 30 ? 'alta' : elapsed >= 15 ? 'media' : 'baja';
   return {
-    current:    current,                  // corners/tarjetas YA ocurridos
-    projected:  +projected.toFixed(1),   // total proyectado a 90 min
-    remaining:  +remaining.toFixed(1),   // cuántos más se esperan
+    current:    current,
+    projected:  +projected.toFixed(1),
+    remaining:  +remaining.toFixed(1),
     pace:       +(pace * 90).toFixed(1),
+    confidence,
+  };
+}
+
+/**
+ * Proyección de TARJETAS con factor de regresión.
+ * Cuando un equipo ya tiene 3+ amarillas, los jugadores se cuidan →
+ * el ritmo del 2T cae significativamente vs el 1T.
+ */
+function calcCardsProjection(current, elapsed, homeCards = 0, awayCards = 0, total = 90) {
+  if (!elapsed || elapsed <= 0) return null;
+  const pace = current / elapsed;  // ritmo real en este momento
+  // Factor de regresión: equipo con muchas amarillas → jugadores más cautelosos en 2T
+  const maxTeamCards = Math.max(homeCards, awayCards);
+  const regressionFactor =
+    maxTeamCards >= 4 ? 0.45 :   // 4+ amarillas en un equipo → muy cautos en 2T
+    maxTeamCards >= 3 ? 0.60 :   // 3 amarillas → bastante cautos
+    maxTeamCards >= 2 ? 0.75 :   // 2 amarillas → algo más cuidadosos
+    0.85;                         // 0-1 amarilla → ligera regresión natural 1T→2T
+  const remaining = (total - elapsed) * pace * regressionFactor;
+  const projected = current + remaining;
+  const confidence = elapsed >= 30 ? 'alta' : elapsed >= 15 ? 'media' : 'baja';
+  return {
+    current,
+    projected:        +projected.toFixed(1),
+    remaining:        +remaining.toFixed(1),
+    pace:             +(pace * 90).toFixed(1),
+    regressionFactor,
+    confidence,
+    nota: maxTeamCards >= 3
+      ? `⚠️ Factor regresión ${regressionFactor} aplicado — equipo con ${maxTeamCards} amarillas, jugadores más cautelosos en 2T`
+      : null,
+  };
+}
+
+/**
+ * Proyección de CORNERS con factor de "caza de resultado".
+ * El equipo que va perdiendo empuja más → más corners en 2T.
+ * El 2T en general genera ~10-15% más corners que el 1T (presión final).
+ */
+function calcCornersProjection(current, elapsed, homeGoals = 0, awayGoals = 0, total = 90) {
+  if (!elapsed || elapsed <= 0) return null;
+  const pace = current / elapsed;
+  const scoreDiff = Math.abs(homeGoals - awayGoals);
+  // El equipo que pierde busca el empate → más corners en 2T
+  const chaseFactor =
+    scoreDiff >= 2 ? 1.30 :   // partido muy definido → equipo perdedor presiona fuerte
+    scoreDiff >= 1 ? 1.18 :   // un gol de ventaja → cierta persecución
+    1.08;                      // empate → ligero incremento natural de corners en 2T
+  const remaining = (total - elapsed) * pace * chaseFactor;
+  const projected = current + remaining;
+  const confidence = elapsed >= 30 ? 'alta' : elapsed >= 15 ? 'media' : 'baja';
+  return {
+    current,
+    projected:   +projected.toFixed(1),
+    remaining:   +remaining.toFixed(1),
+    pace:        +(pace * 90).toFixed(1),
+    chaseFactor,
     confidence,
   };
 }
@@ -3448,7 +3507,7 @@ CUOTAS EN VIVO:
 ANÁLISIS DE MOMENTUM (campo "momentumEnVivo"):
 - score > 15: el local domina → favorece next goal local, AH local
 - score < -15: el visitante domina → favorece next goal visitante, AH visitante
-- score entre -15 y 15: partido equilibrado → corners y tarjetas
+- score entre -15 y 15: partido equilibrado → evalúa TODOS los mercados (goles, BTTS, corners, tarjetas) y elige el de mayor EV. NO defaultes a corners/tarjetas automáticamente.
 
 EVENTOS DEL PARTIDO (campo "eventosPartido"):
 Si el JSON incluye "eventosPartido", úsalo para enriquecer ENORMEMENTE el análisis:
@@ -3461,13 +3520,21 @@ REGLA: Si ves un cambio táctico ofensivo (delantero por defensa o MC) en el 2T 
 REGLA: Si un defensa clave tiene amarilla → riesgo de falta que puede dar penalti o 2ª amarilla.
 
 PROYECCIONES EN TIEMPO REAL:
-- GOLES: línea mínima con valor real = currentGoals + 2. Si el partido ya tiene los goles
-  necesarios para una línea, esa línea no tiene valor. Busca la siguiente.
-  En 0-2 al HT → Over 2.5 sin valor (falta 1). Over 3.5 = potencial si Freiburg ataca.
-- CORNERS: línea mínima = current + 4. En partido 0-2 donde un equipo necesita remontar
-  → el equipo perdedor va a presionar → corners van a subir → es el mercado clave.
-- TARJETAS: línea mínima = current + 3. En partidos de tensión (remontadas, finales) → sube.
+- GOLES: línea mínima con valor real = currentGoals + 2.
+  En 0-2 al HT → Over 2.5 sin valor (falta 1). Over 3.5 = potencial si el equipo ataca.
+- CORNERS: proyeccionCorners.remaining ya incluye factor de "caza" cuando hay gol en el marcador.
+  Línea mínima = current + 4. Úsalo tal cual — NO multipliques current por 2.
+- TARJETAS: proyeccionTarjetas.projected ya aplica factor de regresión (cuando hay 3+ amarillas en un equipo, el ritmo baja en 2T — jugadores más cautelosos).
+  ⛔ PROHIBIDO multiplicar por 2 los datos del 1T para proyectar el partido completo.
+  Usa SIEMPRE proyeccionTarjetas.projected del JSON. Si hay "nota" de regresión, menciónala.
+  Línea mínima = current + 3. Si proyeccionTarjetas.projected = 7.2, la línea con valor es Over 6.5 o Over 7.5 — no Over 5.5.
 - BTTS: si el equipo perdedor tiene que atacar → BTTS gana probabilidad real.
+
+DIVERSIDAD DE PICKS EN VIVO — REGLA OBLIGATORIA:
+Máximo 1 pick de tarjetas y máximo 1 pick de corners en el análisis completo.
+Si analizas 3 partidos, no todos los picks pueden ser tarjetas/corners — debe haber variedad:
+resultado, BTTS, Over goles, Next Goal, AH, etc. Si solo hay picks de tarjetas y corners,
+revisa si hay al menos 1 partido con pick de goles/resultado válido.
 
 FINALES Y PARTIDOS ÚNICOS:
 - En una final 0-2 al HT: el equipo perdedor TIENE que atacar en 2T → más corners, más tarjetas,
@@ -3476,15 +3543,15 @@ FINALES Y PARTIDOS ÚNICOS:
 - Nunca digas que no hay picks en una final con 45 minutos por delante. Siempre hay algo.
 
 CUANDO estadisticasVivo ES NULL (sin stats de tiros/posesión en tiempo real):
-No significa que no tienes datos. Tienes TODA esta información para dar picks igual:
-1. statsLocal.amarillasPorPartido + statsVisitante.amarillasPorPartido → proyección de tarjetas totales
-   Ejemplo: local 2.1 + visit 1.8 = 3.9 esperadas → Over 3.5 tarjetas tiene valor
-2. statsLocal.faltasCometidasPorPartido_est + statsVisitante.faltasCometidasPorPartido_est → intensidad del partido
-3. arbitroStats.amarillas_por_partido → si el árbitro da 4.2/partido y los equipos son agresivos, Over tarjetas seguro
-4. contextoPorPartido.queSeJuegaLocal/Visitante → si hay presión (descenso, título) → más agresividad
-5. marcador actual + minuto → si va 0-0 en min 65, ambos equipos presionan → corners y tarjetas suben
-6. eventosPartido.tarjetas.amarillas (del partido actual) → cuántas van ya y quién está en riesgo
+No significa que no tienes datos. Analiza TODOS los mercados disponibles:
+1. GOLES/BTTS: statsLocal.golesAnotadosHome + statsVisitante.golesAnotadosAway → proyección de goles. Si ambos equipos promedian >1.5 goles, evalúa Over goles o BTTS.
+2. RESULTADO: contextoPorPartido + marcador + minuto → si va 0-0 en min 70, considera Next Goal, DNB o AH del equipo dominante.
+3. Solo si goles/resultado/BTTS no tienen EV suficiente, evalúa corners y tarjetas:
+   - statsLocal.amarillasPorPartido + statsVisitante.amarillasPorPartido → pero aplica factor de regresión si ya hay 3+ amarillas
+   - arbitroStats.amarillas_por_partido → árbitro estricto refuerza el pick de tarjetas
+4. eventosPartido.tarjetas.riesgo2aAmarilla → jugadores con amarilla en posición de riesgo (defensas, MCs agresivos)
 NUNCA digas "no tengo estadísticas suficientes". Siempre hay suficiente para 1 pick concreto.
+⛔ No emitas 3 picks seguidos todos de tarjetas o todos de corners. Diversifica mercados.
 
 REGLAS IN-PLAY:
 - No uses # ## ### en el formato
@@ -3495,8 +3562,11 @@ REGLAS IN-PLAY:
 - Las frases "sin picks de valor", "no tengo estadísticas", "datos insuficientes" están PROHIBIDAS.
   Solo omite el análisis si el partido lleva < 3 minutos y no hay absolutamente ningún contexto.
 
+COMPETICIÓN — REGLA CRÍTICA:
+Para el campo [Liga/Copa] en el formato, usa EXACTAMENTE el valor del campo "_competicion" del JSON de cada partido (o el campo "leagueName"). NUNCA inferierás ni cambiarás el nombre de la competición. Si el JSON dice "Copa Sudamericana", escribe "Copa Sudamericana" — aunque el usuario haya pedido "Libertadores". Si hay varios partidos, cada uno puede ser de una competición diferente.
+
 FORMATO IN-PLAY (usa este exacto):
-🌍 [País] — [Liga/Copa]
+🌍 [País] — [liga exacta del campo leagueName]
 ⚽ [Local] vs [Visitante] | ⏰ Min [X] | [Marcador]
 📊 Stats: [N] tiros | [N]% posesión local | Corners: [N]-[N] | Tarjetas: [N]-[N]
 [Si hay eventosPartido.goles]: ⚽ Goles: [jugador] (equipo, min')
@@ -5064,8 +5134,10 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const elapsed    = nextRaw.fixture?.status?.elapsed || 0;
   const homeCorners= liveStatsData ? (homeStats(liveStatsData)?.['Corner Kicks'] ?? 0) : 0;
   const awayCorners= liveStatsData ? (awayStats(liveStatsData)?.['Corner Kicks'] ?? 0) : 0;
+  const liveHomeGoals = nextRaw.goals?.home ?? 0;
+  const liveAwayGoals = nextRaw.goals?.away ?? 0;
   const cornersProj= isLive && elapsed > 0
-    ? calcLiveProjection(homeCorners + awayCorners, elapsed)
+    ? calcCornersProjection(homeCorners + awayCorners, elapsed, liveHomeGoals, liveAwayGoals)
     : null;
   const homeCards  = liveStatsData
     ? ((homeStats(liveStatsData)?.['Yellow Cards'] ?? 0) + (homeStats(liveStatsData)?.['Red Cards'] ?? 0))
@@ -5074,7 +5146,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     ? ((awayStats(liveStatsData)?.['Yellow Cards'] ?? 0) + (awayStats(liveStatsData)?.['Red Cards'] ?? 0))
     : 0;
   const cardsProj  = isLive && elapsed > 0
-    ? calcLiveProjection(homeCards + awayCards, elapsed)
+    ? calcCardsProjection(homeCards + awayCards, elapsed, homeCards, awayCards)
     : null;
 
   const analysisData = {
@@ -5260,14 +5332,19 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
     const momentum    = calcLiveMomentum(liveStats, f.homeTeam, f.awayTeam);
     const homeCorners = liveStats ? (homeStats(liveStats)?.['Corner Kicks'] ?? 0) : 0;
     const awayCorners = liveStats ? (awayStats(liveStats)?.['Corner Kicks'] ?? 0) : 0;
-    const cornersProj = elapsed > 0 ? calcLiveProjection(homeCorners + awayCorners, elapsed) : null;
+    const cornersProj = elapsed > 0
+      ? calcCornersProjection(homeCorners + awayCorners, elapsed, f.homeGoals ?? 0, f.awayGoals ?? 0)
+      : null;
     const homeCards   = liveStats ? ((homeStats(liveStats)?.['Yellow Cards']??0)+(homeStats(liveStats)?.['Red Cards']??0)) : 0;
     const awayCards   = liveStats ? ((awayStats(liveStats)?.['Yellow Cards']??0)+(awayStats(liveStats)?.['Red Cards']??0)) : 0;
-    const cardsProj   = elapsed > 0 ? calcLiveProjection(homeCards + awayCards, elapsed) : null;
+    const cardsProj   = elapsed > 0
+      ? calcCardsProjection(homeCards + awayCards, elapsed, homeCards, awayCards)
+      : null;
     const eventosResumen = rawEvents.length > 0 ? summarizeEvents(rawEvents, f.homeTeam, f.awayTeam) : null;
 
     return {
       _aviso: 'Stats históricas son promedios de temporada completa — NUNCA las etiquetes como stats de una copa o competición específica. Solo cita números literalmente presentes en este JSON.',
+      _competicion: `IMPORTANTE: el nombre de esta competición es "${f.leagueName}" — usa EXACTAMENTE este nombre en el campo [Liga/Copa] del formato. NUNCA lo cambies.`,
       ...f,
       marcador: `${f.homeGoals ?? 0}-${f.awayGoals ?? 0}`,
       arbitro: sofa?.arbitro?.nombre || f.referee || null,
