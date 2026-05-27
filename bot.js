@@ -2599,13 +2599,24 @@ function buildPickCandidates(enrichedFixtures) {
       if (f._maxStake && stake > f._maxStake) stake = f._maxStake;
 
       // ── Tope de stake para mercados de tarjetas sin datos del árbitro confirmados ──
-      // Sin saber el perfil del árbitro, el mercado de tarjetas es demasiado incierto.
-      // Máximo 6/10. Con árbitro confirmado puede llegar hasta 8/10 máximo.
       if (m._cardsBlock) {
         const maxCardsStake = sinDatosArbitro ? 6 : 8;
         if (stake > maxCardsStake) stake = maxCardsStake;
-        // Si ambos equipos sin presión (nada en juego), el partido será relajado → -1 nivel más
         if (sinPension && stake > 5) stake = Math.max(5, stake - 1);
+      }
+
+      // ── Tope de stake por muestra reducida ──────────────────────────────────
+      // Si alguno de los dos equipos tiene < 5 partidos en la competición,
+      // los promedios (0.0 goles/p de visitante en 2 partidos, por ej.) son poco fiables.
+      // Cap: stake máximo 7 si muestra reducida, máximo 8 si ambos tienen ≥5.
+      const pjLocal = f.statsLocal?.partidosJugados ?? 99;
+      const pjVisit = f.statsVisitante?.partidosJugados ?? 99;
+      const minSample = Math.min(pjLocal, pjVisit);
+      if (minSample < 4 && stake > 7) {
+        stake = 7;
+        console.log(`📉 Stake capped at 7 (muestra reducida: ${pjLocal}/${pjVisit} partidos): ${f.local} vs ${f.visitante}`);
+      } else if (minSample < 7 && stake > 8) {
+        stake = 8;
       }
 
       // La cuota mostrada al usuario lleva el buffer (+0.15).
@@ -4695,45 +4706,54 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   });
   console.log(`   Picks seleccionados: ${topPicks.length}`);
 
-  // ── Filtro ZCode: marca picks contradichos pero NO bloquea si dejaría 0 picks ──
-  // ZCode es señal de confirmación, no árbitro final. Si contradice todo → nuestro modelo gana.
-  // Umbral alto (70%) para reducir falsos positivos con datos parciales del free tier.
-  const zbHayDatos = _zbStore.size > 0;
-  const topPicksZbFiltrados = zbHayDatos ? topPicks.filter(pick => {
-    const zb = getZbSignals(pick.local, pick.visitante);
-    if (!zb) return true;
-    const m = pick.market;
-    if (m === 'under25' && zb.over25_pct !== null && zb.over25_pct >= 70) {
-      console.log(`🚫 ZCode contradice: ${pick.local} vs ${pick.visitante} — under25 vs over25_pct=${zb.over25_pct}%`);
-      return false;
-    }
-    if (m === 'over25' && zb.over25_pct !== null && zb.over25_pct <= 30) {
-      console.log(`🚫 ZCode contradice: ${pick.local} vs ${pick.visitante} — over25 vs over25_pct=${zb.over25_pct}%`);
-      return false;
-    }
-    if (m === 'btts' && zb.btts_pct !== null && zb.btts_pct <= 30) {
-      console.log(`🚫 ZCode contradice: ${pick.local} vs ${pick.visitante} — btts vs btts_pct=${zb.btts_pct}%`);
-      return false;
-    }
-    if (m === 'bttsNo' && zb.btts_pct !== null && zb.btts_pct >= 70) {
-      console.log(`🚫 ZCode contradice: ${pick.local} vs ${pick.visitante} — bttsNo vs btts_pct=${zb.btts_pct}%`);
-      return false;
-    }
-    return true;
-  }) : topPicks;
+  // ── ZCode: ajusta stakes, NUNCA bloquea picks ────────────────────────────────
+  // ZCode es señal complementaria. El motor Poisson es la fuente principal.
+  // Con cuenta free tier, los datos pueden ser parciales → no pueden silenciar picks.
+  //
+  // Lógica:
+  //   Contradicción fuerte  (≥75% opuesto): stake -2 (mínimo 5)
+  //   Contradicción moderada(≥62% opuesto): stake -1
+  //   Confirmación fuerte   (≥72% mismo):   stake +1 (máximo 10)
+  if (_zbStore.size > 0) {
+    for (const pick of topPicks) {
+      const zb = getZbSignals(pick.local, pick.visitante);
+      if (!zb) continue;
+      const m = pick.market;
+      let delta = 0;
 
-  // Válvula de seguridad: si ZCode bloquea TODO, usar los picks del motor igual.
-  // ZCode con free tier tiene datos parciales — no puede dejar al usuario sin picks.
-  const topPicksFinal = (zbHayDatos && topPicksZbFiltrados.length === 0 && topPicks.length > 0)
-    ? (() => {
-        console.log(`⚠️ ZCode bloqueó todos los picks (${topPicks.length}) — usando motor Poisson como fuente principal`);
-        return topPicks; // nuestro modelo prevalece
-      })()
-    : topPicksZbFiltrados;
+      // Under 2.5: ZCode dice Over fuerte → baja stake
+      if (m === 'under25' && zb.over25_pct !== null) {
+        if      (zb.over25_pct >= 75) delta = -2;
+        else if (zb.over25_pct >= 62) delta = -1;
+      }
+      // Over 2.5: ZCode confirma → sube; dice Under → baja
+      if (m === 'over25' && zb.over25_pct !== null) {
+        if      (zb.over25_pct >= 72) delta = +1;
+        else if (zb.over25_pct <= 25) delta = -2;
+        else if (zb.over25_pct <= 38) delta = -1;
+      }
+      // BTTS Sí: ZCode confirma → sube; dice No → baja
+      if (m === 'btts' && zb.btts_pct !== null) {
+        if      (zb.btts_pct >= 72) delta = +1;
+        else if (zb.btts_pct <= 28) delta = -2;
+        else if (zb.btts_pct <= 38) delta = -1;
+      }
+      // BTTS No: ZCode dice Sí fuerte → baja
+      if (m === 'bttsNo' && zb.btts_pct !== null) {
+        if      (zb.btts_pct >= 75) delta = -2;
+        else if (zb.btts_pct >= 62) delta = -1;
+      }
 
-  if (zbHayDatos && topPicksFinal.length < topPicks.length && topPicksFinal.length > 0) {
-    console.log(`🔮 ZCode filtró ${topPicks.length - topPicksFinal.length} pick(s), quedan ${topPicksFinal.length}`);
+      if (delta !== 0) {
+        const antes = pick.stake;
+        pick.stake = Math.min(10, Math.max(5, pick.stake + delta));
+        const dir = delta > 0 ? '✅ confirma' : '⚠️ contradice';
+        console.log(`🔮 ZCode ${dir}: ${pick.local} vs ${pick.visitante} [${m}] stake ${antes}→${pick.stake} (delta ${delta>0?'+':''}${delta})`);
+      }
+    }
   }
+
+  const topPicksFinal = topPicks; // ZCode solo ajusta stakes, nunca filtra
 
   let picksText;
 
@@ -4744,10 +4764,9 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       `Fecha: ${today} (hora Colombia)\n\nPICKS SELECCIONADOS POR EL MOTOR MATEMÁTICO — NO añadas ni elimines ninguno:\n\n${JSON.stringify(topPicksFinal, null, 2)}`
     );
   } else {
-    // ── Motor no encontró picks con EV validado (o todos bloqueados por ZCode) → sin picks
+    // ── Motor no encontró picks con EV validado → sin picks
     const sinCuotas = conOdds === 0;
-    const zbBloqueados = topPicks.length > 0 && topPicksFinal.length === 0;
-    console.log(`📡 Motor: 0 picks válidos (sinCuotas=${sinCuotas}, zbBloqueados=${zbBloqueados}, partidos=${enriched.length}) — sin picks hoy`);
+    console.log(`📡 Motor: 0 picks válidos (sinCuotas=${sinCuotas}, partidos=${enriched.length}) — sin picks hoy`);
 
     if (sinCuotas) {
       // Sin cuotas reales: no hay forma de calcular EV — inténtalo más tarde
