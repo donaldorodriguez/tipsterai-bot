@@ -2464,19 +2464,19 @@ function buildPickCandidates(enrichedFixtures) {
       { key: 'homeWin',     label: 'Victoria Local',       prob: probs.homeWin  / 100, oddsVal: odds.homeWin,  cat: 'result',    minOdds: 1.50, minProb: 0.52 },
       { key: 'awayWin',     label: 'Victoria Visitante',   prob: probs.awayWin  / 100, oddsVal: odds.awayWin,  cat: 'result',    minOdds: 1.65, minProb: 0.50 },
       // ── Goles FT
-      { key: 'over25',      label: 'Más de 2.5 Goles',     prob: probs.over25   / 100, oddsVal: odds.over25,   cat: 'goals',     minOdds: 1.45, minProb: 0.52 },
-      { key: 'over35',      label: 'Más de 3.5 Goles',     prob: probs.over35   / 100, oddsVal: odds.over35,   cat: 'goals',     minOdds: 1.55, minProb: 0.45 },
-      { key: 'under25',     label: 'Menos de 2.5 Goles',   prob: probs.under25  / 100, oddsVal: odds.under25,  cat: 'goals',     minOdds: 1.45, minProb: 0.50 },
+      { key: 'over25',      label: 'Más de 2.5 Goles',     prob: probs.over25   / 100, oddsVal: odds.over25,   cat: 'goals',     minOdds: 1.45, minProb: 0.50 },
+      { key: 'over35',      label: 'Más de 3.5 Goles',     prob: probs.over35   / 100, oddsVal: odds.over35,   cat: 'goals',     minOdds: 1.55, minProb: 0.43 },
+      { key: 'under25',     label: 'Menos de 2.5 Goles',   prob: probs.under25  / 100, oddsVal: odds.under25,  cat: 'goals',     minOdds: 1.45, minProb: 0.48 },
       // ── BTTS
-      { key: 'btts',        label: 'Ambos Marcan (Sí)',     prob: probs.btts     / 100, oddsVal: odds.bttsYes,  cat: 'btts',      minOdds: 1.45, minProb: 0.55 },
+      { key: 'btts',        label: 'Ambos Marcan (Sí)',     prob: probs.btts     / 100, oddsVal: odds.bttsYes,  cat: 'btts',      minOdds: 1.45, minProb: 0.52 },
       // ── 1er tiempo — goles
-      { key: 'ht_over05',   label: 'Gol en el 1er Tiempo', prob: probs.htOver05 / 100, oddsVal: odds.over05_1T, cat: 'ht_goals', minOdds: 1.40, minProb: 0.55 },
+      { key: 'ht_over05',   label: 'Gol en el 1er Tiempo', prob: probs.htOver05 / 100, oddsVal: odds.over05_1T, cat: 'ht_goals', minOdds: 1.40, minProb: 0.52 },
       { key: 'ht_over15',   label: 'Más de 1.5 Goles 1T',  prob: probs.htOver15 / 100, oddsVal: odds.over15_1T, cat: 'ht_goals', minOdds: 1.55, minProb: 0.45 },
       // ── 1er tiempo — resultado
       { key: 'homeWin_1T',  label: 'Local Gana el 1er Tiempo',      prob: probs.htHomeWin / 100, oddsVal: odds.homeWin_1T, cat: 'ht_result', minOdds: 1.50, minProb: 0.45 },
       { key: 'awayWin_1T',  label: 'Visitante Gana el 1er Tiempo',  prob: probs.htAwayWin / 100, oddsVal: odds.awayWin_1T, cat: 'ht_result', minOdds: 1.65, minProb: 0.42 },
       // ── Corners FT
-      { key: 'cornersOver75',  label: 'Corners Over 7.5',   prob: probs.cornersOver75  / 100, oddsVal: odds.cornersOver75,  cat: 'corners', minOdds: 1.45, minProb: 0.58 },
+      { key: 'cornersOver75',  label: 'Corners Over 7.5',   prob: probs.cornersOver75  / 100, oddsVal: odds.cornersOver75,  cat: 'corners', minOdds: 1.45, minProb: 0.54 },
       { key: 'cornersOver85',  label: 'Corners Over 8.5',   prob: probs.cornersOver85  / 100, oddsVal: odds.cornersOver85,  cat: 'corners', minOdds: 1.45, minProb: 0.52 },
       { key: 'cornersOver95',  label: 'Corners Over 9.5',   prob: probs.cornersOver95  / 100, oddsVal: odds.cornersOver95,  cat: 'corners', minOdds: 1.50, minProb: 0.45 },
       { key: 'cornersOver105', label: 'Corners Over 10.5',  prob: probs.cornersOver105 / 100, oddsVal: odds.cornersOver105, cat: 'corners', minOdds: 1.55, minProb: 0.40 },
@@ -2556,9 +2556,7 @@ function buildPickCandidates(enrichedFixtures) {
                :                           pCardsOver45;
       }
 
-      if (!m.prob || m.prob < (m.minProb || 0.50)) continue; // prob insuficiente
-      // Under 2.5: cuota real > 1.90 implica mercado asigna <53% de prob → descartamos
-      if (m.key === 'under25' && o > 1.90) continue;
+      if (!m.prob || m.prob < (m.minProb || 0.48)) continue; // prob insuficiente
 
       // Tarjetas: no hay modelo propio → solo evaluar si la cuota tiene valor implícito
       // usamos prob heurística directamente (ya definida en cada tarjeta arriba)
@@ -2590,8 +2588,8 @@ function buildPickCandidates(enrichedFixtures) {
       else if (ev >  6 && m.prob >= 0.50) stake = 8;
       else if (ev >  3 && m.prob >= 0.50) stake = 7;
       else if (ev >  0 && m.prob >= 0.50) stake = 6;
-      else if (ev >= -2)                  stake = 5;
-      else                                stake = 4;
+      else if (ev >= -3)                  stake = 5;  // stake 5 = pick válido con valor marginal
+      else                                stake = 4;  // descartado
 
       // Si el partido tiene stats parciales (solo un equipo), bajar stake 1 nivel por confianza.
       if (partialStats && stake > 4) stake = Math.max(4, stake - 1);
@@ -2673,7 +2671,14 @@ function buildPickCandidates(enrichedFixtures) {
   }
 
   // Ordenar de mayor EV a menor
-  return candidates.sort((a, b) => b.ev - a.ev);
+  candidates.sort((a, b) => b.ev - a.ev);
+  console.log(`📐 buildPickCandidates: ${candidates.length} candidatos de ${enrichedFixtures.length} fixtures`);
+  if (candidates.length > 0) {
+    for (const c of candidates.slice(0, 6)) {
+      console.log(`   ▸ ${c.local} vs ${c.visitante} | ${c.market} | EV ${c.ev}% | stake ${c.stake} | odds ${c.odds}`);
+    }
+  }
+  return candidates;
 }
 
 /**
