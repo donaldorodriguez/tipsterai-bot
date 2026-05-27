@@ -6080,6 +6080,7 @@ async function zbDiscover(chatId) {
 
     // Interceptar llamadas de red para encontrar el endpoint de datos
     const apiCalls = [];
+    const soccerGameIds = new Map(); // game_id → { home, away, scores, minute }
     page.on('response', async (res) => {
       const url = res.url();
       const ct  = res.headers()['content-type'] || '';
@@ -6087,6 +6088,29 @@ async function zbDiscover(chatId) {
           && !url.includes('google') && !url.includes('analytics')) {
         const body = await res.text().catch(() => '');
         apiCalls.push({ url, status: res.status(), bodyPreview: body.slice(0, 300) });
+
+        // Detectar game_notification con partidos de fútbol en vivo
+        if (body.includes('game_notification') && body.includes('SOCCER')) {
+          try {
+            const parsed = JSON.parse(body);
+            const items = parsed?.data?.items || parsed?.items || [];
+            for (const item of items) {
+              if (item.sport_name === 'SOCCER' && item.game_id) {
+                // Extraer teams del html o del block_title
+                const titleMatch = (item.block_title || '').match(/\n(.+?)\s+-vs-\s+(.+?)\n/);
+                const home = titleMatch ? titleMatch[1].trim() : '?';
+                const away = titleMatch ? titleMatch[2].trim() : '?';
+                const minute = item.from_game_start ? Math.floor(item.from_game_start / 60) : null;
+                soccerGameIds.set(item.game_id, {
+                  home, away, minute,
+                  score: `${item.score1}:${item.score2}`,
+                  period: item.period_number,
+                  status: item.status,
+                });
+              }
+            }
+          } catch (_) {}
+        }
       }
     });
 
@@ -6121,6 +6145,21 @@ async function zbDiscover(chatId) {
       );
     } else {
       await bot.sendMessage(chatId, '⚠️ No se detectaron llamadas JSON/API — puede ser que requiera login.');
+    }
+
+    // Partidos de fútbol en vivo detectados via game_notification
+    if (soccerGameIds.size > 0) {
+      let liveMsg = `⚽ *${soccerGameIds.size} partidos SOCCER en vivo detectados:*\n`;
+      for (const [gid, g] of [...soccerGameIds.entries()].slice(0, 10)) {
+        liveMsg += `\n🆔 \`${gid}\` | ${g.home} vs ${g.away} | ${g.score} (P${g.period}, min ${g.minute ?? '?'})`;
+      }
+      await sendLong(chatId, liveMsg, { parse_mode: 'Markdown' }).catch(() =>
+        bot.sendMessage(chatId, `Live soccer game IDs: ${[...soccerGameIds.keys()].join(', ')}`)
+      );
+      // Guardar para análisis posterior (¿hay endpoint /predictions?game_id=X?)
+      console.log('ZCode live soccer game IDs:', Object.fromEntries(soccerGameIds));
+    } else {
+      await bot.sendMessage(chatId, '⚽ No se detectaron game_notification de SOCCER — puede ser que no haya partidos en vivo ahora.');
     }
 
     // Volcado del HTML de tablas
@@ -6232,6 +6271,11 @@ async function zbScrapeOnce() {
         const away   = teamsText.slice(vsIdx + 4).trim();
         const league = leagueEl ? leagueEl.textContent.trim() : '';
 
+        // game_id (si la fila o la tabla tienen data-game-id — útil para cruzar con live scores)
+        const gameId = row.getAttribute('data-game-id') ||
+                       row.closest('[data-game-id]')?.getAttribute('data-game-id') ||
+                       gameCell.getAttribute('data-game-id') || null;
+
         // Predicción del resultado esperado (title del .lines, ej: "1X0" = local gana)
         const linesEl = gameCell.querySelector('.lines');
         const likelyResult = linesEl ? (linesEl.getAttribute('title') || '').split('\n')[0].trim() : null;
@@ -6253,7 +6297,7 @@ async function zbScrapeOnce() {
         const section = row.closest('[class*="valuebets"],[id*="valuebets"],[id*="Value"]');
         const inValueBets = !!section;
 
-        results.push({ home, away, league, likelyResult, probs, scorePred, htScorePred, inValueBets });
+        results.push({ home, away, league, likelyResult, probs, scorePred, htScorePred, inValueBets, gameId });
       });
 
       // También scrapejar la sección Value Bets por separado si existe como tabla aparte
@@ -6289,7 +6333,7 @@ async function zbScrapeOnce() {
         scorePred: null, htScorePred: null,
         draw: null, over15: null, over25: null, btts: null,
         ht_over05: null, ht_over15: null, sh_over05: null, sh_over15: null,
-        _ts: Date.now(),
+        gameId: null, _ts: Date.now(),
       };
 
       // Acumular — solo sobreescribir si hay nuevo valor (no borrar datos anteriores)
@@ -6297,6 +6341,7 @@ async function zbScrapeOnce() {
       if (entry.likelyResult) existing.likelyResult = entry.likelyResult;
       if (entry.scorePred)    existing.scorePred    = entry.scorePred;
       if (entry.htScorePred)  existing.htScorePred  = entry.htScorePred;
+      if (entry.gameId)       existing.gameId       = entry.gameId;
 
       for (const [k, v] of Object.entries(entry.probs)) {
         if (v !== null && existing[k] === null) existing[k] = v;
