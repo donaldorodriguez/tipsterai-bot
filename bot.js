@@ -6150,12 +6150,30 @@ async function zbDiscover(chatId) {
 }
 
 // ── MODO PRODUCCIÓN ──────────────────────────────────────────────────────────
-// Extrae predicciones y acumula en _zbStore. Usa selectores descubiertos.
+// Selectores confirmados con el HTML real del site (ver console dump del usuario):
+//
+//   td.date                    → fecha/hora
+//   td.game .league            → "Estonia Esiliiga"
+//   td.game .teams             → "Viimsi JK vs Tallinna Kalev"
+//   td.game .lines[title]      → "1X0" (resultado predicho más probable)
+//   td.probability span        → número entero (77 = 77%)
+//   td.tc.score:not(.rscore)   → predicción de score ("2:1")
+//   td.tc.score.rscore         → resultado real (cuando ya jugó)
+//
+// Orden de columnas td.probability (izq → der según screenshots):
+//   [0] draw        [1] over15   [2] over25   [3] btts
+//   [4] ht_over05   [5] ht_over15  [6] sh_over05  [7] sh_over15
+//
+// Orden de columnas td.tc.score:not(.rscore):
+//   [0] total_score_pred   [1] ht_score_pred
+//
+// Sección "Value Bets" (tabla separada arriba) — solo fútbol con ht_over05 visible
+// ─────────────────────────────────────────────────────────────────────────────
 async function zbScrapeOnce() {
   if (!process.env.ZCODE_COOKIES) return;
 
   let browser;
-  const scraped = [];
+  let scrapedCount = 0;
   try {
     browser = await _zbBrowser();
     const page = await browser.newPage();
@@ -6163,103 +6181,136 @@ async function zbScrapeOnce() {
     await _zbSetCookies(page);
 
     await page.goto(ZB_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {});
-    await new Promise(r => setTimeout(r, 4000));
+    // Esperar que el JS del site cargue las predicciones (polling interno buddy.js)
+    await new Promise(r => setTimeout(r, 5000));
 
-    // Extrae todos los datos de las tablas que pueda encontrar
     const raw = await page.evaluate(() => {
-      const result = [];
+      const PROB_ORDER = ['draw','over15','over25','btts','ht_over05','ht_over15','sh_over05','sh_over15'];
 
-      // Estrategia 1: tablas HTML estándar
-      document.querySelectorAll('table').forEach(table => {
-        const headers = Array.from(table.querySelectorAll('th')).map(h => h.textContent.trim().toLowerCase());
-        const rows    = Array.from(table.querySelectorAll('tbody tr, tr:not(:first-child)'));
+      // Detecta si una celda está bloqueada (requiere upgrade)
+      const isLocked = td =>
+        td.querySelector('[class*="lock"],[class*="blur"],[class*="premium"],[class*="upgrade"]') ||
+        /unlock|upgrade|subscribe/i.test(td.textContent);
 
-        rows.forEach(row => {
-          const cells = Array.from(row.querySelectorAll('td'));
-          if (cells.length < 3) return;
+      // Extrae el número de un td.probability
+      const probVal = td => {
+        if (!td || isLocked(td)) return null;
+        const span = td.querySelector('span');
+        if (!span) return null;
+        const n = parseInt(span.textContent, 10);
+        return isNaN(n) ? null : n;
+      };
 
-          // Detectar si la celda está bloqueada
-          const cellVal = (td) => {
-            if (!td) return null;
-            const locked = td.querySelector('[class*="lock"],[class*="blur"],[class*="premium"]')
-                        || td.textContent.includes('Click to Unlock')
-                        || td.textContent.includes('Unlock');
-            if (locked) return 'LOCKED';
-            // Buscar número en elemento hijo, o tomar textContent
-            const num = td.querySelector('[class*="num"],[class*="pct"],[class*="perc"],strong,b,span');
-            const val = (num ? num : td).textContent.trim().replace(/\s+/g, ' ');
-            return val || null;
-          };
+      // Extrae texto de un td.tc.score (predicción o resultado)
+      const scoreVal = td => {
+        if (!td || isLocked(td)) return null;
+        // Limpiar texto: quitar subelemento .goal si hay gol marcado
+        const clone = td.cloneNode(true);
+        clone.querySelectorAll('.goal,.updated').forEach(el => el.remove());
+        const txt = clone.textContent.trim().replace(/\s+/g, '');
+        return /^\d+:\d+$/.test(txt) ? txt : null;
+      };
 
-          // Primera celda: fecha+hora, Segunda: equipo
-          const dateCell = cellVal(cells[0]) || '';
-          const gameCell = cells[1] ? cells[1].textContent.trim() : '';
+      const results = [];
 
-          // Extraer equipos del gameCell
-          const vsMatch = gameCell.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\n|$)/im);
-          if (!vsMatch) return;
+      // Iterar todas las filas de tabla que tengan td.game
+      document.querySelectorAll('tr:has(td.game)').forEach(row => {
+        const gameCell = row.querySelector('td.game');
+        if (!gameCell) return;
 
-          const entry = {
-            date:     dateCell,
-            home:     vsMatch[1].trim(),
-            away:     vsMatch[2].trim(),
-            league:   gameCell.replace(vsMatch[0], '').trim(),
-            vals:     cells.slice(2).map(cellVal),
-            headers,
-          };
-          result.push(entry);
+        // Solo fútbol — filtrar por sport si hay atributo data-sport o clase
+        // Si no hay filtro, tomamos todo y dejamos que el normalizador descarte no-fútbol
+        const teamsEl  = gameCell.querySelector('.teams');
+        const leagueEl = gameCell.querySelector('.league');
+        if (!teamsEl) return;
+
+        const teamsText = teamsEl.textContent.trim();
+        const vsIdx = teamsText.indexOf(' vs ');
+        if (vsIdx === -1) return;
+
+        const home   = teamsText.slice(0, vsIdx).trim();
+        const away   = teamsText.slice(vsIdx + 4).trim();
+        const league = leagueEl ? leagueEl.textContent.trim() : '';
+
+        // Predicción del resultado esperado (title del .lines, ej: "1X0" = local gana)
+        const linesEl = gameCell.querySelector('.lines');
+        const likelyResult = linesEl ? (linesEl.getAttribute('title') || '').split('\n')[0].trim() : null;
+
+        // Probabilidades — en orden fijo según diseño de la tabla
+        const probCells = Array.from(row.querySelectorAll('td.probability'));
+        const probs = {};
+        PROB_ORDER.forEach((name, i) => {
+          const val = probVal(probCells[i]);
+          if (val !== null) probs[name] = val;
         });
+
+        // Score predictions (excluir .rscore que son resultados reales)
+        const scoreCells = Array.from(row.querySelectorAll('td.tc.score:not(.rscore)'));
+        const scorePred   = scoreVal(scoreCells[0]);
+        const htScorePred = scoreVal(scoreCells[1]);
+
+        // ¿Está en la sección "Value Bets"?
+        const section = row.closest('[class*="valuebets"],[id*="valuebets"],[id*="Value"]');
+        const inValueBets = !!section;
+
+        results.push({ home, away, league, likelyResult, probs, scorePred, htScorePred, inValueBets });
       });
 
-      // Estrategia 2: divs con estructura data-* o clases específicas
-      document.querySelectorAll('[class*="prediction"],[class*="game-row"],[data-home],[data-away]').forEach(el => {
-        const home = el.getAttribute('data-home') || el.querySelector('[class*="home"]')?.textContent?.trim();
-        const away = el.getAttribute('data-away') || el.querySelector('[class*="away"]')?.textContent?.trim();
-        if (!home || !away) return;
-        result.push({ home, away, date: '', league: '', vals: [], headers: [], _fromDiv: true });
+      // También scrapejar la sección Value Bets por separado si existe como tabla aparte
+      document.querySelectorAll('[class*="valuebets"] tr, [id*="valuebets"] tr, [id*="Value"] tr').forEach(row => {
+        const gameCell = row.querySelector('td.game, td:nth-child(2)');
+        if (!gameCell) return;
+        const teamsText = gameCell.textContent;
+        const vsIdx = teamsText.indexOf(' vs ');
+        if (vsIdx === -1) return;
+        const home = teamsText.slice(0, vsIdx).trim();
+        const away = teamsText.slice(vsIdx + 4).trim();
+        // Marcar que aparece en value bets
+        const existing = results.find(r => r.home === home && r.away === away);
+        if (existing) existing.inValueBets = true;
+        else results.push({ home, away, league: '', likelyResult: null, probs: {}, scorePred: null, htScorePred: null, inValueBets: true });
       });
 
-      return result;
+      return results;
     });
 
-    // Procesar resultados crudos
+    // Procesar y acumular en _zbStore
+    const parseNum = v => typeof v === 'number' ? v : null;
+
     for (const entry of raw) {
       if (!entry.home || !entry.away) continue;
+      // Ignorar sports que no sean fútbol (Basketball, etc.) — detectar por nombre de liga
+      if (/basketball|nba|nfl|mlb|hockey|nhl|tennis|baseball/i.test(entry.league)) continue;
 
       const key = _zbKey(entry.home, entry.away);
       const existing = _zbStore.get(key) || {
         home: entry.home, away: entry.away, league: entry.league,
-        inValueBets: new Set(),
+        inValueBets: false, likelyResult: null,
         scorePred: null, htScorePred: null,
-        btts: null, over15: null, over25: null,
+        draw: null, over15: null, over25: null, btts: null,
         ht_over05: null, ht_over15: null, sh_over05: null, sh_over15: null,
-        draw: null, _ts: Date.now(),
+        _ts: Date.now(),
       };
 
-      // Parsear valores según orden de columnas detectado
-      // Orden esperado basado en los screenshots:
-      // draw%, scorePred, over15%, over25%, btts%, htScore, ht_over05%, ht_over15%, sh_over05%, sh_over15%
-      const parseNum = v => (v && v !== 'LOCKED' && /\d/.test(v)) ? parseFloat(v.replace(/[^0-9.]/g, '')) : v;
+      // Acumular — solo sobreescribir si hay nuevo valor (no borrar datos anteriores)
+      if (entry.inValueBets) existing.inValueBets = true;
+      if (entry.likelyResult) existing.likelyResult = entry.likelyResult;
+      if (entry.scorePred)    existing.scorePred    = entry.scorePred;
+      if (entry.htScorePred)  existing.htScorePred  = entry.htScorePred;
 
-      const [draw, scorePred, over15, over25, btts, htScore, ht05, ht15, sh05, sh15] = entry.vals;
-
-      if (scorePred && scorePred !== 'LOCKED') existing.scorePred   = scorePred;
-      if (htScore  && htScore  !== 'LOCKED') existing.htScorePred  = htScore;
-      if (draw     !== 'LOCKED') existing.draw     = parseNum(draw);
-      if (over15   !== 'LOCKED') existing.over15   = parseNum(over15);
-      if (over25   !== 'LOCKED') existing.over25   = parseNum(over25);
-      if (btts     !== 'LOCKED') existing.btts     = parseNum(btts);
-      if (ht05     !== 'LOCKED') existing.ht_over05 = parseNum(ht05);
-      if (ht15     !== 'LOCKED') existing.ht_over15 = parseNum(ht15);
-      if (sh05     !== 'LOCKED') existing.sh_over05 = parseNum(sh05);
-      if (sh15     !== 'LOCKED') existing.sh_over15 = parseNum(sh15);
+      for (const [k, v] of Object.entries(entry.probs)) {
+        if (v !== null && existing[k] === null) existing[k] = v;
+        // Si hay nuevo valor, tomar el promedio ponderado (media entre scrapes)
+        else if (v !== null) existing[k] = Math.round((existing[k] + v) / 2);
+      }
 
       existing._ts = Date.now();
       _zbStore.set(key, existing);
-      scraped.push(entry.home + ' vs ' + entry.away);
+      scrapedCount++;
     }
 
-    console.log(`✅ Soccer Buddy: ${scraped.length} partidos procesados, store total: ${_zbStore.size}`);
+    const football = [..._zbStore.values()].filter(e => !e.league || !/basketball/i.test(e.league));
+    console.log(`✅ ZCode Soccer Buddy: ${scrapedCount} entradas, ${football.length} fútbol en store`);
     _zbLastRun = Date.now();
 
   } catch (e) {
@@ -6267,7 +6318,7 @@ async function zbScrapeOnce() {
   } finally {
     if (browser) await browser.close();
   }
-  return scraped.length;
+  return scrapedCount;
 }
 
 // Scraping programado — corre cada ZB_INTERVAL
