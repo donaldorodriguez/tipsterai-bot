@@ -4359,10 +4359,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     console.log(`📊 ${withOdds.length} reales + ${withImplied.length} implícitas = ${combined.length} total`);
   }
 
-  const srcMsg = countFromOddsApi > 0
-    ? `🎰 ${countFromOddsApi} cuotas vía The Odds API`
-    : `📊 ${withOdds.length} cuotas vía API-Football`;
-  await bot.sendMessage(chatId, `${srcMsg} | Analizando ${selected.length} partidos con el motor matemático...`);
+  await bot.sendMessage(chatId, `📊 ${withOdds.length} cuotas recopiladas | Analizando ${selected.length} partidos con el motor matemático...`);
 
   // ── FASE 2: stats de equipo solo para partidos con cuotas ────────────────────
   const statsPairs = selected.flatMap(f => [
@@ -6907,8 +6904,8 @@ bot.onText(/\/zcode[-_]?status/, async (msg) => {
   const size = _zbStore.size;
   const last = _zbLastRun ? new Date(_zbLastRun).toLocaleString('es-CO', { timeZone: 'America/Bogota' }) : 'nunca';
   const hasCookies = !!process.env.ZCODE_COOKIES;
-  let msg2 = `📡 *Soccer Buddy Status*\n\n`;
-  msg2 += `🍪 Cookies: ${hasCookies ? '✅ configuradas' : '❌ NO configuradas'}\n`;
+  let msg2 = `📡 *Estado del motor externo*\n\n`;
+  msg2 += `🔑 Sesión: ${hasCookies ? '✅ activa' : '❌ no configurada'}\n`;
   msg2 += `📊 Partidos en store: *${size}*\n`;
   msg2 += `🕐 Último scrape: ${last}\n\n`;
   if (size > 0) {
