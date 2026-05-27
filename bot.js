@@ -3142,6 +3142,14 @@ Si el JSON de datos incluye el campo "probabilidadesCalculadas", DEBES usarlo co
 - forma5: forma reciente ponderada de los últimos 5 partidos. Si un equipo tiene forma5.nota = "Forma mala" (≤5 puntos), reduce 8% la prob de victoria.
 - cuotasReales: cuotas reales de Bet365. Usa ESTAS cuotas para el campo "Cuota mínima" del pick (no inventes cuotas). Si no hay cuotas reales, mantén las estimadas.
 - prediccionAPI: predicción del modelo de API-Football. Úsala como señal de confirmación — si coincide con tu análisis, sube el stake en 0.5. Si contradice, baja el stake en 1.
+- soccerBuddy: señales del modelo ZCode Soccer Buddy (simulación Monte Carlo de miles de partidos). Son externas y complementan el Poisson propio.
+  * Si soccerBuddy.btts_pct ≥ 70 Y nuestro probBTTS ≥ 60 → confirmación doble → sube stake en 1.
+  * Si soccerBuddy.over25_pct ≥ 70 Y nuestro probOver25 ≥ 60 → confirmación doble → sube stake en 1.
+  * Si soccerBuddy.ht_over05_pct ≥ 70 → señal fuerte de gol en 1T → considera ese mercado si no lo tenías.
+  * Si soccerBuddy.scorePred y coincide con la dirección de nuestro análisis (local/empate/visitante) → confirmación extra → +0.5 stake.
+  * Si soccerBuddy contradice nuestro modelo (ej. nosotros: Over25 65%, ellos: over25_pct 35%) → NO emitas ese pick. Hay señal mixta.
+  * NUNCA menciones "ZCode", "Soccer Buddy" ni "simulación Monte Carlo" al usuario. Solo usa los datos en silencio para calibrar.
+  * Los valores LOCKED (que aparecen como null en el JSON) simplemente no los uses — no dan señal.
 
 INSTRUCCIONES PARA MOMENTUM EN VIVO:
 Si el JSON incluye "momentumEnVivo", úsalo para detectar oportunidades en tiempo real:
@@ -4525,6 +4533,36 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     }
   } catch (e) {
     console.warn('SofaScore enrich error:', e.message);
+  }
+
+  // ── Soccer Buddy / ZCode signals ────────────────────────────────────────────
+  // Si el scraper tiene datos, los agrega como señal externa. No bloquea si no hay.
+  if (_zbStore.size > 0) {
+    let zbHits = 0;
+    for (const e of enriched) {
+      const zb = getZbSignals(e.local, e.visitante);
+      if (zb) {
+        e.soccerBuddy = {
+          _nota: 'Predicciones del modelo ZCode Soccer Buddy (simulación Monte Carlo). Úsalas como señal de confirmación externa.',
+          scorePred:   zb.scorePred   || null,
+          htScorePred: zb.htScorePred || null,
+          btts_pct:    zb.btts        || null,
+          over15_pct:  zb.over15      || null,
+          over25_pct:  zb.over25      || null,
+          draw_pct:    zb.draw        || null,
+          ht_over05_pct: zb.ht_over05 || null,
+          ht_over15_pct: zb.ht_over15 || null,
+          sh_over05_pct: zb.sh_over05 || null,
+          sh_over15_pct: zb.sh_over15 || null,
+        };
+        // Eliminar nulls para no inflar el JSON
+        Object.keys(e.soccerBuddy).forEach(k => {
+          if (k !== '_nota' && e.soccerBuddy[k] === null) delete e.soccerBuddy[k];
+        });
+        zbHits++;
+      }
+    }
+    console.log(`📡 Soccer Buddy: ${zbHits}/${enriched.length} partidos con señales ZCode`);
   }
 
   await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV por mercado...`);
@@ -5955,6 +5993,309 @@ async function handleRachasFecha(chatId, dateStr, label) {
   return sendLong(chatId, text, { parse_mode: 'Markdown' });
 }
 
+// ─── Soccer Buddy / ZCode ────────────────────────────────────────────────────
+//
+// Estrategia: cookie-based auth (Google SSO no se puede automatizar en headless).
+// El usuario extrae cookies de su browser 1 vez y las pega en Railway env ZCODE_COOKIES.
+//
+// Dos modos:
+//   1. DESCUBRIMIENTO (/zcode-debug en Telegram) — intercepta red, saca screenshot,
+//      vuelca HTML → nos dice exactamente qué API usa el site y cómo es el DOM.
+//   2. PRODUCCIÓN — scrape tabla, acumula señales cada ZB_INTERVAL ms.
+//
+// Señales que se extraen (incluso de celdas bloqueadas):
+//   - inValueBets: en qué listas aparece el partido (ht_over05, btts, over25, etc.)
+//   - scorePred: predicción de resultado ("1:1", "1:2", …)
+//   - btts, over15, over25, ht_over05, ht_over15, sh_over05: % si visible, null si bloqueado
+// ─────────────────────────────────────────────────────────────────────────────
+
+const puppeteer = require('puppeteer');
+
+const ZB_URL      = 'https://zcodesystem.com/soccerbuddy/';
+const ZB_INTERVAL = 12 * 60 * 1000;   // re-scrape cada 12 min
+const _zbStore    = new Map();         // key: normHome+'|'+normAway → signals
+let   _zbLastRun  = 0;
+let   _zbApiEndpoints = [];            // endpoints descubiertos
+
+// Lanzar browser con flags para Railway (sin GPU, sin sandbox)
+async function _zbBrowser() {
+  return puppeteer.launch({
+    headless: 'new',
+    args: [
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--single-process',
+      '--no-zygote',
+    ],
+  });
+}
+
+// Normaliza nombre de equipo igual que sofaNormalize pero más agresivo
+function _zbNorm(name) {
+  return (name || '').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\b(fc|cf|sc|ac|rc|cd|sd|de|del|la|los|el|us|ss|sv|bv|rj|sp|ad|rd|ca|sa)\b/g, '')
+    .replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function _zbKey(home, away) {
+  return `${_zbNorm(home)}|||${_zbNorm(away)}`;
+}
+
+function _zbMatch(a, b) {
+  const na = _zbNorm(a), nb = _zbNorm(b);
+  if (na === nb) return true;
+  if (na.length >= 4 && (nb.includes(na) || na.includes(nb))) return true;
+  const sig = s => s.split(' ').filter(w => w.length >= 4);
+  return sig(na).some(w => sig(nb).includes(w));
+}
+
+// Inyecta las cookies guardadas en ZCODE_COOKIES env var
+async function _zbSetCookies(page) {
+  const raw = process.env.ZCODE_COOKIES;
+  if (!raw) return false;
+  try {
+    const cookies = JSON.parse(raw);
+    if (!Array.isArray(cookies) || cookies.length === 0) return false;
+    await page.setCookie(...cookies);
+    return true;
+  } catch (e) {
+    console.warn('ZCode cookies parse error:', e.message);
+    return false;
+  }
+}
+
+// ── MODO DESCUBRIMIENTO ──────────────────────────────────────────────────────
+// Visita el site, intercepta XHR/fetch, toma screenshot y devuelve toda la info.
+// Solo se llama desde /zcode-debug (admin) para que podamos ver cómo está hecho.
+async function zbDiscover(chatId) {
+  await bot.sendMessage(chatId, '🔍 Iniciando descubrimiento ZCode Soccer Buddy...');
+  let browser;
+  try {
+    browser = await _zbBrowser();
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+
+    // Interceptar llamadas de red para encontrar el endpoint de datos
+    const apiCalls = [];
+    page.on('response', async (res) => {
+      const url = res.url();
+      const ct  = res.headers()['content-type'] || '';
+      if ((ct.includes('json') || url.includes('/api/') || url.includes('predict') || url.includes('soccer'))
+          && !url.includes('google') && !url.includes('analytics')) {
+        const body = await res.text().catch(() => '');
+        apiCalls.push({ url, status: res.status(), bodyPreview: body.slice(0, 300) });
+      }
+    });
+
+    const hasCookies = await _zbSetCookies(page);
+    await bot.sendMessage(chatId, `🍪 Cookies: ${hasCookies ? 'cargadas' : 'NO configuradas (ZCODE_COOKIES vacío)'}`);
+
+    await page.goto(ZB_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(e => {
+      console.warn('ZCode navigate warn:', e.message);
+    });
+
+    // Esperar carga dinámica
+    await new Promise(r => setTimeout(r, 5000));
+
+    // Screenshot
+    const screenshotBuf = await page.screenshot({ fullPage: false, type: 'png' });
+    await bot.sendPhoto(chatId, screenshotBuf, { caption: '📸 Screenshot del site' });
+
+    // Título + URL actual
+    const title   = await page.title();
+    const current = page.url();
+    await bot.sendMessage(chatId, `📄 Título: ${title}\n🔗 URL: ${current}`);
+
+    // API calls encontradas
+    if (apiCalls.length > 0) {
+      _zbApiEndpoints = apiCalls.map(c => c.url);
+      let msg = `🔌 *${apiCalls.length} llamadas de red detectadas:*\n`;
+      for (const c of apiCalls.slice(0, 8)) {
+        msg += `\n\`${c.url.slice(0, 80)}\`\nStatus ${c.status} | ${c.bodyPreview.slice(0, 120)}\n`;
+      }
+      await sendLong(chatId, msg, { parse_mode: 'Markdown' }).catch(() =>
+        bot.sendMessage(chatId, `API calls: ${apiCalls.map(c => c.url).join('\n')}`)
+      );
+    } else {
+      await bot.sendMessage(chatId, '⚠️ No se detectaron llamadas JSON/API — puede ser que requiera login.');
+    }
+
+    // Volcado del HTML de tablas
+    const tableText = await page.evaluate(() => {
+      const tables = document.querySelectorAll('table');
+      return Array.from(tables).map((t, i) =>
+        `TABLE ${i}: ${t.id || t.className}\n` + t.innerText.slice(0, 600)
+      ).join('\n\n---\n\n');
+    });
+
+    if (tableText.trim().length > 10) {
+      await sendLong(chatId, '```\n' + tableText.slice(0, 3000) + '\n```', { parse_mode: 'Markdown' })
+        .catch(() => bot.sendMessage(chatId, 'Tablas encontradas (ver logs)'));
+      console.log('ZCode tables:\n', tableText);
+    } else {
+      // Sin tablas — mostrar todo el texto visible
+      const bodyText = await page.evaluate(() => document.body.innerText.slice(0, 2000));
+      await bot.sendMessage(chatId, `📝 Texto visible:\n${bodyText}`);
+    }
+
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ Error descubrimiento: ${e.message}`);
+    console.error('zbDiscover error:', e);
+  } finally {
+    if (browser) await browser.close();
+  }
+}
+
+// ── MODO PRODUCCIÓN ──────────────────────────────────────────────────────────
+// Extrae predicciones y acumula en _zbStore. Usa selectores descubiertos.
+async function zbScrapeOnce() {
+  if (!process.env.ZCODE_COOKIES) return;
+
+  let browser;
+  const scraped = [];
+  try {
+    browser = await _zbBrowser();
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+    await _zbSetCookies(page);
+
+    await page.goto(ZB_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 4000));
+
+    // Extrae todos los datos de las tablas que pueda encontrar
+    const raw = await page.evaluate(() => {
+      const result = [];
+
+      // Estrategia 1: tablas HTML estándar
+      document.querySelectorAll('table').forEach(table => {
+        const headers = Array.from(table.querySelectorAll('th')).map(h => h.textContent.trim().toLowerCase());
+        const rows    = Array.from(table.querySelectorAll('tbody tr, tr:not(:first-child)'));
+
+        rows.forEach(row => {
+          const cells = Array.from(row.querySelectorAll('td'));
+          if (cells.length < 3) return;
+
+          // Detectar si la celda está bloqueada
+          const cellVal = (td) => {
+            if (!td) return null;
+            const locked = td.querySelector('[class*="lock"],[class*="blur"],[class*="premium"]')
+                        || td.textContent.includes('Click to Unlock')
+                        || td.textContent.includes('Unlock');
+            if (locked) return 'LOCKED';
+            // Buscar número en elemento hijo, o tomar textContent
+            const num = td.querySelector('[class*="num"],[class*="pct"],[class*="perc"],strong,b,span');
+            const val = (num ? num : td).textContent.trim().replace(/\s+/g, ' ');
+            return val || null;
+          };
+
+          // Primera celda: fecha+hora, Segunda: equipo
+          const dateCell = cellVal(cells[0]) || '';
+          const gameCell = cells[1] ? cells[1].textContent.trim() : '';
+
+          // Extraer equipos del gameCell
+          const vsMatch = gameCell.match(/^(.+?)\s+vs\.?\s+(.+?)(?:\n|$)/im);
+          if (!vsMatch) return;
+
+          const entry = {
+            date:     dateCell,
+            home:     vsMatch[1].trim(),
+            away:     vsMatch[2].trim(),
+            league:   gameCell.replace(vsMatch[0], '').trim(),
+            vals:     cells.slice(2).map(cellVal),
+            headers,
+          };
+          result.push(entry);
+        });
+      });
+
+      // Estrategia 2: divs con estructura data-* o clases específicas
+      document.querySelectorAll('[class*="prediction"],[class*="game-row"],[data-home],[data-away]').forEach(el => {
+        const home = el.getAttribute('data-home') || el.querySelector('[class*="home"]')?.textContent?.trim();
+        const away = el.getAttribute('data-away') || el.querySelector('[class*="away"]')?.textContent?.trim();
+        if (!home || !away) return;
+        result.push({ home, away, date: '', league: '', vals: [], headers: [], _fromDiv: true });
+      });
+
+      return result;
+    });
+
+    // Procesar resultados crudos
+    for (const entry of raw) {
+      if (!entry.home || !entry.away) continue;
+
+      const key = _zbKey(entry.home, entry.away);
+      const existing = _zbStore.get(key) || {
+        home: entry.home, away: entry.away, league: entry.league,
+        inValueBets: new Set(),
+        scorePred: null, htScorePred: null,
+        btts: null, over15: null, over25: null,
+        ht_over05: null, ht_over15: null, sh_over05: null, sh_over15: null,
+        draw: null, _ts: Date.now(),
+      };
+
+      // Parsear valores según orden de columnas detectado
+      // Orden esperado basado en los screenshots:
+      // draw%, scorePred, over15%, over25%, btts%, htScore, ht_over05%, ht_over15%, sh_over05%, sh_over15%
+      const parseNum = v => (v && v !== 'LOCKED' && /\d/.test(v)) ? parseFloat(v.replace(/[^0-9.]/g, '')) : v;
+
+      const [draw, scorePred, over15, over25, btts, htScore, ht05, ht15, sh05, sh15] = entry.vals;
+
+      if (scorePred && scorePred !== 'LOCKED') existing.scorePred   = scorePred;
+      if (htScore  && htScore  !== 'LOCKED') existing.htScorePred  = htScore;
+      if (draw     !== 'LOCKED') existing.draw     = parseNum(draw);
+      if (over15   !== 'LOCKED') existing.over15   = parseNum(over15);
+      if (over25   !== 'LOCKED') existing.over25   = parseNum(over25);
+      if (btts     !== 'LOCKED') existing.btts     = parseNum(btts);
+      if (ht05     !== 'LOCKED') existing.ht_over05 = parseNum(ht05);
+      if (ht15     !== 'LOCKED') existing.ht_over15 = parseNum(ht15);
+      if (sh05     !== 'LOCKED') existing.sh_over05 = parseNum(sh05);
+      if (sh15     !== 'LOCKED') existing.sh_over15 = parseNum(sh15);
+
+      existing._ts = Date.now();
+      _zbStore.set(key, existing);
+      scraped.push(entry.home + ' vs ' + entry.away);
+    }
+
+    console.log(`✅ Soccer Buddy: ${scraped.length} partidos procesados, store total: ${_zbStore.size}`);
+    _zbLastRun = Date.now();
+
+  } catch (e) {
+    console.error('zbScrapeOnce error:', e.message);
+  } finally {
+    if (browser) await browser.close();
+  }
+  return scraped.length;
+}
+
+// Scraping programado — corre cada ZB_INTERVAL
+function zbSchedule() {
+  if (!process.env.ZCODE_COOKIES) {
+    console.log('ℹ️ ZCODE_COOKIES no configurado — Soccer Buddy desactivado');
+    return;
+  }
+  zbScrapeOnce().catch(e => console.error('ZB scheduled scrape:', e.message));
+  setInterval(() => zbScrapeOnce().catch(e => console.error('ZB interval:', e.message)), ZB_INTERVAL);
+  console.log(`📡 Soccer Buddy scraping activo (cada ${ZB_INTERVAL / 60000} min)`);
+}
+
+// Búsqueda de señales para un partido dado
+function getZbSignals(homeTeam, awayTeam) {
+  // Búsqueda directa
+  const directKey = _zbKey(homeTeam, awayTeam);
+  if (_zbStore.has(directKey)) return _zbStore.get(directKey);
+
+  // Búsqueda fuzzy si no hay match directo
+  for (const [, signals] of _zbStore) {
+    if (_zbMatch(homeTeam, signals.home) && _zbMatch(awayTeam, signals.away)) {
+      return signals;
+    }
+  }
+  return null;
+}
+
 // ─── Chat General ─────────────────────────────────────────────────────────────
 
 async function handleChatGeneral(chatId, pregunta) {
@@ -6401,6 +6742,41 @@ async function incrementConsultas(telegramId) {
 // Uso: /remarketing YYYY-MM-DD [mensaje personalizado]
 // Solo el admin puede ejecutarlo
 
+// ─── Command: /zcode-debug ────────────────────────────────────────────────────
+// Solo admin. Visita ZCode Soccer Buddy, intercepta red, toma screenshot y
+// vuelca el DOM — para descubrir la estructura antes de afinar los selectores.
+bot.onText(/\/zcode[-_]?debug/, async (msg) => {
+  const telegramId = String(msg.from.id);
+  if (!ADMIN_IDS.has(telegramId)) return;
+  await zbDiscover(String(msg.chat.id));
+});
+
+// ─── Command: /zcode-status ───────────────────────────────────────────────────
+bot.onText(/\/zcode[-_]?status/, async (msg) => {
+  const telegramId = String(msg.from.id);
+  if (!ADMIN_IDS.has(telegramId)) return;
+  const chatId = String(msg.chat.id);
+  const size = _zbStore.size;
+  const last = _zbLastRun ? new Date(_zbLastRun).toLocaleString('es-CO', { timeZone: 'America/Bogota' }) : 'nunca';
+  const hasCookies = !!process.env.ZCODE_COOKIES;
+  let msg2 = `📡 *Soccer Buddy Status*\n\n`;
+  msg2 += `🍪 Cookies: ${hasCookies ? '✅ configuradas' : '❌ NO configuradas'}\n`;
+  msg2 += `📊 Partidos en store: *${size}*\n`;
+  msg2 += `🕐 Último scrape: ${last}\n\n`;
+  if (size > 0) {
+    msg2 += `*Últimos 5 partidos:*\n`;
+    let count = 0;
+    for (const [, s] of _zbStore) {
+      if (count++ >= 5) break;
+      msg2 += `▸ ${s.home} vs ${s.away}`;
+      if (s.btts && s.btts !== 'LOCKED') msg2 += ` | BTTS ${s.btts}%`;
+      if (s.over25 && s.over25 !== 'LOCKED') msg2 += ` | O2.5 ${s.over25}%`;
+      msg2 += `\n`;
+    }
+  }
+  await bot.sendMessage(chatId, msg2, { parse_mode: 'Markdown' });
+});
+
 bot.onText(/\/remarketing(?:\s+(.+))?/, async (msg, match) => {
   const chatId     = msg.chat.id;
   const telegramId = String(msg.from.id);
@@ -6827,6 +7203,9 @@ setInterval(async () => {
   }
 }, 90 * 1000);
 
+
+// Arrancar Soccer Buddy scraper si hay cookies configuradas (no bloquea el arranque)
+zbSchedule();
 
 // ─── Whop Webhook Server ───────────────────────────────────────────────────────
 
