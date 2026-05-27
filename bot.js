@@ -6052,19 +6052,51 @@ function _zbMatch(a, b) {
   return sig(na).some(w => sig(nb).includes(w));
 }
 
-// Inyecta las cookies guardadas en ZCODE_COOKIES env var
+// Inyecta las cookies guardadas en ZCODE_COOKIES env var.
+// Acepta 3 formatos:
+//   1. String "key=val; key2=val2" (más fácil — copiar del DevTools Network)
+//   2. JSON object  {"key":"val","key2":"val2"}
+//   3. JSON array   [{"name":"key","value":"val","domain":"..."}]  (formato Puppeteer)
 async function _zbSetCookies(page) {
-  const raw = process.env.ZCODE_COOKIES;
+  const raw = (process.env.ZCODE_COOKIES || '').trim();
   if (!raw) return false;
+
+  let cookieObjects = [];
+
   try {
-    const cookies = JSON.parse(raw);
-    if (!Array.isArray(cookies) || cookies.length === 0) return false;
-    await page.setCookie(...cookies);
-    return true;
-  } catch (e) {
-    console.warn('ZCode cookies parse error:', e.message);
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) {
+      // Formato 3: array de objetos Puppeteer
+      cookieObjects = parsed.filter(c => c.name && c.value);
+    } else if (typeof parsed === 'object') {
+      // Formato 2: objeto plano {name: value}
+      cookieObjects = Object.entries(parsed).map(([name, value]) => ({
+        name, value: String(value), domain: 'zcodesystem.com', path: '/',
+      }));
+    }
+  } catch (_) {
+    // Formato 1: string "key=val; key2=val2" (del header Cookie: del DevTools)
+    const str = raw.replace(/^Cookie:\s*/i, ''); // quitar "Cookie: " si lo pegaron con el prefijo
+    cookieObjects = str.split(';').map(part => {
+      const eq = part.indexOf('=');
+      if (eq === -1) return null;
+      return {
+        name:   part.slice(0, eq).trim(),
+        value:  part.slice(eq + 1).trim(),
+        domain: 'zcodesystem.com',
+        path:   '/',
+      };
+    }).filter(Boolean);
+  }
+
+  if (cookieObjects.length === 0) {
+    console.warn('ZCODE_COOKIES: no se encontraron cookies válidas en el valor configurado');
     return false;
   }
+
+  await page.setCookie(...cookieObjects);
+  console.log(`🍪 ZCode: ${cookieObjects.length} cookies inyectadas`);
+  return true;
 }
 
 // ── MODO DESCUBRIMIENTO ──────────────────────────────────────────────────────
