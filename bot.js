@@ -6053,39 +6053,59 @@ function _zbMatch(a, b) {
 }
 
 // Inyecta las cookies guardadas en ZCODE_COOKIES env var.
-// Acepta 3 formatos:
-//   1. String "key=val; key2=val2" (más fácil — copiar del DevTools Network)
-//   2. JSON object  {"key":"val","key2":"val2"}
-//   3. JSON array   [{"name":"key","value":"val","domain":"..."}]  (formato Puppeteer)
+// Acepta 4 formatos:
+//   1. Cookie-Editor export: {"url":"...","cookies":[{name,value,domain,...}]}
+//   2. JSON array Puppeteer: [{"name":"key","value":"val","domain":"..."}]
+//   3. JSON object plano:    {"key":"val","key2":"val2"}
+//   4. Cookie string:        "key=val; key2=val2"  (del header Cookie: del DevTools)
 async function _zbSetCookies(page) {
   const raw = (process.env.ZCODE_COOKIES || '').trim();
   if (!raw) return false;
+
+  // Mapeo sameSite de extensión → Puppeteer
+  const sameSiteMap = { lax: 'Lax', strict: 'Strict', no_restriction: 'None', none: 'None' };
+
+  // Convierte un cookie de extensión (Cookie-Editor) a formato Puppeteer
+  const extToPuppeteer = c => {
+    const out = { name: c.name, value: String(c.value), domain: c.domain || 'zcodesystem.com', path: c.path || '/' };
+    if (c.expirationDate) out.expires = Math.floor(c.expirationDate);
+    if (c.httpOnly)       out.httpOnly = true;
+    if (c.secure)         out.secure   = true;
+    const ss = sameSiteMap[(c.sameSite || '').toLowerCase()];
+    if (ss) out.sameSite = ss;
+    return out;
+  };
 
   let cookieObjects = [];
 
   try {
     const parsed = JSON.parse(raw);
-    if (Array.isArray(parsed)) {
-      // Formato 3: array de objetos Puppeteer
-      cookieObjects = parsed.filter(c => c.name && c.value);
+
+    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed) && Array.isArray(parsed.cookies)) {
+      // Formato 1: Cookie-Editor export {url, cookies:[...]}
+      cookieObjects = parsed.cookies.filter(c => c.name && c.value !== undefined).map(extToPuppeteer);
+
+    } else if (Array.isArray(parsed)) {
+      if (parsed[0] && parsed[0].domain !== undefined) {
+        // Formato 1b: array de Cookie-Editor sin wrapper
+        cookieObjects = parsed.filter(c => c.name).map(extToPuppeteer);
+      } else {
+        // Formato 2: array Puppeteer nativo
+        cookieObjects = parsed.filter(c => c.name && c.value);
+      }
     } else if (typeof parsed === 'object') {
-      // Formato 2: objeto plano {name: value}
+      // Formato 3: objeto plano {name: value}
       cookieObjects = Object.entries(parsed).map(([name, value]) => ({
         name, value: String(value), domain: 'zcodesystem.com', path: '/',
       }));
     }
   } catch (_) {
-    // Formato 1: string "key=val; key2=val2" (del header Cookie: del DevTools)
-    const str = raw.replace(/^Cookie:\s*/i, ''); // quitar "Cookie: " si lo pegaron con el prefijo
+    // Formato 4: "key=val; key2=val2" (header Cookie del DevTools)
+    const str = raw.replace(/^Cookie:\s*/i, '');
     cookieObjects = str.split(';').map(part => {
       const eq = part.indexOf('=');
       if (eq === -1) return null;
-      return {
-        name:   part.slice(0, eq).trim(),
-        value:  part.slice(eq + 1).trim(),
-        domain: 'zcodesystem.com',
-        path:   '/',
-      };
+      return { name: part.slice(0, eq).trim(), value: part.slice(eq + 1).trim(), domain: 'zcodesystem.com', path: '/' };
     }).filter(Boolean);
   }
 
@@ -6095,7 +6115,7 @@ async function _zbSetCookies(page) {
   }
 
   await page.setCookie(...cookieObjects);
-  console.log(`🍪 ZCode: ${cookieObjects.length} cookies inyectadas`);
+  console.log(`🍪 ZCode: ${cookieObjects.length} cookies inyectadas (PHPSESSID: ${cookieObjects.find(c => c.name === 'PHPSESSID')?.value?.slice(0, 8)}...)`);
   return true;
 }
 
