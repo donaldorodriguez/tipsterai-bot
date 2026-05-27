@@ -1869,8 +1869,9 @@ function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTe
     } else if (/semi.?final|semis/i.test(round)) {
       ctx.contextoCopa = '🏆 Semifinal — a un partido de la final';
     } else if (/\bfinal\b/i.test(round) && !/semi/i.test(round)) {
-      ctx.contextoCopa = '🏆 FINAL — partido único, todo en juego';
-      ctx.urgencia     = 'maxima';
+      ctx.contextoCopa  = '🏆 FINAL — partido único en cancha neutral, todo en juego';
+      ctx.urgencia      = 'maxima';
+      ctx.cancha_neutral = true; // finales se juegan en sede neutral — las stats de local/visitante no aplican directamente
     } else if (/2nd.?leg|vuelta|segundo.?partido/i.test(round)) {
       ctx.contextoCopa = '⚽ PARTIDO DE VUELTA — el análisis debe incluir el marcador del partido de ida';
       ctx.urgencia     = 'alta';
@@ -2646,6 +2647,7 @@ function buildPickCandidates(enrichedFixtures) {
         formaSofaVisitante:  f.formaSofaVisitante  || null,
         // ── Contexto del partido (ronda, playoff, urgencia) ──────────────────
         contextoPartido:     f.contextoPartido     || null,
+        cancha_neutral:      f.contextoPartido?.cancha_neutral || false,
         prediccionAPI:       f.prediccionAPI       || null,
         // ── Base rates de la liga (para que Claude use el número exacto) ─────
         baseRatesLiga: baseRates ? {
@@ -2951,10 +2953,10 @@ FORMATO OBLIGATORIO:
 🏆 Stake: *[X]/10*
 ━━━━━━━━━━━━━━━━━━━
 
-STAKE:
-- Stake 8: prob > 72%
-- Stake 7: prob 62-72%
-- Stake 6: prob 55-62%
+STAKE (rango 5-10 únicamente):
+- Stake 9-10: prob > 72% con cuota ≥ 1.70
+- Stake 7-8: prob 62-72%
+- Stake 5-6: prob 55-62%
 - Omite alertas con prob < 55% o cuota < 1.45
 
 MINUTO LÍMITE: siempre concreto. En 1T apuesta antes del min 30. En HT decide antes de que empiece el 2T. En 2T nunca más allá del min 75.
@@ -3287,6 +3289,7 @@ INSTRUCCIONES ESPECIALES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
 - CUOTA MÍNIMA ABSOLUTA: 1.65. Cualquier cuota menor se descarta sin excepción.
 - CONSISTENCIA PICK/CUOTA: si el título del pick dice "Gana X", la cuota mínima es la de "Gana X". Si dices "Over 3.5", la cuota es la de "Over 3.5". Nunca mezcles mercados dentro del mismo pick.
 - CUOTA MÁXIMA ABSOLUTA: 2.30. Cualquier pick que solo exista a cuota mayor se descarta — no importa el EV teórico, con muestra reducida las probabilidades son poco confiables.
+- RANGO DE STAKES: el sistema usa stakes del 5 al 10 únicamente. Stake 5 = valor marginal, stake 10 = convicción máxima. NUNCA uses stake fuera de ese rango.
 - STAKE MÍNIMO PUBLICABLE: 5/10. Publica picks con el stake que corresponda al EV real calculado. Stake 5-6 son picks válidos con valor marginal.
 - STAKE MÁXIMO EN MODO FALLBACK: 8/10. Cuando el motor Poisson no encontró picks con EV confirmado y eres tú quien selecciona, el stake máximo publicable es 8/10. Stake 9 o 10 requieren validación matemática del motor — con solo tu análisis y un H2H de 5 partidos, la incertidumbre es demasiado alta para esa confianza.
 - PROHIBIDO dar picks de partidos donde statsLocal y statsVisitante son null o muestran datos limitados en más de 3 de los 5 indicadores clave (goles anotados, goles recibidos, forma reciente, porcentaje BTTS, porcentaje Over 2.5). Si no hay base estadística real, DESCARTA el partido completamente.
@@ -3295,9 +3298,10 @@ INSTRUCCIONES ESPECIALES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
 - ÚLTIMA JORNADA / FIN DE TEMPORADA — REGLA CRÍTICA: Si motivacionLocal.estado o motivacionVisitante.estado contiene "posible_asegurado" o "última jornada", NO escribas que el equipo "necesita ganar" ni que "lucha por" esa plaza. Escribe en su lugar: "[Equipo] (Xº, Y pts) — plaza [Champions/Europa] posiblemente ya asegurada, posibles rotaciones". Si la clasificación ya NO está en disputa ese día, la motivación es BAJA, no alta. Un equipo que ya clasificó puede alinear suplentes y gestionar esfuerzo — el razonamiento de pick debe reflejar esto, NO lo contrario.
 - ESTADÍSTICAS DE TEMPORADA: solo usa los números que aparecen en los campos statsLocal y statsVisitante del JSON. Si esos campos son null o tienen datos del año anterior (temporada distinta a la actual), MENCIONA "datos limitados de temporada actual" — NUNCA rellenes con estadísticas de tu entrenamiento.
 - Siempre busca llegar a 3 picks — solo da menos si genuinamente no hay suficientes partidos con datos mínimos.
+- DIVERSIDAD DE MERCADOS OBLIGATORIA: máximo 2 picks del mismo mercado exacto en el día. Si los 3 mejores picks son todos "Under 2.5", reemplaza el de menor EV por el siguiente pick de otro mercado disponible. Dos Under 2.5 el mismo día ya es el límite — tres nunca.
 
 INSTRUCCIÓN ESPECIAL PARA PICKS DEL DÍA:
-Emite EXACTAMENTE 3 picks individuales de partidos distintos. Si tienes 4+ opciones, elige las 3 con mayor valor. Solo baja a 2 si hay exactamente 2 partidos con base estadística suficiente, y a 1 solo si es el único partido con datos reales. Después de los 3 picks individuales añade 1 APUESTA COMBINADA de exactamente 3 patas. La combinada NUNCA puede superar cuota 12.00.
+Emite EXACTAMENTE 3 picks individuales de partidos distintos. Si tienes 4+ opciones, elige las 3 con mayor valor. Solo baja a 2 si hay exactamente 2 partidos con base estadística suficiente, y a 1 solo si es el único partido con datos reales. SOLO después de emitir los 3 picks individuales añade 1 APUESTA COMBINADA de exactamente 3 patas usando los 3 picks. La combinada NUNCA puede superar cuota 12.00. Si solo hay 2 picks individuales NO hay combinada.
 
 USO DE DATOS CONTEXTUALES (cuando están disponibles en los datos):
 - h2h: array de últimos 5 enfrentamientos directos. Usa para identificar tendencias de goles, si hay equipos que casi siempre marcan, patrones de resultado histórico.
@@ -3328,7 +3332,9 @@ Los datos de la copa actual son complementarios. Si hay menos de 5 partidos en e
 
 ━━━━━━━━━━━━━━━━━━━
 🎰 *COMBINADA DEL DÍA*
-Exactamente 3 selecciones. Mercados y partidos distintos. Cuota combinada máxima: 12.00 — si supera eso, reemplaza la pata de mayor cuota por una más segura.
+Exactamente 3 patas — una por cada pick individual del día.
+⛔ PROHIBIDO: tener 2 patas del mismo mercado exacto (ej. no puedes poner 2× Under 2.5 ni 2× BTTS Sí). Si los 3 picks son del mismo mercado, omite la combinada.
+Cuota combinada máxima: 12.00 — si supera eso, reemplaza la pata de mayor cuota por la selección más segura de ese mismo partido.
 
 ▸ [Local] vs [Visitante] → *[mercado]* | Cuota: *X.XX*
 ▸ [Local] vs [Visitante] → *[mercado]* | Cuota: *X.XX*
@@ -3361,7 +3367,7 @@ Convierte la probabilidad Poisson en cuota justa y aplica margen de casa (~5%):
 - Ejemplo: over25 = 60% → cuota justa 1.67 → cuota mercado ~1.58 → pick válido si stake ≥7
 - Si la cuota estimada queda fuera de rango 1.65–2.30, descarta ese mercado.
 
-SELECCIONA 2–3 picks con stake mínimo 7/10.
+SELECCIONA 3 picks con stake entre 5 y 10. Rango permitido: 5/10 mínimo, 10/10 máximo.
 Si ningún partido presenta valor claro → responde solo: "⛔ Sin picks de valor hoy."
 
 INSTRUCCIONES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
@@ -3414,6 +3420,7 @@ CONTEXTO (contextoPartido) — SECCIÓN OBLIGATORIA:
 - Si hay cansancioLocal/Visitante → mencionarlo como factor de riesgo explícito.
 - Si contextoPartido.advertenciaStats existe → MUÉSTRALO CON ⚠️ antes de las stats. Ej: "⚠️ Playoff de descenso — las estadísticas de liga regular NO reflejan el nivel real de este partido".
 - Si NO hay contextoPartido → escribe igualmente la situación en tabla de ambos equipos (posición, puntos, si están en zona de descenso, zona europea, etc.).
+- ⚠️ CANCHA NEUTRAL (cancha_neutral=true): el partido se juega en sede neutral — NINGUNO de los dos equipos es "local". NUNCA escribas "como local tiene X" ni "como visitante hace Y". Usa sus stats generales: "en sus últimos partidos promedia X goles" sin referencia a localía. Menciona explícitamente en el análisis: "partido en cancha neutral — las estadísticas de local/visitante pierden relevancia".
 
 BASE RATES DE LIGA (baseRatesLiga) — USO OBLIGATORIO:
 - El campo baseRatesLiga.over25 es el % histórico real de Over 2.5 en ESA liga. ÚSALO EXACTAMENTE.
@@ -3482,9 +3489,9 @@ FORMATO OBLIGATORIO (Telegram Markdown)
 
 ━━━━━━━━━━━━━━━━━━━
 
-[Si hay 2+ picks con valor, añade al final:]
+[Solo si hay exactamente 3 picks individuales y son de mercados distintos:]
 🎰 *COMBINADA SUGERIDA*
-[Pick 1] × [Pick 2] | Cuota estimada: ~[X.XX] | Stake: [Y]/10
+[Pick 1] × [Pick 2] × [Pick 3] | Cuota estimada: ~[X.XX] | Stake: [Y]/10
 
 ━━━━━━━━━━━━━━━━━━━
 
@@ -4688,18 +4695,53 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   });
   console.log(`   Picks seleccionados: ${topPicks.length}`);
 
+  // ── Filtro ZCode: elimina picks donde el modelo externo contradice el nuestro ──
+  // Solo aplica cuando hay datos de ZCode (store no vacío). Contradicción = señales opuestas.
+  const zbHayDatos = _zbStore.size > 0;
+  const topPicksFinal = zbHayDatos ? topPicks.filter(pick => {
+    const zb = getZbSignals(pick.local, pick.visitante);
+    if (!zb) return true; // sin datos ZCode para este partido → mantener
+    const market = pick.market;
+    // Under 2.5 con ZCode proyectando Over fuerte
+    if (market === 'under25' && zb.over25_pct !== null && zb.over25_pct >= 65) {
+      console.log(`🚫 ZCode bloquea pick: ${pick.local} vs ${pick.visitante} — under25 vs ZCode over25_pct=${zb.over25_pct}%`);
+      return false;
+    }
+    // Over 2.5 con ZCode proyectando Under fuerte
+    if (market === 'over25' && zb.over25_pct !== null && zb.over25_pct <= 35) {
+      console.log(`🚫 ZCode bloquea pick: ${pick.local} vs ${pick.visitante} — over25 vs ZCode over25_pct=${zb.over25_pct}%`);
+      return false;
+    }
+    // BTTS Sí con ZCode diciendo BTTS No fuerte
+    if (market === 'btts' && zb.btts_pct !== null && zb.btts_pct <= 30) {
+      console.log(`🚫 ZCode bloquea pick: ${pick.local} vs ${pick.visitante} — btts vs ZCode btts_pct=${zb.btts_pct}%`);
+      return false;
+    }
+    // BTTS No con ZCode proyectando BTTS fuerte
+    if (market === 'bttsNo' && zb.btts_pct !== null && zb.btts_pct >= 70) {
+      console.log(`🚫 ZCode bloquea pick: ${pick.local} vs ${pick.visitante} — bttsNo vs ZCode btts_pct=${zb.btts_pct}%`);
+      return false;
+    }
+    return true;
+  }) : topPicks;
+
+  if (zbHayDatos && topPicksFinal.length < topPicks.length) {
+    console.log(`🔮 ZCode bloqueó ${topPicks.length - topPicksFinal.length} pick(s) por contradicción`);
+  }
+
   let picksText;
 
-  if (topPicks.length >= 1) {
+  if (topPicksFinal.length >= 1) {
     // ── Motor matemático: LLM solo formatea los picks ya seleccionados por Poisson+EV
     picksText = await sonnet(
       PICKS_HOY_FORMATTER_SYSTEM,
-      `Fecha: ${today} (hora Colombia)\n\nPICKS SELECCIONADOS POR EL MOTOR MATEMÁTICO — NO añadas ni elimines ninguno:\n\n${JSON.stringify(topPicks, null, 2)}`
+      `Fecha: ${today} (hora Colombia)\n\nPICKS SELECCIONADOS POR EL MOTOR MATEMÁTICO — NO añadas ni elimines ninguno:\n\n${JSON.stringify(topPicksFinal, null, 2)}`
     );
   } else {
-    // ── Motor no encontró picks con EV validado → NO inventar, reportar estado real
+    // ── Motor no encontró picks con EV validado (o todos bloqueados por ZCode) → sin picks
     const sinCuotas = conOdds === 0;
-    console.log(`📡 Motor: 0 picks válidos (sinCuotas=${sinCuotas}, partidos=${enriched.length}) — sin picks hoy`);
+    const zbBloqueados = topPicks.length > 0 && topPicksFinal.length === 0;
+    console.log(`📡 Motor: 0 picks válidos (sinCuotas=${sinCuotas}, zbBloqueados=${zbBloqueados}, partidos=${enriched.length}) — sin picks hoy`);
 
     if (sinCuotas) {
       // Sin cuotas reales: no hay forma de calcular EV — inténtalo más tarde
