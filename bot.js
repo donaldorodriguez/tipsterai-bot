@@ -3747,7 +3747,13 @@ Ejemplos:
 - "rachas Real Madrid" → {"intencion":"rachas","equipo":"Real Madrid","liga":null,"pregunta_especifica":"rachas Real Madrid","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"all"}
 - "rachas en casa Serie A" → {"intencion":"rachas","equipo":null,"liga":"Serie A","pregunta_especifica":"rachas en casa Serie A","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"home"}
 - "rachas de visita Atletico Madrid" → {"intencion":"rachas","equipo":"Atletico Madrid","liga":null,"pregunta_especifica":"rachas de visita Atletico Madrid","mercado":null,"tiempo":null,"contexto":null,"period":null,"venue":"away"}
-- "equipos con racha de goles Bundesliga" → {"intencion":"rachas","equipo":null,"liga":"Bundesliga","pregunta_especifica":"equipos con racha de goles Bundesliga","mercado":"goles","tiempo":null,"contexto":null,"period":null,"venue":"all"}`;
+- "equipos con racha de goles Bundesliga" → {"intencion":"rachas","equipo":null,"liga":"Bundesliga","pregunta_especifica":"equipos con racha de goles Bundesliga","mercado":"goles","tiempo":null,"contexto":null,"period":null,"venue":"all"}
+- "rachas de hoy" → {"intencion":"rachas","equipo":null,"liga":null,"pregunta_especifica":"rachas de hoy","mercado":null,"tiempo":null,"contexto":"hoy","period":"hoy","venue":"all"}
+- "rachas hoy" → {"intencion":"rachas","equipo":null,"liga":null,"pregunta_especifica":"rachas hoy","mercado":null,"tiempo":null,"contexto":"hoy","period":"hoy","venue":"all"}
+- "rachas de mañana" → {"intencion":"rachas","equipo":null,"liga":null,"pregunta_especifica":"rachas de mañana","mercado":null,"tiempo":null,"contexto":"manana","period":"manana","venue":"all"}
+- "rachas mañana" → {"intencion":"rachas","equipo":null,"liga":null,"pregunta_especifica":"rachas mañana","mercado":null,"tiempo":null,"contexto":"manana","period":"manana","venue":"all"}
+- "que equipos tienen rachas hoy" → {"intencion":"rachas","equipo":null,"liga":null,"pregunta_especifica":"que equipos tienen rachas hoy","mercado":null,"tiempo":null,"contexto":"hoy","period":"hoy","venue":"all"}
+- "rachas para los partidos de hoy" → {"intencion":"rachas","equipo":null,"liga":null,"pregunta_especifica":"rachas para los partidos de hoy","mercado":null,"tiempo":null,"contexto":"hoy","period":"hoy","venue":"all"}`;
 
 async function detectIntent(message) {
   const raw = await haiku(INTENT_SYSTEM, message);
@@ -5658,6 +5664,23 @@ function calcCornerCardStreaks(fixtures, statsMap) {
 }
 
 async function handleRachas(chatId, intent) {
+  // ── Modo fecha: "rachas de hoy" / "rachas de mañana" ──────────────────────
+  const pd = (intent.period || '').toLowerCase().replace('ñ', 'n');
+  const q  = (intent.pregunta_especifica || '').toLowerCase();
+  const isHoy    = pd === 'hoy'    || /\bhoy\b/.test(q);
+  const isManana = pd === 'manana' || /\bma[nñ]ana\b/.test(q);
+  if (isHoy || isManana) {
+    const bogotaNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Bogota' }));
+    let dateStr = bogotaNow.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    let label = 'de hoy';
+    if (isManana) {
+      bogotaNow.setDate(bogotaNow.getDate() + 1);
+      dateStr = bogotaNow.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+      label = 'de mañana';
+    }
+    return handleRachasFecha(chatId, dateStr, label);
+  }
+
   const venueRaw = intent.venue || 'all';
   const venueParam = venueRaw === 'home' ? 'home' : venueRaw === 'away' ? 'away' : null;
   const venueLabel = { home: 'en casa', away: 'de visita', all: 'en total' }[venueRaw] || 'en total';
@@ -5724,7 +5747,7 @@ async function handleRachas(chatId, intent) {
   const leagueId = intent.liga ? findLeagueId(intent.liga) : null;
   if (!leagueId) {
     return bot.sendMessage(chatId,
-      '¿De qué equipo o liga quieres ver las rachas?\n\nEjemplos:\n• *rachas Real Madrid*\n• *rachas Premier League*\n• *rachas en casa Serie A*\n• *rachas de visita Bundesliga*',
+      '¿Qué rachas quieres ver?\n\n*Por fecha:*\n• *rachas de hoy* → equipos con rachas en partidos de hoy\n• *rachas de mañana* → idem para mañana\n\n*Por equipo:*\n• *rachas Real Madrid*\n• *rachas Atlético de Madrid*\n\n*Por liga:*\n• *rachas Premier League*\n• *rachas en casa Serie A*\n• *rachas de visita Bundesliga*',
       { parse_mode: 'Markdown' }
     );
   }
@@ -5783,6 +5806,148 @@ async function handleRachas(chatId, intent) {
   text += `📊 Basado en últimos 12 partidos ${venueLabel} por equipo`;
   return sendLong(chatId, text, { parse_mode: 'Markdown' });
 }
+
+// ─── Rachas por Fecha ─────────────────────────────────────────────────────────
+// Ligas incluidas en "rachas de hoy/mañana" (top-tier para mantener velocidad)
+const RACHAS_FECHA_LEAGUES = new Set([
+  39,40,   // Premier League + Championship
+  140,141, // La Liga + LaLiga2
+  135,136, // Serie A + Serie B
+  78,79,   // Bundesliga + 2.Bundesliga
+  61,62,   // Ligue 1 + Ligue 2
+  2,3,848, // UCL + UEL + UECL
+  88,94,   // Eredivisie + Primeira Liga
+  71,      // Brasileirao
+  11,9,    // Copa Libertadores + Copa Sudamericana
+  128,     // Liga Argentina
+  239,     // Liga Betplay Colombia
+  262,     // Liga MX
+  203,     // Süper Lig
+]);
+
+// Simple in-memory cache for getTeamLastFixtures (TTL 4h)
+const _teamFxCache = new Map();
+async function getTeamLastFixturesCached(teamId, last = 12) {
+  const key = `${teamId}_${last}`;
+  const c = _teamFxCache.get(key);
+  if (c && (Date.now() - c.ts) < 4 * 3600 * 1000) return c.data;
+  const data = await getTeamLastFixtures(teamId, last);
+  _teamFxCache.set(key, { data, ts: Date.now() });
+  return data;
+}
+
+async function handleRachasFecha(chatId, dateStr, label) {
+  await bot.sendMessage(chatId, `🔍 Obteniendo partidos ${label} (${dateStr})...`);
+
+  // All raw fixtures for that date (API-Football, no filter)
+  const allRaw = await fetchFixturesByDate(dateStr).catch(() => []);
+
+  // Filter to top-tier leagues + not yet started (or today = include all statuses)
+  const fixtures = allRaw
+    .filter(f => RACHAS_FECHA_LEAGUES.has(f.league.id))
+    .map(parseFixture);
+
+  if (fixtures.length === 0) {
+    return bot.sendMessage(chatId, `😔 No hay partidos ${label} en las ligas monitoreadas.`);
+  }
+
+  // Cap at 24 fixtures to keep API usage reasonable (~48 team calls)
+  const topFixtures = fixtures.slice(0, 24);
+  await bot.sendMessage(chatId,
+    `⏳ *${topFixtures.length}* partidos ${label} encontrados. Calculando rachas de cada equipo...`,
+    { parse_mode: 'Markdown' }
+  );
+
+  // Unique teams
+  const teamMap = new Map();
+  for (const f of topFixtures) {
+    teamMap.set(f.homeId, f.homeTeam);
+    teamMap.set(f.awayId, f.awayTeam);
+  }
+  const teamList = [...teamMap.entries()]; // [[id, name], ...]
+
+  // Fetch fixtures for all teams in batches of 6 (parallel)
+  const teamStreaks = new Map();
+  const MIN_STREAK = 4;
+  for (let i = 0; i < teamList.length; i += 6) {
+    const batch = teamList.slice(i, i + 6);
+    const results = await Promise.allSettled(batch.map(async ([tid]) => {
+      const fx = await getTeamLastFixturesCached(tid, 12);
+      const streaks = calcTeamStreaks(fx, tid);
+      return { teamId: tid, streaks };
+    }));
+    for (const r of results) {
+      if (r.status === 'fulfilled') {
+        teamStreaks.set(r.value.teamId, r.value.streaks);
+      }
+    }
+  }
+
+  // Build output grouped by fixture
+  const fixtureResults = [];
+  for (const f of topFixtures) {
+    const homeStr = teamStreaks.get(f.homeId) || {};
+    const awayStr = teamStreaks.get(f.awayId) || {};
+
+    const homeActive = Object.entries(homeStr)
+      .filter(([, v]) => v.current >= MIN_STREAK)
+      .sort(([, a], [, b]) => b.current - a.current)
+      .slice(0, 4);
+    const awayActive = Object.entries(awayStr)
+      .filter(([, v]) => v.current >= MIN_STREAK)
+      .sort(([, a], [, b]) => b.current - a.current)
+      .slice(0, 4);
+
+    if (homeActive.length > 0 || awayActive.length > 0) {
+      fixtureResults.push({ f, homeActive, awayActive });
+    }
+  }
+
+  if (fixtureResults.length === 0) {
+    return bot.sendMessage(chatId,
+      `📊 No hay equipos con rachas de ${MIN_STREAK}+ partidos consecutivos en los partidos ${label}.\n\nIntenta pedirlo con más ligas: *rachas La Liga*, *rachas Premier League*, etc.`,
+      { parse_mode: 'Markdown' }
+    );
+  }
+
+  // Sort: most combined streaks first
+  fixtureResults.sort((a, b) =>
+    (b.homeActive.length + b.awayActive.length) - (a.homeActive.length + a.awayActive.length)
+  );
+
+  // Emoji for streak length
+  const streakEmoji = n => n >= 8 ? '🔥🔥' : n >= 6 ? '🔥' : '✅';
+
+  let text = `🔥 *RACHAS ${label.toUpperCase()} — ${dateStr}*\n`;
+  text += `📊 Mín. ${MIN_STREAK} partidos consecutivos | ${fixtureResults.length} partidos con rachas activas\n`;
+  text += `━━━━━━━━━━━━━━━━━━━\n\n`;
+
+  for (const { f, homeActive, awayActive } of fixtureResults) {
+    const hour = formatHour(f.date);
+    const league = LEAGUE_MAP[f.leagueId]?.name || 'Liga';
+    text += `⚽ *${f.homeTeam} vs ${f.awayTeam}*\n`;
+    text += `🏆 ${league} | ⏰ ${hour}\n`;
+    if (homeActive.length > 0) {
+      text += `🏠 ${f.homeTeam}:\n`;
+      for (const [, v] of homeActive) {
+        text += `   ${streakEmoji(v.current)} ${v.label} — *${v.current}* partidos\n`;
+      }
+    }
+    if (awayActive.length > 0) {
+      text += `✈️ ${f.awayTeam}:\n`;
+      for (const [, v] of awayActive) {
+        text += `   ${streakEmoji(v.current)} ${v.label} — *${v.current}* partidos\n`;
+      }
+    }
+    text += `\n`;
+  }
+
+  text += `━━━━━━━━━━━━━━━━━━━\n`;
+  text += `📊 Basado en últimos 12 partidos por equipo | Solo muestra rachas de ${MIN_STREAK}+`;
+  return sendLong(chatId, text, { parse_mode: 'Markdown' });
+}
+
+// ─── Chat General ─────────────────────────────────────────────────────────────
 
 async function handleChatGeneral(chatId, pregunta) {
   const CHAT_SYSTEM = `Eres TipsterAI, el analista de fútbol con IA más avanzado disponible en Telegram.
