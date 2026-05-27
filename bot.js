@@ -1584,6 +1584,9 @@ const LEAGUE_TO_ODDS_SPORT = {
   262: 'soccer_mexico_ligamx',
   253: 'soccer_usa_mls',
   307: 'soccer_saudi_professional_league',
+  // Copas CONMEBOL
+  11:  'soccer_conmebol_copa_libertadores',
+  9:   'soccer_conmebol_copa_sudamericana',
 };
 
 // Cache en memoria: key = `${sportKey}_${dateStr}`, valor = { ts, events }
@@ -2031,11 +2034,20 @@ async function getTeamStats(teamId, leagueId) {
 
   // 2. Fallback — temporada anterior de la misma liga primero, luego ligas de referencia
   const prevSeason = season - 1;
-  const FALLBACK_LEAGUES = [
-    { league: leagueId, season: prevSeason }, // temporada anterior, misma competición
-    { league: 10, season: 2025 },             // Amistosos Int. temporada anterior
-    { league: 5,  season: 2024 },             // Nations League 2024
-  ];
+  // Copa Sudamericana (9) y Libertadores (11): los equipos son clubes sudamericanos.
+  // Amistosos Int. y Nations League no tienen datos de clubes → usar ligas domésticas SA.
+  const FALLBACK_LEAGUES = [9, 11].includes(leagueId)
+    ? [
+        { league: leagueId, season: prevSeason }, // Copa Sud/Lib temporada anterior
+        { league: 71,  season: 2026 },            // Brasileirao 2026 (cubre ~40% de equipos)
+        { league: 128, season: 2026 },            // Liga Argentina 2026 (~20%)
+        { league: 239, season: 2026 },            // Liga BetPlay Colombia 2026
+      ]
+    : [
+        { league: leagueId, season: prevSeason }, // temporada anterior, misma competición
+        { league: 10, season: 2025 },             // Amistosos Int. temporada anterior
+        { league: 5,  season: 2024 },             // Nations League 2024
+      ];
 
   for (const fb of FALLBACK_LEAGUES) {
     if (fb.league === leagueId && fb.season === season) continue;
@@ -5004,12 +5016,20 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
     };
   });
 
-  // Cuotas reales
+  // Cuotas reales — The Odds API bulk (prioridad) + API-Football por fixture (fallback)
   await bot.sendMessage(chatId, `📈 Consultando cuotas (goles, corners, tarjetas, HT)...`);
-  const oddsResultsL = await Promise.allSettled(fixtures.map(f => getRealOdds(f.fixtureId)));
-  for (let i = 0; i < enriched.length; i++) {
-    const odds = oddsResultsL[i].status === 'fulfilled' ? oddsResultsL[i].value : null;
-    if (odds) enriched[i].cuotasReales = odds;
+  const theOddsApiMapL = await prefetchOddsApi(fixtures, today);
+  const missingOddsL = fixtures.filter(f => !theOddsApiMapL.has(f.fixtureId));
+  const apiFbOddsMapL = new Map();
+  if (missingOddsL.length > 0) {
+    const oddsRes = await Promise.allSettled(missingOddsL.map(f => getRealOdds(f.fixtureId)));
+    oddsRes.forEach((r, i) => {
+      if (r.status === 'fulfilled' && r.value) apiFbOddsMapL.set(missingOddsL[i].fixtureId, r.value);
+    });
+  }
+  for (const e of enriched) {
+    const odds = theOddsApiMapL.get(e.fixtureId) || apiFbOddsMapL.get(e.fixtureId) || null;
+    if (odds) e.cuotasReales = odds;
   }
 
   await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV...`);
