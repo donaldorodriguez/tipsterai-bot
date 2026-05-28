@@ -4981,33 +4981,16 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
   await bot.sendMessage(chatId, `🔍 Consultando nuestra base de datos — ${displayName}...`);
 
   const today = todayDate();
-  // Consultar también el día UTC siguiente para capturar partidos a las 7 PM+ Bogotá
-  const nextUtcL = (() => {
-    const d = new Date(today + 'T00:00:00Z');
-    d.setUTCDate(d.getUTCDate() + 1);
-    return d.toISOString().split('T')[0];
-  })();
-  const [allToday, allNextUtc] = await Promise.all([
-    fetchFixturesByDate(today),
-    fetchFixturesByDate(nextUtcL),
-  ]);
-  const seenL = new Set();
-  const all = [...allToday, ...allNextUtc].filter(f => {
-    if (seenL.has(f.fixture.id)) return false;
-    seenL.add(f.fixture.id);
-    // Filtrar por fecha Bogotá = hoy
-    const fxDate = new Date(f.fixture.date).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
-    return fxDate === today;
-  });
+  // getFixturesByDate ya consulta ambas fechas UTC (hoy + siguiente) y filtra por Bogotá
+  const allFixturesL = await getFixturesByDate(today);
 
   const STARTED_STATUSES_L = new Set(['1H','HT','2H','ET','P','BT','LIVE','INT']);
-  const FINISHED_STATUSES_L = new Set(['FT','AET','PEN','AWD','WO']);
   let fixtures = leagueId
-    ? all.filter(f => f.league.id === leagueId && !STARTED_STATUSES_L.has(f.fixture.status.short) && !FINISHED_STATUSES_L.has(f.fixture.status.short)).map(parseFixture)
-    : all.filter(f => {
-        const n = (f.league.name || '').toLowerCase();
-        return n.includes(leagueName.toLowerCase()) && !STARTED_STATUSES_L.has(f.fixture.status.short) && !FINISHED_STATUSES_L.has(f.fixture.status.short);
-      }).map(parseFixture);
+    ? allFixturesL.filter(f => f.leagueId === leagueId && !STARTED_STATUSES_L.has(f.status))
+    : allFixturesL.filter(f => {
+        const n = (f.leagueName || '').toLowerCase();
+        return n.includes(leagueName.toLowerCase()) && !STARTED_STATUSES_L.has(f.status);
+      });
 
   console.log(`📊 Partidos encontrados para ${displayName}: ${fixtures.length}`);
 
