@@ -7058,15 +7058,24 @@ bot.onText(/\/api[-_]?debug/, async (msg) => {
     const sud2 = all2.filter(f => f.league.id === 9);
     await bot.sendMessage(chatId, `📅 date=${nextUtc} → ${all2.length} total, ${sud2.length} Copa Sud (ID 9)\n${sud2.map(f => `▸ ${f.teams.home.name} vs ${f.teams.away.name} | ${f.fixture.status.short} | ${f.fixture.date}`).join('\n') || '(ninguno)'}`);
 
-    // Test 3: por liga directa
-    const r3 = await API.get('/fixtures', { params: { league: 9, season: 2026, date: today } });
-    const all3 = r3.data.response || [];
-    await bot.sendMessage(chatId, `🏆 league=9&season=2026&date=${today} → ${all3.length} fixtures\n${all3.map(f => `▸ ${f.teams.home.name} vs ${f.teams.away.name} | ${f.fixture.status.short}`).join('\n') || '(ninguno)'}`);
+    // Test 3: buscar equipos de Copa Sud en los 232 fixtures de hoy
+    const sudTeams = ['bragantino','river plate','blooming','carabobo','atletico','mineiro','caracas','botafogo','olimpia','racing','vasco','cienciano','juventud','audax','barracas','independiente','san lorenzo','santos','recoleta'];
+    const matchesSud = [...all1, ...all2].filter(f => {
+      const h = (f.teams.home.name || '').toLowerCase();
+      const a = (f.teams.away.name || '').toLowerCase();
+      return sudTeams.some(t => h.includes(t) || a.includes(t));
+    });
+    const uniqueLeagues = [...new Map(matchesSud.map(f => [f.league.id, f.league])).values()];
+    await bot.sendMessage(chatId,
+      `🔎 Equipos Copa Sud encontrados en fixtures crudos: ${matchesSud.length}\n` +
+      matchesSud.slice(0,8).map(f => `▸ [ID ${f.league.id}] ${f.teams.home.name} vs ${f.teams.away.name} | ${f.fixture.date.slice(11,16)} UTC`).join('\n') +
+      `\n\n🏷 Ligas únicas: ${uniqueLeagues.map(l => `ID ${l.id} = ${l.name}`).join(', ') || '(ninguna)'}`
+    );
 
-    // Test 4: por liga en fecha siguiente
-    const r4 = await API.get('/fixtures', { params: { league: 9, season: 2026, date: nextUtc } });
+    // Test 4: liga 9 sin season (por si season=2026 es incorrecto)
+    const r4 = await API.get('/fixtures', { params: { league: 9, date: today } });
     const all4 = r4.data.response || [];
-    await bot.sendMessage(chatId, `🏆 league=9&season=2026&date=${nextUtc} → ${all4.length} fixtures\n${all4.map(f => `▸ ${f.teams.home.name} vs ${f.teams.away.name} | ${f.fixture.status.short}`).join('\n') || '(ninguno)'}`);
+    await bot.sendMessage(chatId, `🏆 league=9 (sin season) date=${today} → ${all4.length} fixtures\n${all4.slice(0,5).map(f => `▸ ${f.teams.home.name} vs ${f.teams.away.name} | ${f.league.season}`).join('\n') || '(ninguno)'}`);
 
   } catch (e) {
     await bot.sendMessage(chatId, `❌ Error: ${e.message}`);
