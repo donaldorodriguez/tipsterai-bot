@@ -7031,6 +7031,48 @@ bot.onText(/\/zcode[-_]?debug/, async (msg) => {
   await zbDiscover(String(msg.chat.id));
 });
 
+// ─── Command: /api-debug ─── muestra qué devuelve API-Football para Copa Sud ──
+bot.onText(/\/api[-_]?debug/, async (msg) => {
+  const telegramId = String(msg.from.id);
+  if (!ADMIN_IDS.has(telegramId)) return;
+  const chatId = String(msg.chat.id);
+  const today = todayDate();
+  const nextUtc = (() => {
+    const d = new Date(today + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().split('T')[0];
+  })();
+
+  await bot.sendMessage(chatId, `🔍 Debug API-Football\nFecha Bogotá hoy: ${today}\nFecha UTC siguiente: ${nextUtc}\nConsultando...`);
+
+  try {
+    // Test 1: por fecha (sin filtro de liga) — como hace picks de hoy
+    const r1 = await API.get('/fixtures', { params: { date: today } });
+    const all1 = r1.data.response || [];
+    const sud1 = all1.filter(f => f.league.id === 9);
+    await bot.sendMessage(chatId, `📅 date=${today} → ${all1.length} total, ${sud1.length} Copa Sud (ID 9)\n${sud1.map(f => `▸ ${f.teams.home.name} vs ${f.teams.away.name} | ${f.fixture.status.short} | ${f.fixture.date}`).join('\n') || '(ninguno)'}`);
+
+    // Test 2: fecha siguiente UTC
+    const r2 = await API.get('/fixtures', { params: { date: nextUtc } });
+    const all2 = r2.data.response || [];
+    const sud2 = all2.filter(f => f.league.id === 9);
+    await bot.sendMessage(chatId, `📅 date=${nextUtc} → ${all2.length} total, ${sud2.length} Copa Sud (ID 9)\n${sud2.map(f => `▸ ${f.teams.home.name} vs ${f.teams.away.name} | ${f.fixture.status.short} | ${f.fixture.date}`).join('\n') || '(ninguno)'}`);
+
+    // Test 3: por liga directa
+    const r3 = await API.get('/fixtures', { params: { league: 9, season: 2026, date: today } });
+    const all3 = r3.data.response || [];
+    await bot.sendMessage(chatId, `🏆 league=9&season=2026&date=${today} → ${all3.length} fixtures\n${all3.map(f => `▸ ${f.teams.home.name} vs ${f.teams.away.name} | ${f.fixture.status.short}`).join('\n') || '(ninguno)'}`);
+
+    // Test 4: por liga en fecha siguiente
+    const r4 = await API.get('/fixtures', { params: { league: 9, season: 2026, date: nextUtc } });
+    const all4 = r4.data.response || [];
+    await bot.sendMessage(chatId, `🏆 league=9&season=2026&date=${nextUtc} → ${all4.length} fixtures\n${all4.map(f => `▸ ${f.teams.home.name} vs ${f.teams.away.name} | ${f.fixture.status.short}`).join('\n') || '(ninguno)'}`);
+
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ Error: ${e.message}`);
+  }
+});
+
 // ─── Command: /zcode-status ───────────────────────────────────────────────────
 bot.onText(/\/zcode[-_]?status/, async (msg) => {
   const telegramId = String(msg.from.id);
