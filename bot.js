@@ -74,7 +74,7 @@ const LEAGUE_SEASONS = {
   318:2025,          // Cyprus First Division
   292:2026,          // South Korea K League 1
   // Sudamérica
-  11:2026, 9:2026, 71:2026, 128:2026, 239:2026,
+  11:2026, 13:2026, 71:2026, 128:2026, 239:2026,  // 11=Sudamericana, 13=Libertadores
   262:2026,253:2026, 72:2026, 66:2026, 129:2026,
   263:2026,240:2026, 65:2026,
   // Colombia
@@ -98,7 +98,7 @@ const LEAGUE_IDS = new Set([
   // Oriente Medio / Asia / Africa
   307,233,318,292,
   // Sudamérica
-  11,9,71,128,239,262,253,72,66,129,263,240,65,
+  11,13,71,128,239,262,253,72,66,129,263,240,65,  // 11=Sudamericana, 13=Libertadores
   // Otros
   671,103,
   // Competiciones internacionales
@@ -154,8 +154,8 @@ const LEAGUE_MAP = {
   318:{ name:'First Division',     country:'Cyprus'      }, // ← ID correcto Cyprus
   292:{ name:'K League 1',         country:'South Korea' }, // ← ID correcto Korea
   // Sudamérica
-  11: { name:'Libertadores',       country:'South Am.'   },
-  9:  { name:'Sudamericana',       country:'South Am.'   },
+  11: { name:'Sudamericana',       country:'South Am.'   },  // ID real API-Football
+  13: { name:'Libertadores',       country:'South Am.'   },  // ID real API-Football
   71: { name:'Brasileirao',        country:'Brazil'      },
   72: { name:'Brasileirao B',      country:'Brazil'      },
   128:{ name:'Liga Argentina',     country:'Argentina'   },
@@ -192,8 +192,8 @@ const LEAGUE_NAME_TO_ID = {
   'champions league':2, 'champions':2, 'ucl':2, 'champions league':2,
   'europa league':3, 'europa':3, 'uel':3,
   'conference league':848, 'conference':848,
-  'libertadores':11, 'copa libertadores':11,
-  'sudamericana':9, 'copa sudamericana':9,
+  'libertadores':13, 'copa libertadores':13,
+  'sudamericana':11, 'copa sudamericana':11,
   'brasileirao':71, 'serie a brasileira':71, 'seriea brasileira':71,
   'brasil':71, 'brazil':71, 'liga brasil':71, 'liga brazil':71,
   'serie a brasil':71, 'seriea brasil':71, 'série a brasil':71,
@@ -282,8 +282,9 @@ const LEAGUE_PRIORITY = {
   135: 86,  // Serie A
   78:  85,  // Bundesliga
   61:  84,  // Ligue 1
-  11:  83,  // Copa Libertadores ← subida de 80 a 83 (partido de alto nivel)
-  9:   82,  // Copa Sudamericana ← subida de 78 a 82
+  11:  82,  // Copa Sudamericana (ID real)
+  13:  83,  // Copa Libertadores (ID real)
+  // ID 9 no existe en API-Football — Sudamericana=11, Libertadores=13
   // ── TIER 3: Ligas de primera importancia regional (prioridad 60–79) ──────────
   88:  75,  // Eredivisie
   144: 73,  // Jupiler Pro League (Bélgica)
@@ -393,8 +394,8 @@ const LEAGUE_BASE_RATES = {
   79:  { over25: 58, btts: 57, cards: 3.8, corners: 10.0, name: '2. Bundesliga' },
   62:  { over25: 52, btts: 54, cards: 4.0, corners:  9.4, name: 'Ligue 2' },
   // ── Sudamérica ─────────────────────────────────────────────────────────────
-  11:  { over25: 54, btts: 55, cards: 4.8, corners:  9.3, name: 'Copa Libertadores' },
-  9:   { over25: 53, btts: 54, cards: 4.7, corners:  9.1, name: 'Copa Sudamericana' },
+  11:  { over25: 53, btts: 54, cards: 4.7, corners:  9.1, name: 'Copa Sudamericana' },
+  13:  { over25: 54, btts: 55, cards: 4.8, corners:  9.3, name: 'Copa Libertadores' },
   71:  { over25: 55, btts: 58, cards: 4.5, corners:  9.0, name: 'Brasileirao' },
   262: { over25: 54, btts: 56, cards: 4.3, corners:  9.2, name: 'Liga MX' },
   239: { over25: 53, btts: 55, cards: 4.9, corners:  8.8, name: 'Liga BetPlay' },
@@ -1603,8 +1604,8 @@ const LEAGUE_TO_ODDS_SPORT = {
   253: 'soccer_usa_mls',
   307: 'soccer_saudi_professional_league',
   // Copas CONMEBOL
-  11:  'soccer_conmebol_copa_libertadores',
-  9:   'soccer_conmebol_copa_sudamericana',
+  11:  'soccer_conmebol_copa_sudamericana',
+  13:  'soccer_conmebol_copa_libertadores',
 };
 
 // Cache en memoria: key = `${sportKey}_${dateStr}`, valor = { ts, events }
@@ -1873,7 +1874,7 @@ function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTe
     } else if (/group stage/i.test(round)) {
       const match = round.match(/(\d+)/);
       const matchday = match ? parseInt(match[1]) : null;
-      const totalGroupGames = [11, 9].includes(leagueId) ? 6 : 6;
+      const totalGroupGames = [11, 13].includes(leagueId) ? 6 : 6;
       if (matchday) {
         if (matchday === totalGroupGames) {
           ctx.contextoCopa = `🔥 ÚLTIMA JORNADA de fase de grupos — cada punto puede cambiar la clasificación`;
@@ -1914,7 +1915,7 @@ function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTe
       const totalesLiga = {
         39: 38, 140: 38, 135: 38, 78: 34, 61: 34,
         88: 34, 71: 38, 239: 20, 262: 17, 253: 34,
-        144: 30, 94: 34, 11: 6, 9: 6,
+        144: 30, 94: 34, 11: 6, 13: 6,  // 11=Sudamericana, 13=Libertadores
       };
       const total     = totalesLiga[leagueId] || 38;
       const restantes = total - n;
@@ -2052,9 +2053,9 @@ async function getTeamStats(teamId, leagueId) {
 
   // 2. Fallback — temporada anterior de la misma liga primero, luego ligas de referencia
   const prevSeason = season - 1;
-  // Copa Sudamericana (9) y Libertadores (11): los equipos son clubes sudamericanos.
+  // Copa Sudamericana (11) y Libertadores (13): los equipos son clubes sudamericanos.
   // Amistosos Int. y Nations League no tienen datos de clubes → usar ligas domésticas SA.
-  const FALLBACK_LEAGUES = [9, 11].includes(leagueId)
+  const FALLBACK_LEAGUES = [11, 13].includes(leagueId)
     ? [
         { league: leagueId, season: prevSeason }, // Copa Sud/Lib temporada anterior
         { league: 71,  season: 2026 },            // Brasileirao 2026 (cubre ~40% de equipos)
@@ -5990,7 +5991,7 @@ const RACHAS_FECHA_LEAGUES = new Set([
   2,3,848, // UCL + UEL + UECL
   88,94,   // Eredivisie + Primeira Liga
   71,      // Brasileirao
-  11,9,    // Copa Libertadores + Copa Sudamericana
+  11,13,   // Copa Sudamericana (11) + Copa Libertadores (13)
   128,     // Liga Argentina
   239,     // Liga Betplay Colombia
   262,     // Liga MX
