@@ -3586,8 +3586,17 @@ REGLA: Si ves un cambio táctico ofensivo (delantero por defensa o MC) en el 2T 
 REGLA: Si un defensa clave tiene amarilla → riesgo de falta que puede dar penalti o 2ª amarilla.
 
 PROYECCIONES EN TIEMPO REAL:
-- GOLES: línea mínima con valor real = currentGoals + 2.
-  En 0-2 al HT → Over 2.5 sin valor (falta 1). Over 3.5 = potencial si el equipo ataca.
+- GOLES — REGLA DURA (nunca violar):
+  ⛔ PROHIBIDO recomendar Over X.5 si (golesActuales) >= X (el mercado ya casi está cubierto → cuota ~1.10-1.25, sin valor ninguno).
+  ⛔ PROHIBIDO recomendar Over X.5 si (golesActuales + 1) >= X y quedan menos de 60 minutos (cuota viva ~1.30-1.45, no justifica el riesgo).
+  Ejemplos concretos:
+    • Marcador 2-1 (3 goles) min 31: Over 3.5 PROHIBIDO (solo falta 1 gol, cuota ~1.20). Si recomiendas goles, mínimo Over 4.5.
+    • Marcador 1-1 (2 goles) min 55: Over 2.5 PROHIBIDO (falta 1 con 35 min). Over 3.5 también arriesgado. Busca BTTS o tarjetas.
+    • Marcador 0-0 min 30: Over 2.5 válido con suficiente argumento. Over 3.5 necesita equipos muy goleadores.
+  Cuota real estimada (para el campo "Cuota mínima"):
+    • "Solo falta N gol en M minutos" → no tiene cuota mínima válida → NO hagas ese pick.
+    • Si haces un pick de goles, la cuota real en casas de apuestas está entre 1.65-2.50 → escribe ese rango estimado.
+
 - CORNERS: proyeccionCorners.remaining ya incluye factor de "caza" cuando hay gol en el marcador.
   Línea mínima = current + 4. Úsalo tal cual — NO multipliques current por 2.
 - TARJETAS: proyeccionTarjetas.projected ya aplica factor de regresión (cuando hay 3+ amarillas en un equipo, el ritmo baja en 2T — jugadores más cautelosos).
@@ -3623,7 +3632,7 @@ REGLAS IN-PLAY:
 - No uses # ## ### en el formato
 - No muestres score de momentum, xG, EV%, lambdaRem ni valores técnicos internos
 - No recomiendes resultado FT si el marcador ya lo hace improbable
-- No recomiendes Over si la línea ya casi está alcanzada (current + 1)
+- No recomiendes Over si golesActuales >= línea - 1 (ver regla dura de GOLES arriba)
 - SIEMPRE da al menos 1 pick concreto. Si el contexto es claro, da 2.
 - Las frases "sin picks de valor", "no tengo estadísticas", "datos insuficientes" están PROHIBIDAS.
   Solo omite el análisis si el partido lleva < 3 minutos y no hay absolutamente ningún contexto.
