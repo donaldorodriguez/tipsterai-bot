@@ -538,8 +538,26 @@ async function fetchFixturesByDate(date) {
 const FINISHED_STATUSES = new Set(['FT', 'AET', 'PEN', 'AWD', 'WO']);
 
 async function getFixturesByDate(date) {
-  const all = await fetchFixturesByDate(date);
-  return all
+  // Colombia es UTC-5: partidos a las 7 PM+ Bogotá caen en la fecha UTC siguiente.
+  // Consultamos AMBAS fechas UTC (hoy + mañana) y filtramos por fecha Bogotá.
+  const nextUtcDate = (() => {
+    const d = new Date(date + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().split('T')[0];
+  })();
+  const [allToday, allTomorrow] = await Promise.all([
+    fetchFixturesByDate(date),
+    fetchFixturesByDate(nextUtcDate),
+  ]);
+  const all = [...allToday, ...allTomorrow];
+  // Deduplicar por fixtureId
+  const seen = new Set();
+  const unique = all.filter(f => {
+    if (seen.has(f.fixture.id)) return false;
+    seen.add(f.fixture.id);
+    return true;
+  });
+  return unique
     .filter(f => {
       if (!LEAGUE_IDS.has(f.league.id)) return false;
       if (FINISHED_STATUSES.has(f.fixture.status.short)) return false;
@@ -4963,14 +4981,32 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
   await bot.sendMessage(chatId, `🔍 Consultando nuestra base de datos — ${displayName}...`);
 
   const today = todayDate();
-  const all = await fetchFixturesByDate(today);
+  // Consultar también el día UTC siguiente para capturar partidos a las 7 PM+ Bogotá
+  const nextUtcL = (() => {
+    const d = new Date(today + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().split('T')[0];
+  })();
+  const [allToday, allNextUtc] = await Promise.all([
+    fetchFixturesByDate(today),
+    fetchFixturesByDate(nextUtcL),
+  ]);
+  const seenL = new Set();
+  const all = [...allToday, ...allNextUtc].filter(f => {
+    if (seenL.has(f.fixture.id)) return false;
+    seenL.add(f.fixture.id);
+    // Filtrar por fecha Bogotá = hoy
+    const fxDate = new Date(f.fixture.date).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    return fxDate === today;
+  });
 
   const STARTED_STATUSES_L = new Set(['1H','HT','2H','ET','P','BT','LIVE','INT']);
+  const FINISHED_STATUSES_L = new Set(['FT','AET','PEN','AWD','WO']);
   let fixtures = leagueId
-    ? all.filter(f => f.league.id === leagueId && !STARTED_STATUSES_L.has(f.fixture.status.short)).map(parseFixture)
+    ? all.filter(f => f.league.id === leagueId && !STARTED_STATUSES_L.has(f.fixture.status.short) && !FINISHED_STATUSES_L.has(f.fixture.status.short)).map(parseFixture)
     : all.filter(f => {
         const n = (f.league.name || '').toLowerCase();
-        return n.includes(leagueName.toLowerCase()) && !STARTED_STATUSES_L.has(f.fixture.status.short);
+        return n.includes(leagueName.toLowerCase()) && !STARTED_STATUSES_L.has(f.fixture.status.short) && !FINISHED_STATUSES_L.has(f.fixture.status.short);
       }).map(parseFixture);
 
   console.log(`📊 Partidos encontrados para ${displayName}: ${fixtures.length}`);
