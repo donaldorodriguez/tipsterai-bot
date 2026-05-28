@@ -2681,7 +2681,16 @@ function buildPickCandidates(enrichedFixtures) {
         jornada:             f.jornada             || null,
         estadio:             f.estadio             || null,
         arbitro:             f.arbitro             || null,
-        arbitroStats:        f.arbitroStats        || null,
+        // Si SofaScore está bloqueado (arbitroStats=null) pero tenemos datos de equipo,
+        // derivamos una estimación de tarjetas/partido como sustituto de display.
+        // NOTA: la math (cardsLambda) ya usa homeCardsAvg+awayCardsAvg cuando f.arbitroStats=null,
+        // así que esto solo afecta el display — no cambia los stakes ni el EV calculado.
+        arbitroStats: f.arbitroStats || (
+          homeCardsAvg != null && awayCardsAvg != null ? {
+            amarillas_por_partido: +(homeCardsAvg + awayCardsAvg).toFixed(1),
+            _derivado: true, // estimación por historial de equipos, NO del árbitro real
+          } : null
+        ),
         h2h:                 f.h2h                 || null,
         formaSofaLocal:      f.formaSofaLocal      || null,
         formaSofaVisitante:  f.formaSofaVisitante  || null,
@@ -2715,6 +2724,10 @@ function buildPickCandidates(enrichedFixtures) {
 /**
  * Selecciona N picks con diversidad de mercado y fixture.
  * Reglas: máx 1 pick por fixture, máx 1 pick por categoría (se relaja si faltan picks).
+ *
+ * REGLA DURA (nunca se relaja):
+ *   Mercados de goles (under25, over25, under35, etc.) tienen CAP FIJO = 1.
+ *   Nunca se muestran 2 picks del mismo mercado de goles, sin importar el paso.
  */
 function selectDiversePicks(candidates, count = 3) {
   const usedFixtures = new Set();
@@ -2723,17 +2736,27 @@ function selectDiversePicks(candidates, count = 3) {
   const leagueCount  = {};   // por liga
   const selected     = [];
 
+  // Mercados de goles: cap FIJO en 1, sin importar el paso de relajación.
+  // Evita que el bot quede "enamorado" del Under 2.5 o el Over 2.5.
+  const GOALS_MARKET_CAP1 = new Set([
+    'under25', 'over25', 'under35', 'over35',
+    'under15', 'over15', 'under45', 'over45',
+  ]);
+
   /**
    * Intenta añadir el candidato respetando los límites indicados.
-   * maxPerCat    : máx. picks de la misma categoría amplia
-   * maxPerMarket : máx. picks del mismo mercado exacto
-   * maxPerLeague : máx. picks de la misma liga
+   * maxPerCat      : máx. picks de la misma categoría amplia
+   * maxPerMarket   : máx. picks del mismo mercado exacto (goals siempre cap=1)
+   * maxPerLeague   : máx. picks de la misma liga
+   * allowSameFixture: si true, permite un 2.º pick del mismo partido (distinto mercado)
    */
-  function tryAdd(c, maxPerCat, maxPerMarket, maxPerLeague) {
-    if (usedFixtures.has(c.fixtureId))              return false;
-    if ((catCount[c.category]   || 0) >= maxPerCat)    return false;
-    if ((marketCount[c.market]  || 0) >= maxPerMarket) return false;
-    if ((leagueCount[c.liga]    || 0) >= maxPerLeague) return false;
+  function tryAdd(c, maxPerCat, maxPerMarket, maxPerLeague, allowSameFixture = false) {
+    if (!allowSameFixture && usedFixtures.has(c.fixtureId)) return false;
+    if ((catCount[c.category]   || 0) >= maxPerCat)            return false;
+    // REGLA DURA: mercados de goles siempre cap=1
+    const effectiveCap = GOALS_MARKET_CAP1.has(c.market) ? 1 : maxPerMarket;
+    if ((marketCount[c.market]  || 0) >= effectiveCap)         return false;
+    if ((leagueCount[c.liga]    || 0) >= maxPerLeague)         return false;
 
     usedFixtures.add(c.fixtureId);
     catCount[c.category]  = (catCount[c.category]  || 0) + 1;
@@ -2757,11 +2780,22 @@ function selectDiversePicks(candidates, count = 3) {
     }
   }
 
-  // Paso 3: permite hasta 2/market exacto y hasta 3/liga, máx 3/cat
+  // Paso 3: permite hasta 2/market no-goals, hasta 3/liga, max 3/cat
+  // (goals markets siguen cap=1 por REGLA DURA — no habrá 2x Under 2.5 aquí)
   if (selected.length < count) {
     for (const c of candidates) {
       if (selected.length >= count) break;
       tryAdd(c, 3, 2, 3);
+    }
+  }
+
+  // Paso 4: último recurso — permite 2.º pick del mismo partido (mercado diferente).
+  // Útil cuando solo hay partidos de una competición (ej. jornada de Copa Libertadores)
+  // y el pool matemático es pequeño. Los picks siguen debiendo pasar el EV mínimo.
+  if (selected.length < count) {
+    for (const c of candidates) {
+      if (selected.length >= count) break;
+      tryAdd(c, 4, 2, 4, true); // allowSameFixture = true
     }
   }
 
@@ -3482,13 +3516,15 @@ BASE RATES DE LIGA (baseRatesLiga) — USO OBLIGATORIO:
 - Si baseRatesLiga es null → no menciones porcentajes de liga.
 
 ÁRBITRO (arbitroStats) — SIEMPRE MOSTRAR:
-- Si arbitroStats tiene datos → línea header: "🃏 Árbitro: [nombre] ([X.X] amarillas/p)"
-- Si arbitroStats es null pero hay nombre de árbitro → "🃏 Árbitro: [nombre] (stats no disponibles)"
+- Si arbitroStats tiene datos y arbitroStats._derivado NO es true → "🃏 Árbitro: [nombre] ([X.X] amarillas/p)"
+- Si arbitroStats tiene datos y arbitroStats._derivado = true → "🃏 Árbitro: [nombre] (est. [X.X] amarillas/p — promedio histórico equipos)"
+  • La estimación viene del historial de tarjetas de ambos equipos (sin datos del árbitro real), úsala como referencia aproximada.
+- Si arbitroStats es null y hay nombre de árbitro → "🃏 Árbitro: [nombre] (sin historial disponible)"
 - Si ni arbitroStats ni nombre → "🃏 Árbitro: No disponible"
-- amarillas > 4.5/partido: "árbitro permisivo → contexto de muchas tarjetas"
-- amarillas < 2.5/partido: "árbitro restrictivo → pick tarjetas con menor confianza"
+- amarillas > 4.5/partido: "tendencia a muchas tarjetas"
+- amarillas < 2.5/partido: "tendencia defensiva/restrictiva"
 - Si el pick ES de tarjetas → el perfil del árbitro + las amarillasPorPartido de ambos equipos son los datos centrales del razonamiento.
-- ⛔ REGLA DURA TARJETAS: Si arbitroStats es null (stats no disponibles), el pick de tarjetas tiene MÁXIMO stake 6/10 — nunca 7, 8, 9 o 10. Sin datos del árbitro, la incertidumbre es demasiado alta para alta confianza.
+- ⛔ REGLA DURA TARJETAS: Si arbitroStats es null O arbitroStats._derivado=true, el pick de tarjetas tiene MÁXIMO stake 6/10 — nunca 7, 8, 9 o 10. Sin datos reales del árbitro, la incertidumbre es demasiado alta para alta confianza.
 - ⛔ REGLA DURA TARJETAS FIN DE TEMPORADA: Si ambos equipos tienen motivacionLocal/Visitante con estado "nada_en_juego" o "clasifica_champions_posible_asegurado", los partidos relajados producen MENOS tarjetas que el promedio de temporada. En ese contexto, picks de Over tarjetas tienen stake máximo 5/10 y deben mencionarse como "contexto de baja intensidad esperada".
 
 BAJAS (lesionadosLocal/lesionadosVisitante):
