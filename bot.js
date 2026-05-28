@@ -4981,16 +4981,45 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
   await bot.sendMessage(chatId, `🔍 Consultando nuestra base de datos — ${displayName}...`);
 
   const today = todayDate();
-  // getFixturesByDate ya consulta ambas fechas UTC (hoy + siguiente) y filtra por Bogotá
-  const allFixturesL = await getFixturesByDate(today);
+  const season = LEAGUE_SEASONS[leagueId] || 2026;
 
-  const STARTED_STATUSES_L = new Set(['1H','HT','2H','ET','P','BT','LIVE','INT']);
-  let fixtures = leagueId
-    ? allFixturesL.filter(f => f.leagueId === leagueId && !STARTED_STATUSES_L.has(f.status))
-    : allFixturesL.filter(f => {
-        const n = (f.leagueName || '').toLowerCase();
-        return n.includes(leagueName.toLowerCase()) && !STARTED_STATUSES_L.has(f.status);
-      });
+  // Colombia UTC-5: partidos 7PM+ Bogotá se guardan en API-Football como fecha UTC siguiente.
+  // Solución: consultar ambas fechas UTC y filtrar por fecha en Bogotá.
+  const nextUtcDay = (() => {
+    const d = new Date(today + 'T00:00:00Z');
+    d.setUTCDate(d.getUTCDate() + 1);
+    return d.toISOString().split('T')[0];
+  })();
+  const SKIP_STATUSES = new Set(['1H','HT','2H','ET','P','BT','LIVE','INT','FT','AET','PEN','AWD','WO']);
+
+  let fixtures = [];
+  if (leagueId) {
+    // Consulta directa por liga + ambas fechas UTC (evita filtros genéricos)
+    const [r1, r2] = await Promise.allSettled([
+      API.get('/fixtures', { params: { league: leagueId, season, date: today } }),
+      API.get('/fixtures', { params: { league: leagueId, season, date: nextUtcDay } }),
+    ]);
+    const raw1 = r1.status === 'fulfilled' ? (r1.value.data.response || []) : [];
+    const raw2 = r2.status === 'fulfilled' ? (r2.value.data.response || []) : [];
+    console.log(`🔎 ${displayName}: ${raw1.length} fixtures UTC ${today} + ${raw2.length} UTC ${nextUtcDay}`);
+    const seen = new Set();
+    fixtures = [...raw1, ...raw2]
+      .filter(f => {
+        if (seen.has(f.fixture.id)) return false;
+        seen.add(f.fixture.id);
+        if (SKIP_STATUSES.has(f.fixture.status.short)) return false;
+        const fxBogota = new Date(f.fixture.date).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+        return fxBogota === today;
+      })
+      .map(parseFixture);
+  } else {
+    // Sin leagueId: getFixturesByDate + filtro por nombre
+    const allF = await getFixturesByDate(today);
+    fixtures = allF.filter(f =>
+      (f.leagueName || '').toLowerCase().includes(leagueName.toLowerCase()) &&
+      !SKIP_STATUSES.has(f.status)
+    );
+  }
 
   console.log(`📊 Partidos encontrados para ${displayName}: ${fixtures.length}`);
 
