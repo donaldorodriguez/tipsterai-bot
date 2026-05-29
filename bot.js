@@ -4320,25 +4320,75 @@ function todayDate() {
 const TG_LIMIT = 4000;
 
 function normalizeMd(text) {
-  // Telegram legacy Markdown uses *bold*, not **bold**
-  return text.replace(/\*\*(.+?)\*\*/g, '*$1*');
+  // 1. Telegram legacy Markdown: **bold** → *bold*
+  text = text.replace(/\*\*(.+?)\*\*/gs, '*$1*');
+
+  // 2. Escapar guiones bajos que no forman pares de _italics_ válidos.
+  //    Los nombres de equipos/jugadores con guiones bajos (ej: "Al_Ahly") rompen el parser.
+  //    Reemplazamos _ que no estén en pares balanceados con una versión literal.
+  //    Estrategia simple: si el total de _ sueltos es impar, quitamos todos los _ del texto
+  //    para no arriesgar el parse (mejor sin itálicas que un 400 de Telegram).
+  const underscoreMatches = text.match(/_[^_\n]+_/g) || [];
+  const pairedUnderscores = underscoreMatches.reduce((acc, m) => acc + (m.match(/_/g) || []).length, 0);
+  const totalUnderscores  = (text.match(/_/g) || []).length;
+  if (totalUnderscores !== pairedUnderscores) {
+    // Hay guiones bajos sueltos — eliminar todos para evitar el error de parse
+    text = text.replace(/_/g, '');
+  }
+
+  // 3. Escapar asteriscos sueltos (no parte de pares *...*).
+  //    Contamos los * fuera de pares balanceados; si el total es impar, hay uno suelto.
+  const starMatches = text.match(/\*[^*\n]+\*/g) || [];
+  const pairedStars = starMatches.reduce((acc, m) => acc + (m.match(/\*/g) || []).length, 0);
+  const totalStars  = (text.match(/\*/g) || []).length;
+  if (totalStars !== pairedStars) {
+    // Asterisco suelto detectado — convertir TODOS los * de formato a texto plano
+    // para no arriesgar el parse (mejor sin bold que un 400 de Telegram).
+    text = text.replace(/\*([^*\n]+)\*/g, '$1').replace(/\*/g, '');
+  }
+
+  return text;
 }
 
+/**
+ * Envía texto largo en chunks. Si Telegram rechaza por mal Markdown,
+ * reintenta ese chunk en texto plano automáticamente (self-healing).
+ */
 async function sendLong(chatId, text, options = {}) {
   if (options.parse_mode === 'Markdown') text = normalizeMd(text);
-  if (text.length <= TG_LIMIT) return bot.sendMessage(chatId, text, options);
+
+  // Envía un único chunk; si falla por markdown, reintenta sin formato.
+  const sendChunk = async (chunk) => {
+    try {
+      await bot.sendMessage(chatId, chunk, options);
+    } catch (e) {
+      const isMdErr = e.message?.includes('parse entities') ||
+                      e.response?.body?.description?.includes('parse entities');
+      if (isMdErr && options.parse_mode) {
+        console.warn(`⚠️ Markdown parse error en chunk (${chunk.length} chars) — reintentando en texto plano`);
+        const plainOpts = { ...options };
+        delete plainOpts.parse_mode;
+        await bot.sendMessage(chatId, chunk.replace(/[*_`\[\]]/g, ''), plainOpts);
+      } else {
+        throw e;
+      }
+    }
+  };
+
+  if (text.length <= TG_LIMIT) return sendChunk(text);
+
   const paragraphs = text.split(/\n\n+/);
   let chunk = '';
   for (const para of paragraphs) {
     const addition = (chunk ? '\n\n' : '') + para;
     if (chunk.length + addition.length > TG_LIMIT) {
-      await bot.sendMessage(chatId, chunk, options);
+      await sendChunk(chunk);
       chunk = para;
     } else {
       chunk += addition;
     }
   }
-  if (chunk) await bot.sendMessage(chatId, chunk, options);
+  if (chunk) await sendChunk(chunk);
 }
 
 // ─── Business flows ───────────────────────────────────────────────────────────
