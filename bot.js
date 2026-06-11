@@ -1234,6 +1234,58 @@ function _sofaHeaders() {
   };
 }
 
+// ── TheSportsDB — estadio, ciudad, grupo, jornada ────────────────────────────
+// API gratuita sin key. Funciona para partidos de ligas grandes + selecciones.
+const tsdbCache = new Map();
+
+function tsdbNormalize(str) {
+  return (str || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
+}
+
+async function fetchTheSportsDBEvent(homeTeam, awayTeam, fixtureDateStr) {
+  const season = new Date(fixtureDateStr).getFullYear();
+  const key = `${tsdbNormalize(homeTeam)}:${tsdbNormalize(awayTeam)}:${season}`;
+  if (tsdbCache.has(key)) return tsdbCache.get(key);
+
+  try {
+    const query = `${homeTeam} vs ${awayTeam}`;
+    const { data } = await axios.get(
+      'https://www.thesportsdb.com/api/v1/json/3/searchevents.php',
+      { params: { e: query, s: String(season) }, timeout: 8000 }
+    );
+    const events = data?.events || [];
+
+    // Intentar con temporada anterior si no hay resultado (partidos de dic-enero)
+    let ev = events[0];
+    if (!ev && season > 2020) {
+      const { data: d2 } = await axios.get(
+        'https://www.thesportsdb.com/api/v1/json/3/searchevents.php',
+        { params: { e: query, s: String(season - 1) }, timeout: 8000 }
+      );
+      ev = (d2?.events || [])[0];
+    }
+
+    if (!ev) { tsdbCache.set(key, null); return null; }
+
+    const result = {
+      estadio: ev.strVenue   || null,
+      ciudad:  ev.strCity    || null,
+      pais:    ev.strCountry || null,
+      grupo:   ev.strGroup   ? `Grupo ${ev.strGroup}` : null,
+      jornada: ev.intRound   ? `Jornada ${ev.intRound}` : null,
+      liga:    ev.strLeague  || null,
+    };
+    tsdbCache.set(key, result);
+    setTimeout(() => tsdbCache.delete(key), 3_600_000); // 1h caché
+    console.log(`🏟️ TheSportsDB [${homeTeam}]: ${result.estadio}, ${result.ciudad} | ${result.grupo || ''} ${result.jornada || ''}`);
+    return result;
+  } catch (e) {
+    console.warn('TheSportsDB error:', e.message);
+    return null;
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 async function fetchSofaScoreEvents(date) {
   if (sofaEventCache.has(date)) return sofaEventCache.get(date);
 
@@ -3488,9 +3540,11 @@ REGLA DE PUBLICACIÓN:
 
 FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 
-🌍 [País] — [Liga]  ← copia EXACTAMENTE el campo "liga" del JSON, sin añadir "(Amistoso Internacional)", "(Friendly)" ni nada extra.
+🌍 [País] — [Liga]  ← copia EXACTAMENTE el campo "liga" del JSON. PROHIBIDO añadir texto extra como "(Amistoso Internacional)" o "(Friendly)".
 ⚽ [Local] vs [Visitante] | ⏰ [Hora Colombia]
-📍 [Estadio o "No disponible"] | 🃏 Árbitro: [Nombre ([X.X] tarj/p)] o "No disponible"
+[Si partido.grupo existe]: 🏆 [grupo] | [jornada]
+📍 [partido.estadio o "No disponible"], [partido.ciudad o ""]  ← usa EXACTAMENTE los campos estadio y ciudad del JSON.
+🃏 Árbitro: [partido.arbitro o "No disponible"]
 ━━━━━━━━━━━━━━━━━━━
 
 🔍 *CONTEXTO DEL PARTIDO*
@@ -3728,9 +3782,11 @@ PREDICCIÓN API (prediccionAPI):
 FORMATO OBLIGATORIO (Telegram Markdown)
 ═══════════════════════════════════════
 
-🌍 [País] — [Liga]  ← copia EXACTAMENTE el campo "liga" del JSON, sin añadir "(Amistoso Internacional)", "(Friendly)" ni nada extra.
+🌍 [País] — [Liga]  ← copia EXACTAMENTE el campo "liga" del JSON. PROHIBIDO añadir texto extra como "(Amistoso Internacional)" o "(Friendly)".
 ⚽ [Local] vs [Visitante] | ⏰ [Hora Colombia]
-📍 [Estadio o "No disponible"] | 🃏 Árbitro: [Nombre ([X.X] tarj/p)] o "No disponible"
+[Si partido.grupo existe]: 🏆 [grupo] | [jornada]
+📍 [partido.estadio o "No disponible"], [partido.ciudad o ""]  ← usa EXACTAMENTE los campos estadio y ciudad del JSON.
+🃏 Árbitro: [partido.arbitro o "No disponible"]
 ━━━━━━━━━━━━━━━━━━━
 
 🔍 *CONTEXTO DEL PARTIDO*
@@ -5454,7 +5510,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     getInjuries(awayId, leagueId),                             // 5
     getApiPrediction(nextRaw.fixture.id),                      // 6
     getLeagueStandings(leagueId).catch(() => ({ teams: [] })), // 7
-    fetchSofaScoreEvents(fixtureDate).catch(() => []),         // 8
+    fetchSofaScoreEvents(fixtureDate).catch(() => []),          // 8
   ];
   if (isLive) {
     requests.push(getFixtureStatistics(nextRaw.fixture.id)); // 9
@@ -5507,8 +5563,11 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const homeBaseForNat  = homeStatsData;
   const awayBaseForNat  = awayStatsData;
 
-  // Fase 2: Sofascore context (depende de sofaEvents)
-  const sofaContext = await getSofaMatchContext(homeTeam, awayTeam, sofaEvents).catch(() => null);
+  // Fase 2: contexto externo (SofaScore + TheSportsDB en paralelo)
+  const [sofaContext, tsdbData] = await Promise.all([
+    getSofaMatchContext(homeTeam, awayTeam, sofaEvents).catch(() => null),
+    fetchTheSportsDBEvent(homeTeam, awayTeam, fixtureDate).catch(() => null),
+  ]);
 
   // Standings: extraer posición y motivación de cada equipo
   const homeStanding = standingsData.teams.find(t => t.teamId === homeId) || null;
@@ -5629,8 +5688,10 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       minuto:    elapsed || null,
       marcador:  isLive ? `${nextRaw.goals?.home ?? 0}-${nextRaw.goals?.away ?? 0}` : null,
       arbitro:   sofaContext?.arbitro?.nombre || nextRaw.fixture.referee || null,
-      estadio:   nextRaw.fixture.venue?.name || null,
-      ciudad:    nextRaw.fixture.venue?.city || null,
+      estadio:   tsdbData?.estadio || nextRaw.fixture.venue?.name || null,
+      ciudad:    tsdbData?.ciudad  || nextRaw.fixture.venue?.city  || null,
+      grupo:     tsdbData?.grupo   || null,
+      jornada:   tsdbData?.jornada || round || null,
     },
     ...(sofaContext?.arbitro      && { arbitroStats:  sofaContext.arbitro }),
     ...(sofaContext?.rankingsFIFA && { rankingsFIFA:  sofaContext.rankingsFIFA }),
@@ -6002,7 +6063,10 @@ async function handleEspecifica(chatId, intent) {
   const injHome2       = injHomeRes2?.status === 'fulfilled'  ? injHomeRes2.value   : [];
   const injAway2       = injAwayRes2?.status === 'fulfilled'  ? injAwayRes2.value   : [];
   const sofaEv2        = sofaEvRes2?.status === 'fulfilled'   ? sofaEvRes2.value    : [];
-  const sofaCtx2       = await getSofaMatchContext(homeTeam, awayTeam, sofaEv2).catch(() => null);
+  const [sofaCtx2, tsdbData2] = await Promise.all([
+    getSofaMatchContext(homeTeam, awayTeam, sofaEv2).catch(() => null),
+    fetchTheSportsDBEvent(homeTeam, awayTeam, fixtureDate2).catch(() => null),
+  ]);
 
   const homeStanding2  = standData2.teams?.find(t => t.teamId === homeId) || null;
   const awayStanding2  = standData2.teams?.find(t => t.teamId === awayId) || null;
@@ -6019,7 +6083,10 @@ async function handleEspecifica(chatId, intent) {
       local:     homeTeam,
       visitante: awayTeam,
       arbitro:   sofaCtx2?.arbitro?.nombre || nextRaw.fixture.referee || null,
-      estadio:   nextRaw.fixture.venue?.name || null,
+      estadio:   tsdbData2?.estadio || nextRaw.fixture.venue?.name || null,
+      ciudad:    tsdbData2?.ciudad  || nextRaw.fixture.venue?.city  || null,
+      grupo:     tsdbData2?.grupo   || null,
+      jornada:   tsdbData2?.jornada || nextRaw.league?.round || null,
     },
     ...(sofaCtx2?.arbitro      && { arbitroStats:  sofaCtx2.arbitro }),
     ...(sofaCtx2?.rankingsFIFA && { rankingsFIFA:  sofaCtx2.rankingsFIFA }),
