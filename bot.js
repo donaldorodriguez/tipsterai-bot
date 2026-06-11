@@ -1269,10 +1269,31 @@ function sofaNormalize(str) {
     .trim();
 }
 
+// Nombres equivalentes de selecciones nacionales entre API-Football y SofaScore
+const SOFA_NATIONAL_EQUIV = {
+  'korearepublic':    'southkorea',
+  'republicofkorea':  'southkorea',
+  'koreandpr':        'northkorea',
+  'czechrepublic':    'czechia',
+  'unitedstates':     'usa',
+  'iriran':           'iran',
+  'republicofireland':'ireland',
+  'ivorycoast':       'cotedivoire',
+  'coteivoire':       'cotedivoire',
+  'trinidadandtobago':'trinidadtobago',
+  'bosniaherzegovina':'bosniaherzegovina',
+  'northmacedonia':   'northmacedonia',
+  'capeverde':        'capeverde',
+  'saudiarabia':      'saudiarabia',
+};
+function sofaCanon(n) { return SOFA_NATIONAL_EQUIV[n] || n; }
+
 function sofaTeamMatch(apiName, sofaName) {
   const a = sofaNormalize(apiName);
   const b = sofaNormalize(sofaName);
   if (a === b) return true;
+  if (sofaCanon(a) === sofaCanon(b)) return true;
+  if (sofaCanon(a) === b || a === sofaCanon(b)) return true;
   const minLen = Math.min(a.length, b.length);
   if (minLen >= 4) {
     return a.startsWith(b.substring(0, Math.min(5, b.length))) ||
@@ -3467,7 +3488,7 @@ REGLA DE PUBLICACIÓN:
 
 FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 
-🌍 [País] — [Liga]
+🌍 [País] — [Liga]  ← copia EXACTAMENTE el campo "liga" del JSON, sin añadir "(Amistoso Internacional)", "(Friendly)" ni nada extra.
 ⚽ [Local] vs [Visitante] | ⏰ [Hora Colombia]
 📍 [Estadio o "No disponible"] | 🃏 Árbitro: [Nombre ([X.X] tarj/p)] o "No disponible"
 ━━━━━━━━━━━━━━━━━━━
@@ -3707,7 +3728,7 @@ PREDICCIÓN API (prediccionAPI):
 FORMATO OBLIGATORIO (Telegram Markdown)
 ═══════════════════════════════════════
 
-🌍 [País] — [Liga]
+🌍 [País] — [Liga]  ← copia EXACTAMENTE el campo "liga" del JSON, sin añadir "(Amistoso Internacional)", "(Friendly)" ni nada extra.
 ⚽ [Local] vs [Visitante] | ⏰ [Hora Colombia]
 📍 [Estadio o "No disponible"] | 🃏 Árbitro: [Nombre ([X.X] tarj/p)] o "No disponible"
 ━━━━━━━━━━━━━━━━━━━
