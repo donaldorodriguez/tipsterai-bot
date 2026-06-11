@@ -855,6 +855,29 @@ const TEAM_ALIASES = {
   'japon':           'Japan',
   'corea':           'Korea Republic',
   'corea del sur':   'Korea Republic',
+  'korea del sur':   'Korea Republic',
+  'corea sur':       'Korea Republic',
+  'corea del norte': 'Korea DPR',
+  'korea del norte': 'Korea DPR',
+  'republica checa': 'Czech Republic',
+  'chequia':         'Czech Republic',
+  'hungria':         'Hungary',
+  'rumania':         'Romania',
+  'eslovaquia':      'Slovakia',
+  'eslovenia':       'Slovenia',
+  'rusia':           'Russia',
+  'irak':            'Iraq',
+  'argelia':         'Algeria',
+  'costa de marfil': 'Ivory Coast',
+  'tunez':           'Tunisia',
+  'nueva zelanda':   'New Zealand',
+  'tailandia':       'Thailand',
+  'siria':           'Syria',
+  'jordania':        'Jordan',
+  'emiratos arabes unidos': 'UAE',
+  'emiratos arabes': 'UAE',
+  'emiratos':        'UAE',
+  'arabia saudi':    'Saudi Arabia',
   'marruecos':       'Morocco',
   'senegal':         'Senegal',
   'nigeria':         'Nigeria',
@@ -1308,6 +1331,17 @@ async function getSofaMatchContext(homeTeam, awayTeam, sofaEvents) {
         console.log(`🃏 Árbitro [${homeTeam}]: ${ref.name} | games=${games} | amarPP=${amarPP}`);
       } else {
         console.log(`⚠️ Árbitro sin datos para ${homeTeam} vs ${awayTeam} (ref=${JSON.stringify(ref)})`);
+      }
+
+      // Rankings FIFA (presentes en partidos internacionales)
+      const rankH = ev?.homeTeam?.ranking ?? null;
+      const rankA = ev?.awayTeam?.ranking ?? null;
+      if (rankH != null || rankA != null) {
+        result.rankingsFIFA = {
+          local:     rankH != null ? `#${rankH}` : null,
+          visitante: rankA != null ? `#${rankA}` : null,
+        };
+        console.log(`🌍 Rankings FIFA: local=#${rankH} visitante=#${rankA}`);
       }
     } else {
       console.log(`❌ SofaScore /event/${event.id} falló: ${detailRes.reason?.message || detailRes.status} (status: ${detailRes.reason?.response?.status})`);
@@ -4794,6 +4828,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
         if (r.status === 'fulfilled' && r.value) {
           const s = r.value;
           if (s.arbitro)        enriched[i].arbitroStats       = s.arbitro;
+          if (s.rankingsFIFA)   enriched[i].rankingsFIFA       = s.rankingsFIFA;
           if (s.formaLocal)     enriched[i].formaSofaLocal     = s.formaLocal;
           if (s.formaVisitante) enriched[i].formaSofaVisitante = s.formaVisitante;
         }
@@ -5576,7 +5611,8 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       estadio:   nextRaw.fixture.venue?.name || null,
       ciudad:    nextRaw.fixture.venue?.city || null,
     },
-    ...(sofaContext?.arbitro && { arbitroStats: sofaContext.arbitro }),
+    ...(sofaContext?.arbitro      && { arbitroStats:  sofaContext.arbitro }),
+    ...(sofaContext?.rankingsFIFA && { rankingsFIFA:  sofaContext.rankingsFIFA }),
     contextoPorPartido: {
       queSeJuegaLocal:    motivLocal.texto,
       queSeJuegaVisitante: motivVisit.texto,
@@ -5766,7 +5802,8 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
       ...f,
       marcador: `${f.homeGoals ?? 0}-${f.awayGoals ?? 0}`,
       arbitro: sofa?.arbitro?.nombre || f.referee || null,
-      ...(sofa?.arbitro && { arbitroStats: sofa.arbitro }),
+      ...(sofa?.arbitro      && { arbitroStats:  sofa.arbitro }),
+      ...(sofa?.rankingsFIFA && { rankingsFIFA:  sofa.rankingsFIFA }),
       contextoPorPartido: {
         queSeJuegaLocal:     getTeamMotivation(homeStanding, totalTeamsV).texto,
         queSeJuegaVisitante: getTeamMotivation(awayStanding, totalTeamsV).texto,
@@ -5963,7 +6000,8 @@ async function handleEspecifica(chatId, intent) {
       arbitro:   sofaCtx2?.arbitro?.nombre || nextRaw.fixture.referee || null,
       estadio:   nextRaw.fixture.venue?.name || null,
     },
-    ...(sofaCtx2?.arbitro && { arbitroStats: sofaCtx2.arbitro }),
+    ...(sofaCtx2?.arbitro      && { arbitroStats:  sofaCtx2.arbitro }),
+    ...(sofaCtx2?.rankingsFIFA && { rankingsFIFA:  sofaCtx2.rankingsFIFA }),
     contextoPorPartido: {
       queSeJuegaLocal:     getTeamMotivation(homeStanding2, totalTeams2).texto,
       queSeJuegaVisitante: getTeamMotivation(awayStanding2, totalTeams2).texto,
