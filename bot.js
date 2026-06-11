@@ -2051,21 +2051,39 @@ async function getTeamStats(teamId, leagueId) {
     console.error(`❌ getTeamStats(team=${teamId}, liga=${leagueId}, season=${season}): ${e?.response?.status ?? e.message}`);
   }
 
-  // 2. Fallback — temporada anterior de la misma liga primero, luego ligas de referencia
+  // 2. Fallback — estrategia según tipo de liga
   const prevSeason = season - 1;
-  // Copa Sudamericana (11) y Libertadores (13): los equipos son clubes sudamericanos.
-  // Amistosos Int. y Nations League no tienen datos de clubes → usar ligas domésticas SA.
+
+  // Ligas de selecciones nacionales — WC, Euros, Nations League, qualifiers, friendlies
+  const NATIONAL_LEAGUES = new Set([1, 4, 5, 6, 7, 8, 10, 29, 32]);
+  const isNationalLeague = NATIONAL_LEAGUES.has(leagueId);
+
   const FALLBACK_LEAGUES = [11, 13].includes(leagueId)
     ? [
-        { league: leagueId, season: prevSeason }, // Copa Sud/Lib temporada anterior
-        { league: 71,  season: 2026 },            // Brasileirao 2026 (cubre ~40% de equipos)
-        { league: 128, season: 2026 },            // Liga Argentina 2026 (~20%)
-        { league: 239, season: 2026 },            // Liga BetPlay Colombia 2026
+        { league: leagueId, season: prevSeason },
+        { league: 71,  season: 2026 },
+        { league: 128, season: 2026 },
+        { league: 239, season: 2026 },
+      ]
+    : isNationalLeague
+    ? [
+        // Para selecciones nacionales: rastrear todas las competiciones recientes
+        { league: 1,  season: 2026 },  // Copa del Mundo 2026
+        { league: 6,  season: 2026 },  // Clasificatorias WC 2026
+        { league: 6,  season: 2025 },  // Clasificatorias WC 2025
+        { league: 10, season: 2026 },  // Amistosos int. 2026
+        { league: 10, season: 2025 },  // Amistosos int. 2025
+        { league: 5,  season: 2024 },  // UEFA Nations League 2024
+        { league: 5,  season: 2025 },  // UEFA Nations League 2025
+        { league: 4,  season: 2024 },  // UEFA Euro 2024
+        { league: 29, season: 2024 },  // Copa América 2024
+        { league: 7,  season: 2025 },  // CONCACAF Nations League
+        { league: 8,  season: 2025 },  // AFC Asian Cup Qualifiers
       ]
     : [
-        { league: leagueId, season: prevSeason }, // temporada anterior, misma competición
-        { league: 10, season: 2025 },             // Amistosos Int. temporada anterior
-        { league: 5,  season: 2024 },             // Nations League 2024
+        { league: leagueId, season: prevSeason },
+        { league: 10, season: 2025 },
+        { league: 5,  season: 2024 },
       ];
 
   for (const fb of FALLBACK_LEAGUES) {
@@ -2079,8 +2097,89 @@ async function getTeamStats(teamId, leagueId) {
     }
   }
 
+  // 3. Último recurso para selecciones: construir stats desde últimos 20 partidos
+  if (isNationalLeague) {
+    const recentStats = await getNationalTeamRecentStats(teamId);
+    if (recentStats) {
+      console.log(`✅ getTeamStats: selección nacional ${teamId} — stats derivadas de últimos ${recentStats._partidosAnalizados} partidos`);
+      return recentStats;
+    }
+  }
+
   console.warn(`🚨 getTeamStats(team=${teamId}, liga=${leagueId}): sin datos en ningún intento`);
   return null;
+}
+
+/**
+ * Obtiene stats de selección nacional compilando sus últimos N partidos
+ * de cualquier competición (WC, Qualifiers, Nations League, Friendlies).
+ * Útil cuando la WC acaba de empezar y solo hay 1-2 partidos en el torneo.
+ */
+async function getNationalTeamRecentStats(teamId, last = 20) {
+  try {
+    const { data } = await API.get('/fixtures', {
+      params: { team: teamId, last, status: 'FT' },
+    });
+    const fixtures = data.response || [];
+    if (fixtures.length < 3) return null;
+
+    let golesAFavor = 0, golesEnContra = 0, partidos = 0;
+    let victorias = 0, empates = 0, derrotas = 0;
+    let bttsCount = 0, cleanSheets = 0, failedToScore = 0;
+    let formStr = '';
+    let totalAmarillasSeason = 0;
+
+    for (const f of fixtures) {
+      const isHome = f.teams.home.id === teamId;
+      const gF  = isHome ? (f.goals.home ?? 0) : (f.goals.away ?? 0);
+      const gC  = isHome ? (f.goals.away ?? 0) : (f.goals.home ?? 0);
+      golesAFavor   += gF;
+      golesEnContra += gC;
+      partidos++;
+      if (gF > gC)       { victorias++; formStr += 'G'; }
+      else if (gF < gC)  { derrotas++;  formStr += 'P'; }
+      else               { empates++;   formStr += 'E'; }
+      if (gF > 0 && gC > 0) bttsCount++;
+      if (gC === 0) cleanSheets++;
+      if (gF === 0) failedToScore++;
+    }
+    if (partidos === 0) return null;
+
+    const avgFor     = +(golesAFavor   / partidos).toFixed(2);
+    const avgAgainst = +(golesEnContra / partidos).toFixed(2);
+    const forma5     = formStr.slice(-5).split('').join('-');
+    const wins5      = (formStr.slice(-5).match(/G/g) || []).length;
+    const draws5     = (formStr.slice(-5).match(/E/g) || []).length;
+    const losses5    = (formStr.slice(-5).match(/P/g) || []).length;
+    const pts5       = wins5 * 3 + draws5;
+
+    return {
+      equipo:              `Team ${teamId}`,
+      liga:                'Internacional (últimos partidos)',
+      temporada:           'multi',
+      partidosJugados:     partidos,
+      _partidosAnalizados: partidos,
+      nota:                `Stats derivadas de los últimos ${partidos} partidos en todas las competiciones internacionales`,
+      forma:               formStr.slice(-6).split('').join('-'),
+      forma5:              { forma: forma5, victorias: wins5, empates: draws5, derrotas: losses5, puntos: pts5,
+                             nota: pts5 >= 12 ? 'Forma excelente' : pts5 >= 9 ? 'Forma buena' : pts5 >= 6 ? 'Forma regular' : 'Forma mala' },
+      golesAnotadosHome:   String(avgFor),
+      golesAnotadosAway:   String(avgFor),
+      golesRecibidosHome:  String(avgAgainst),
+      golesRecibidosAway:  String(avgAgainst),
+      cleanSheetsHome:     cleanSheets,
+      cleanSheetsAway:     cleanSheets,
+      failedToScoreHome:   failedToScore,
+      failedToScoreAway:   failedToScore,
+      victorias:           { total: victorias },
+      empates:             { total: empates },
+      derrotas:            { total: derrotas },
+      bttsRate:            `${Math.round(bttsCount / partidos * 100)}%`,
+    };
+  } catch (e) {
+    console.warn(`⚠️ getNationalTeamRecentStats(${teamId}): ${e.message}`);
+    return null;
+  }
 }
 
 // ─── Probability & Analytics Engine ──────────────────────────────────────────
@@ -3299,6 +3398,28 @@ Cuando un equipo tiene pocos partidos en la competición actual (Copa del Mundo 
 5. Contexto del partido: qué se juegan, presión, local/visitante
 Si alguno de estos factores apunta claramente en una dirección, hay pick. Si todo es incierto, baja el stake y explícalo en el razonamiento.
 
+COPA DEL MUNDO / SELECCIONES NACIONALES — GUÍA ESPECÍFICA:
+El JSON incluirá uno o más de estos campos: statsLocal, statsLocalOtrasIntl, statsLocalUltimos20 (y equivalentes para visitante).
+USA TODOS en conjunto — el bot ya recopiló forma de Clasificatorias, Nations League, Amistosos, Euros/Copa América.
+Prioridad de fuentes para el análisis: statsLocal (torneo actual) > statsLocalOtrasIntl > statsLocalUltimos20.
+Si statsLocal tiene < 4 partidos, complementa obligatoriamente con statsLocalUltimos20 — NO uses solo los 1-2 partidos del torneo.
+Factores clave para partidos de selecciones:
+  • Forma reciente (últimos 10 partidos internacionales): busca en statsLocalUltimos20.forma
+  • Nivel ofensivo real: promedio de goles anotados en los últimos 20 partidos internacionales (más representativo que liga doméstica)
+  • Solidez defensiva: goles recibidos y porcentaje de portería a cero en partidos internacionales
+  • H2H histórico: cómo se han enfrentado históricamente (incluye amistosos)
+  • Contexto de grupo (si hay standings del torneo): posición, puntos, gol diferencia, si ya clasificaron o necesitan resultado
+  • Renombre táctico: si conoces el sistema táctico del seleccionador (4-3-3 ofensivo, 5-3-2 defensivo) → úsalo
+  • Bajas importantes: si hay jugadores estelares ausentes (lesionados/sancionados del JSON injuriesLocal/Visitante)
+Picks recomendados en Mundial:
+  • Under 2.5 / Under 1.5: partidos con selecciones defensivas o de menor nivel
+  • BTTS No: cuando alguno de los dos equipos raramente marca (cleanSheet > 40%)
+  • Resultado con AH -0.5: si la diferencia de nivel es clara (evitar handicaps mayores)
+  • Over 2.5: solo cuando AMBOS equipos atacan y tienen stats > 1.5 goles/partido en intl
+  • Gana el local / visitante con valor: cuando las cuotas reflejan desventaja mayor que la real
+⛔ En el Mundial: EVITAR Over 3.5 en fase de grupos (las selecciones priorizan no perder en primera jornada)
+⛔ En el Mundial: NUNCA recomendar el favorito claro a cuota < 1.65 (Brasil, Francia, Alemania vs equipos medianos)
+
 REGLA DE PUBLICACIÓN:
 - Stake mínimo: 5/10. Stake máximo: 10/10. Sin excepciones.
 - Un pick con stake 4 o menos es una APUESTA PERDEDORA — no la muestres al usuario.
@@ -3604,6 +3725,10 @@ Eres un tipster en vivo. Siempre das picks concretos y accionables — NUNCA ter
 
 CUOTAS EN VIVO:
 - Si cuotasVivo tiene datos → úsalos para el pick.
+  ⛔ REGLA DURA DE VALOR: Si la cuota real en cuotasVivo es < 1.50 para un mercado → ese mercado NO tiene valor y está PROHIBIDO recomendarlo. Busca otro pick.
+  ⛔ PROHIBIDO recomendar "gana [equipo]" cuando ese equipo ya va ganando — la cuota cae a 1.10-1.30 y no hay ningún valor.
+  ⛔ PROHIBIDO recomendar "siguiente gol [equipo]" a cuota < 1.45 — solo tiene valor si hay argumento muy sólido Y cuota ≥ 1.50.
+  Cuota mínima aceptable para cualquier pick en vivo: 1.50.
 - Si cuotasVivo es null → da el pick igual. En el campo "Cuota mínima" escribe la cuota mínima que justificaría la apuesta (ej: "busca > 1.65", "busca > 1.80"). Nunca dejes ese campo vacío. El usuario verifica la cuota en su casa — lo que necesita de ti es la DIRECCIÓN.
 
 ANÁLISIS DE MOMENTUM (campo "momentumEnVivo"):
@@ -5251,10 +5376,11 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   );
 
   // Ligas europeas (CL/EL/ECL): también buscar stats de liga doméstica para mejor baseline
-  const DOMESTIC_LEAGUE = { 2: 140, 3: 140, 135: 135, 78: 78, 61: 61, 94: 94 }; // CL/EL → LaLiga, etc.
-  // Para CL/EL buscamos league doméstica del equipo local (heurística: usamos homeId)
-  const isEuropean = [2, 3, 848].includes(leagueId);
-  const domLeagueId = isEuropean ? null : null; // no necesitamos hardcodear, lo hacemos con ambos equipos
+  const DOMESTIC_LEAGUE = { 2: 140, 3: 140, 135: 135, 78: 78, 61: 61, 94: 94 };
+  const isEuropean      = [2, 3, 848].includes(leagueId);
+  // Mundial y competiciones de selecciones nacionales
+  const NATIONAL_LEAGUES_SET = new Set([1, 4, 5, 6, 7, 8, 10, 29, 32]);
+  const isNationalTeamMatch  = NATIONAL_LEAGUES_SET.has(leagueId);
 
   const fixtureDate = nextRaw.fixture.date.split('T')[0];
 
@@ -5272,12 +5398,32 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   ];
   if (isLive) {
     requests.push(getFixtureStatistics(nextRaw.fixture.id)); // 9
-    requests.push(getFixtureEvents(nextRaw.fixture.id));     // 10  ← goles/tarjetas/cambios
+    requests.push(getFixtureEvents(nextRaw.fixture.id));     // 10
   }
   if (isEuropean) {
     requests.push(
       Promise.any([140,78,39,135,61,88,94].map(lid => getTeamStats(homeId, lid).then(s => s ? s : Promise.reject()))).catch(() => null),
       Promise.any([140,78,39,135,61,88,94].map(lid => getTeamStats(awayId, lid).then(s => s ? s : Promise.reject()))).catch(() => null)
+    );
+  }
+  // Para partidos de selecciones nacionales: buscar stats en otras competiciones en paralelo
+  // (WC Qualifiers, Nations League, Friendlies, Euros, Copa América)
+  const INTL_FALLBACKS = [6, 10, 5, 4, 29];  // WC Qual, Friendlies, NationsLeague, Euro, CopaAm
+  if (isNationalTeamMatch) {
+    const otherLeagues = INTL_FALLBACKS.filter(l => l !== leagueId);
+    requests.push(
+      // Stats del local en otras competiciones internacionales — tomar la primera que retorne datos
+      Promise.any(otherLeagues.flatMap(l => [2025,2026,2024].map(s =>
+        getTeamStats(homeId, l).then(st => st ? st : Promise.reject())
+      ))).catch(() => null),
+      // Stats del visitante en otras competiciones internacionales
+      Promise.any(otherLeagues.flatMap(l => [2025,2026,2024].map(s =>
+        getTeamStats(awayId, l).then(st => st ? st : Promise.reject())
+      ))).catch(() => null),
+      // Stats del local derivadas de últimos 20 partidos (respaldo definitivo)
+      getNationalTeamRecentStats(homeId).catch(() => null),
+      // Stats del visitante derivadas de últimos 20 partidos
+      getNationalTeamRecentStats(awayId).catch(() => null),
     );
   }
 
@@ -5296,6 +5442,12 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const euroBase      = isLive ? 11 : 9;
   const homedomRes    = isEuropean ? results[euroBase]     : null;
   const awaydomRes    = isEuropean ? results[euroBase + 1] : null;
+  // Índices para resultados de selecciones nacionales (después de european slots)
+  const intlBase      = isEuropean ? euroBase + 2 : (isLive ? 11 : 9);
+  const homeIntlRes   = isNationalTeamMatch ? results[intlBase]     : null;
+  const awayIntlRes   = isNationalTeamMatch ? results[intlBase + 1] : null;
+  const homeRecRes    = isNationalTeamMatch ? results[intlBase + 2] : null;
+  const awayRecRes    = isNationalTeamMatch ? results[intlBase + 3] : null;
 
   const h2hData         = h2hRes.status === 'fulfilled'        ? h2hRes.value        : [];
   const homeStatsData   = homeStatsRes.status === 'fulfilled'   ? homeStatsRes.value   : null;
@@ -5311,6 +5463,14 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const liveEventsData  = rawEventsData.length > 0 ? summarizeEvents(rawEventsData, homeTeam, awayTeam) : null;
   const homeDomStats    = isEuropean && homedomRes?.status === 'fulfilled' ? homedomRes.value : null;
   const awayDomStats    = isEuropean && awaydomRes?.status === 'fulfilled' ? awaydomRes.value : null;
+  // Para selecciones: combinar datos del torneo actual + otras competiciones + histórico reciente
+  const homeIntlStats   = isNationalTeamMatch && homeIntlRes?.status === 'fulfilled' ? homeIntlRes.value : null;
+  const awayIntlStats   = isNationalTeamMatch && awayIntlRes?.status === 'fulfilled' ? awayIntlRes.value : null;
+  const homeRecentStats = isNationalTeamMatch && homeRecRes?.status  === 'fulfilled' ? homeRecRes.value  : null;
+  const awayRecentStats = isNationalTeamMatch && awayRecRes?.status  === 'fulfilled' ? awayRecRes.value  : null;
+  // Usar mejor fuente disponible: torneo actual > otras intl > historial reciente
+  const homeBaseForNat  = homeStatsData || homeIntlStats || homeRecentStats;
+  const awayBaseForNat  = awayStatsData || awayIntlStats || awayRecentStats;
 
   // Fase 2: Sofascore context (depende de sofaEvents)
   const sofaContext = await getSofaMatchContext(homeTeam, awayTeam, sofaEvents).catch(() => null);
@@ -5385,10 +5545,9 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   }
 
   // Calcular probabilidades con modelo de Poisson
-  // Para europeas: usar stats domésticas si hay (más representativas)
-  // Para finales de copa: aplicar factor reductor de goles (las finales son tácticamente cerradas)
-  const homeBase = homeDomStats || homeStatsData;
-  const awayBase = awayDomStats || awayStatsData;
+  // Europeas → stats domésticas; Selecciones → combinar todas las fuentes; Resto → stats de temporada
+  const homeBase = homeDomStats || (isNationalTeamMatch ? homeBaseForNat : homeStatsData);
+  const awayBase = awayDomStats || (isNationalTeamMatch ? awayBaseForNat : awayStatsData);
   let probBlock = buildProbBlock(homeBase, awayBase, h2hData, leagueId);
   if (isSingleLegFinal && probBlock) {
     // Reducir un 30% los xG para reflejar que las finales producen ~1.8 goles de media vs ~2.7 en liga
@@ -5450,10 +5609,21 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     ...(predData && { prediccionAPIFootball: predData }),
     h2h:            h2hData,
     bttsEnH2H:      h2hData.filter(m => m.btts).length,
-    statsLocal:     homeStatsData ? { ...homeStatsData, _fuente: 'promedio temporada completa — todas las competiciones' } : null,
-    statsVisitante: awayStatsData ? { ...awayStatsData, _fuente: 'promedio temporada completa — todas las competiciones' } : null,
-    ...(homeDomStats && { statsLocalLigaDomestica:   { ...homeDomStats, _fuente: 'promedio liga doméstica — todas las competiciones' } }),
-    ...(awayDomStats && { statsVisitanteLigaDomestica: { ...awayDomStats, _fuente: 'promedio liga doméstica — todas las competiciones' } }),
+    // Para selecciones: mostrar la mejor fuente disponible como statsLocal/Visitante,
+    // y adjuntar el historial reciente si existe como fuente complementaria.
+    statsLocal:     (homeBaseForNat || homeStatsData)
+      ? { ...(homeBaseForNat || homeStatsData), _fuente: 'promedio temporada completa — todas las competiciones' }
+      : null,
+    statsVisitante: (awayBaseForNat || awayStatsData)
+      ? { ...(awayBaseForNat || awayStatsData), _fuente: 'promedio temporada completa — todas las competiciones' }
+      : null,
+    ...(homeDomStats && { statsLocalLigaDomestica:     { ...homeDomStats,     _fuente: 'promedio liga doméstica' } }),
+    ...(awayDomStats && { statsVisitanteLigaDomestica: { ...awayDomStats,     _fuente: 'promedio liga doméstica' } }),
+    // Para selecciones: historial reciente multi-competición
+    ...(isNationalTeamMatch && homeIntlStats  && { statsLocalOtrasIntl:     { ...homeIntlStats,  _fuente: 'otras competiciones internacionales' } }),
+    ...(isNationalTeamMatch && awayIntlStats  && { statsVisitanteOtrasIntl: { ...awayIntlStats,  _fuente: 'otras competiciones internacionales' } }),
+    ...(isNationalTeamMatch && homeRecentStats && { statsLocalUltimos20:    { ...homeRecentStats, _fuente: 'últimos 20 partidos (todas las competiciones)' } }),
+    ...(isNationalTeamMatch && awayRecentStats && { statsVisitanteUltimos20:{ ...awayRecentStats, _fuente: 'últimos 20 partidos (todas las competiciones)' } }),
     estadisticasVivo: liveStatsData,
     ...(liveEventsData && { eventosPartido: liveEventsData }),  // ← goles con jugador, tarjetas, cambios
     ...(lineupsData && lineupsData.length > 0 && { alineaciones: lineupsData }),
@@ -5497,11 +5667,13 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const realOdds = await getRealOdds(nextRaw.fixture.id).catch(() => null);
   if (realOdds) analysisData.cuotasReales = realOdds;
 
-  // Usar stats domésticas para el motor si están disponibles (más partidos = más fiable)
-  const hFor = parseFloat((homeDomStats || homeStatsData)?.golesAnotadosHome) || 1.3;
-  const hAgt = parseFloat((homeDomStats || homeStatsData)?.golesRecibidosHome) || 1.1;
-  const aFor = parseFloat((awayDomStats || awayStatsData)?.golesAnotadosAway) || 1.0;
-  const aAgt = parseFloat((awayDomStats || awayStatsData)?.golesRecibidosAway) || 1.3;
+  // Usar la mejor fuente disponible para el motor de probabilidades
+  const _bestHomeStats = homeDomStats || homeBaseForNat || homeStatsData;
+  const _bestAwayStats = awayDomStats || awayBaseForNat || awayStatsData;
+  const hFor = parseFloat(_bestHomeStats?.golesAnotadosHome) || 1.3;
+  const hAgt = parseFloat(_bestHomeStats?.golesRecibidosHome) || 1.1;
+  const aFor = parseFloat(_bestAwayStats?.golesAnotadosAway) || 1.0;
+  const aAgt = parseFloat(_bestAwayStats?.golesRecibidosAway) || 1.3;
   const extProbs = calcExtendedProbs(hFor, hAgt, aFor, aAgt);
 
   const fixtureForEngine = {
@@ -5646,9 +5818,18 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
     const lo = liveOddsResults[i].status === 'fulfilled' ? liveOddsResults[i].value : null;
     if (lo) {
       enriched[i].cuotasVivo = lo;
+      // Filtro de valor: marcar mercados con cuota < 1.50 como sin valor (Claude los ignora)
+      const LIVE_MIN_ODDS = 1.50;
+      const sinValor = Object.entries(lo)
+        .filter(([k, v]) => k !== 'source' && typeof v === 'number' && v < LIVE_MIN_ODDS)
+        .map(([k]) => k);
+      if (sinValor.length > 0) {
+        enriched[i].cuotasVivo._mercadosSinValor = sinValor;
+        enriched[i].cuotasVivo._nota = `Mercados con cuota < ${LIVE_MIN_ODDS} (sin valor): ${sinValor.join(', ')}. PROHIBIDO recomendar estos mercados.`;
+        console.log(`⚠️ Live odds sin valor (< ${LIVE_MIN_ODDS}): ${enriched[i].homeTeam} vs ${enriched[i].awayTeam} — ${sinValor.join(', ')}`);
+      }
     } else {
       enriched[i].cuotasVivo = null;
-      // Sin cuotas vivo: el bot da igual picks con cuota sugerida mínima
     }
   }
 
