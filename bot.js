@@ -2086,8 +2086,12 @@ async function getTeamStats(teamId, leagueId) {
         { league: 5,  season: 2024 },
       ];
 
+  // Delay entre intentos de fallback para selecciones nacionales (muchos intentos → evitar rate limit)
+  const fallbackDelay = isNationalLeague ? 250 : 0;
+
   for (const fb of FALLBACK_LEAGUES) {
     if (fb.league === leagueId && fb.season === season) continue;
+    if (fallbackDelay > 0) await new Promise(r => setTimeout(r, fallbackDelay));
     try {
       const { data } = await API.get('/teams/statistics', { params: { team: teamId, league: fb.league, season: fb.season } });
       const stats = parseStats(data.response);
@@ -5406,26 +5410,11 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       Promise.any([140,78,39,135,61,88,94].map(lid => getTeamStats(awayId, lid).then(s => s ? s : Promise.reject()))).catch(() => null)
     );
   }
-  // Para partidos de selecciones nacionales: buscar stats en otras competiciones en paralelo
-  // (WC Qualifiers, Nations League, Friendlies, Euros, Copa América)
-  const INTL_FALLBACKS = [6, 10, 5, 4, 29];  // WC Qual, Friendlies, NationsLeague, Euro, CopaAm
-  if (isNationalTeamMatch) {
-    const otherLeagues = INTL_FALLBACKS.filter(l => l !== leagueId);
-    requests.push(
-      // Stats del local en otras competiciones internacionales — tomar la primera que retorne datos
-      Promise.any(otherLeagues.flatMap(l => [2025,2026,2024].map(s =>
-        getTeamStats(homeId, l).then(st => st ? st : Promise.reject())
-      ))).catch(() => null),
-      // Stats del visitante en otras competiciones internacionales
-      Promise.any(otherLeagues.flatMap(l => [2025,2026,2024].map(s =>
-        getTeamStats(awayId, l).then(st => st ? st : Promise.reject())
-      ))).catch(() => null),
-      // Stats del local derivadas de últimos 20 partidos (respaldo definitivo)
-      getNationalTeamRecentStats(homeId).catch(() => null),
-      // Stats del visitante derivadas de últimos 20 partidos
-      getNationalTeamRecentStats(awayId).catch(() => null),
-    );
-  }
+  // Para selecciones nacionales NO se disparan requests extra aquí:
+  // getTeamStats() ya maneja internamente la cascada de 11 competiciones (WC, Qualifiers,
+  // Nations League, Friendlies, Euros, Copa América) con delay entre intentos,
+  // y como último recurso llama a getNationalTeamRecentStats().
+  // Disparar llamadas adicionales en paralelo solo provocaría rate-limit en API-Football.
 
   const results = await Promise.allSettled(requests);
   const h2hRes        = results[0];
@@ -5442,12 +5431,6 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const euroBase      = isLive ? 11 : 9;
   const homedomRes    = isEuropean ? results[euroBase]     : null;
   const awaydomRes    = isEuropean ? results[euroBase + 1] : null;
-  // Índices para resultados de selecciones nacionales (después de european slots)
-  const intlBase      = isEuropean ? euroBase + 2 : (isLive ? 11 : 9);
-  const homeIntlRes   = isNationalTeamMatch ? results[intlBase]     : null;
-  const awayIntlRes   = isNationalTeamMatch ? results[intlBase + 1] : null;
-  const homeRecRes    = isNationalTeamMatch ? results[intlBase + 2] : null;
-  const awayRecRes    = isNationalTeamMatch ? results[intlBase + 3] : null;
 
   const h2hData         = h2hRes.status === 'fulfilled'        ? h2hRes.value        : [];
   const homeStatsData   = homeStatsRes.status === 'fulfilled'   ? homeStatsRes.value   : null;
@@ -5463,14 +5446,10 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const liveEventsData  = rawEventsData.length > 0 ? summarizeEvents(rawEventsData, homeTeam, awayTeam) : null;
   const homeDomStats    = isEuropean && homedomRes?.status === 'fulfilled' ? homedomRes.value : null;
   const awayDomStats    = isEuropean && awaydomRes?.status === 'fulfilled' ? awaydomRes.value : null;
-  // Para selecciones: combinar datos del torneo actual + otras competiciones + histórico reciente
-  const homeIntlStats   = isNationalTeamMatch && homeIntlRes?.status === 'fulfilled' ? homeIntlRes.value : null;
-  const awayIntlStats   = isNationalTeamMatch && awayIntlRes?.status === 'fulfilled' ? awayIntlRes.value : null;
-  const homeRecentStats = isNationalTeamMatch && homeRecRes?.status  === 'fulfilled' ? homeRecRes.value  : null;
-  const awayRecentStats = isNationalTeamMatch && awayRecRes?.status  === 'fulfilled' ? awayRecRes.value  : null;
-  // Usar mejor fuente disponible: torneo actual > otras intl > historial reciente
-  const homeBaseForNat  = homeStatsData || homeIntlStats || homeRecentStats;
-  const awayBaseForNat  = awayStatsData || awayIntlStats || awayRecentStats;
+  // Para selecciones: getTeamStats ya devuelve la mejor fuente disponible después de su cascada
+  // (WC → Qualifiers → Friendlies → Nations League → Euros → últimos 20 partidos)
+  const homeBaseForNat  = homeStatsData;
+  const awayBaseForNat  = awayStatsData;
 
   // Fase 2: Sofascore context (depende de sofaEvents)
   const sofaContext = await getSofaMatchContext(homeTeam, awayTeam, sofaEvents).catch(() => null);
@@ -5609,21 +5588,16 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     ...(predData && { prediccionAPIFootball: predData }),
     h2h:            h2hData,
     bttsEnH2H:      h2hData.filter(m => m.btts).length,
-    // Para selecciones: mostrar la mejor fuente disponible como statsLocal/Visitante,
-    // y adjuntar el historial reciente si existe como fuente complementaria.
-    statsLocal:     (homeBaseForNat || homeStatsData)
-      ? { ...(homeBaseForNat || homeStatsData), _fuente: 'promedio temporada completa — todas las competiciones' }
+    // Para selecciones: homeStatsData ya contiene la mejor fuente disponible (ver getTeamStats cascade).
+    // El campo 'nota' dentro de stats indica si es referencia de otra competición o de últimos 20 partidos.
+    statsLocal:     homeStatsData
+      ? { ...homeStatsData, _fuente: homeStatsData.nota || 'datos del torneo actual' }
       : null,
-    statsVisitante: (awayBaseForNat || awayStatsData)
-      ? { ...(awayBaseForNat || awayStatsData), _fuente: 'promedio temporada completa — todas las competiciones' }
+    statsVisitante: awayStatsData
+      ? { ...awayStatsData, _fuente: awayStatsData.nota || 'datos del torneo actual' }
       : null,
     ...(homeDomStats && { statsLocalLigaDomestica:     { ...homeDomStats,     _fuente: 'promedio liga doméstica' } }),
     ...(awayDomStats && { statsVisitanteLigaDomestica: { ...awayDomStats,     _fuente: 'promedio liga doméstica' } }),
-    // Para selecciones: historial reciente multi-competición
-    ...(isNationalTeamMatch && homeIntlStats  && { statsLocalOtrasIntl:     { ...homeIntlStats,  _fuente: 'otras competiciones internacionales' } }),
-    ...(isNationalTeamMatch && awayIntlStats  && { statsVisitanteOtrasIntl: { ...awayIntlStats,  _fuente: 'otras competiciones internacionales' } }),
-    ...(isNationalTeamMatch && homeRecentStats && { statsLocalUltimos20:    { ...homeRecentStats, _fuente: 'últimos 20 partidos (todas las competiciones)' } }),
-    ...(isNationalTeamMatch && awayRecentStats && { statsVisitanteUltimos20:{ ...awayRecentStats, _fuente: 'últimos 20 partidos (todas las competiciones)' } }),
     estadisticasVivo: liveStatsData,
     ...(liveEventsData && { eventosPartido: liveEventsData }),  // ← goles con jugador, tarjetas, cambios
     ...(lineupsData && lineupsData.length > 0 && { alineaciones: lineupsData }),
