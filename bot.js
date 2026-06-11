@@ -58,6 +58,7 @@ const LEAGUE_IDS = new Set([
 ]);
 
 const LEAGUE_MAP = {
+  1:  { name:'FIFA World Cup',     country:'World'       },
   39: { name:'Premier League',     country:'England'     },
   140:{ name:'LaLiga',             country:'Spain'       },
   135:{ name:'Serie A',            country:'Italy'       },
@@ -105,6 +106,7 @@ const LEAGUE_MAP = {
 
 // Maps user-written league names → league ID
 const LEAGUE_NAME_TO_ID = {
+  'fifa world cup':1, 'world cup':1, 'mundial':1, 'copa del mundo':1,
   'bundesliga':78, '2.bundesliga':79, 'segunda bundesliga':79,
   'premier league':39, 'premier':39, 'epl':39,
   'laliga':140, 'la liga':140, 'primera division':140,
@@ -258,6 +260,8 @@ function parseFixture(f) {
     awayTeam:   f.teams.away.name,
     homeGoals:  f.goals.home,
     awayGoals:  f.goals.away,
+    referee:    f.fixture.referee || null,
+    venue:      f.fixture.venue   || null,
   };
 }
 
@@ -312,13 +316,57 @@ function normalizeTeamName(str) {
     .trim();
 }
 
+// Traducciones español → nombre en inglés usado por la API (selecciones nacionales)
+const TEAM_NAME_ES_EN = {
+  // Corea
+  'corea del sur': 'South Korea', 'korea del sur': 'South Korea', 'corea sur': 'South Korea',
+  'corea del norte': 'North Korea', 'korea del norte': 'North Korea',
+  // Europa del este
+  'republica checa': 'Czech Republic', 'chequia': 'Czech Republic', 'eslovaquia': 'Slovakia',
+  'eslovenia': 'Slovenia', 'croacia': 'Croatia', 'hungria': 'Hungary', 'rumania': 'Romania',
+  'rumania': 'Romania', 'rusia': 'Russia', 'ucrania': 'Ukraine', 'polonia': 'Poland',
+  'serbia': 'Serbia', 'albania': 'Albania', 'turquia': 'Turkey',
+  // Europa occidental
+  'alemania': 'Germany', 'francia': 'France', 'espana': 'Spain', 'belgica': 'Belgium',
+  'holanda': 'Netherlands', 'paises bajos': 'Netherlands', 'suiza': 'Switzerland',
+  'dinamarca': 'Denmark', 'suecia': 'Sweden', 'noruega': 'Norway', 'finlandia': 'Finland',
+  'austria': 'Austria', 'grecia': 'Greece', 'escocia': 'Scotland', 'gales': 'Wales',
+  'irlanda': 'Ireland', 'irlanda del norte': 'Northern Ireland',
+  // Americas
+  'brasil': 'Brazil', 'estados unidos': 'USA', 'eeuu': 'USA', 'mexico': 'Mexico',
+  'peru': 'Peru', 'colombia': 'Colombia', 'ecuador': 'Ecuador', 'venezuela': 'Venezuela',
+  'chile': 'Chile', 'paraguay': 'Paraguay', 'uruguay': 'Uruguay', 'bolivia': 'Bolivia',
+  'costa rica': 'Costa Rica', 'el salvador': 'El Salvador', 'panama': 'Panama',
+  'honduras': 'Honduras', 'guatemala': 'Guatemala', 'haiti': 'Haiti', 'jamaica': 'Jamaica',
+  'canada': 'Canada',
+  // Africa
+  'marruecos': 'Morocco', 'argelia': 'Algeria', 'costa de marfil': 'Ivory Coast',
+  'senegal': 'Senegal', 'camerun': 'Cameroon', 'ghana': 'Ghana', 'nigeria': 'Nigeria',
+  'egipto': 'Egypt', 'tunez': 'Tunisia', 'sudafrica': 'South Africa',
+  // Asia / Medio Oriente
+  'japon': 'Japan', 'china': 'China', 'iran': 'Iran', 'irak': 'Iraq',
+  'arabia saudita': 'Saudi Arabia', 'arabia saudi': 'Saudi Arabia',
+  'emiratos arabes unidos': 'UAE', 'emiratos arabes': 'UAE', 'emiratos': 'UAE',
+  'siria': 'Syria', 'jordania': 'Jordan', 'qatar': 'Qatar', 'kuwait': 'Kuwait',
+  'tailandia': 'Thailand', 'vietnam': 'Vietnam', 'indonesia': 'Indonesia',
+  'australia': 'Australia', 'nueva zelanda': 'New Zealand',
+};
+
+function translateTeamName(name) {
+  const key = name.toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .trim();
+  return TEAM_NAME_ES_EN[key] || name;
+}
+
 async function searchTeam(name, countryHint = '') {
-  const { data } = await API.get('/teams', { params: { search: name } });
+  const apiName = translateTeamName(name);
+  const { data } = await API.get('/teams', { params: { search: apiName } });
   const results = data.response || [];
   if (results.length === 0) return null;
   if (results.length === 1) return results[0];
 
-  const q = normalizeTeamName(name);
+  const q = normalizeTeamName(apiName);
   const country = countryHint.trim().toLowerCase();
   const RESERVE = /\b(ii|b|reserve|reserva|sub|youth|juvenil|u\d{2}|amateur|filial)\b/i;
 
@@ -410,6 +458,165 @@ async function getLeagueStandings(leagueId) {
   const group = Array.isArray(standings[0]) ? standings[0] : standings;
   return group.map(s => ({ teamId: s.team.id, teamName: s.team.name, rank: s.rank }));
 }
+
+// ── SofaScore — árbitro + forma reciente ─────────────────────────────────────
+// SofaScore tiene promedios pre-calculados del árbitro (career stats / partidos).
+// 2 llamadas máx por partido (eventos del día + detalle), con caché agresivo.
+
+const sofaEventCache = new Map();
+
+const SOFA_USER_AGENTS = [
+  'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Safari/537.36',
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
+];
+let _sofaUaIndex = 0;
+
+function _sofaHeaders() {
+  const ua = SOFA_USER_AGENTS[_sofaUaIndex % SOFA_USER_AGENTS.length];
+  return {
+    'User-Agent': ua,
+    'Accept': 'application/json, text/plain, */*',
+    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Referer': 'https://www.sofascore.com/',
+    'Origin': 'https://www.sofascore.com',
+    'Cache-Control': 'no-cache',
+    'Sec-Fetch-Dest': 'empty',
+    'Sec-Fetch-Mode': 'cors',
+    'Sec-Fetch-Site': 'same-site',
+    'Connection': 'keep-alive',
+  };
+}
+
+async function fetchSofaScoreEvents(date) {
+  if (sofaEventCache.has(date)) return sofaEventCache.get(date);
+
+  for (let attempt = 0; attempt < SOFA_USER_AGENTS.length; attempt++) {
+    _sofaUaIndex = attempt;
+    try {
+      const { data } = await axios.get(
+        `https://api.sofascore.com/api/v1/sport/football/scheduled-events/${date}`,
+        { headers: _sofaHeaders(), timeout: 12000 }
+      );
+      const events = data.events || [];
+      sofaEventCache.set(date, events);
+      if (attempt > 0) console.log(`🔄 SofaScore OK con UA #${attempt}: ${events.length} eventos`);
+      else console.log(`✅ SofaScore: ${events.length} eventos para ${date}`);
+      return events;
+    } catch (e) {
+      const status = e.response?.status;
+      console.warn(`⚠️ SofaScore intento ${attempt + 1}/4 (UA#${attempt}) → ${status || e.message}`);
+      if (status !== 403 && status !== 429) break;
+      await new Promise(r => setTimeout(r, 800 * (attempt + 1)));
+    }
+  }
+  console.warn('❌ SofaScore bloqueado en todos los intentos');
+  return [];
+}
+
+function sofaNormalize(str) {
+  return (str || '').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/\bfc\b|\baf\b|\bac\b|\bsc\b|\bsk\b|\bcf\b|\bfk\b|\bif\b|\bbk\b|\bcd\b|\bsd\b|\bud\b|\brcd\b|\bas\b|\bss\b|\bus\b|\bsv\b|\bbv\b/g, '')
+    .replace(/[^a-z0-9]/g, '')
+    .trim();
+}
+
+function sofaTeamMatch(apiName, sofaName) {
+  const a = sofaNormalize(apiName);
+  const b = sofaNormalize(sofaName);
+  if (a === b) return true;
+  const minLen = Math.min(a.length, b.length);
+  if (minLen >= 4) {
+    return a.startsWith(b.substring(0, Math.min(5, b.length))) ||
+           b.startsWith(a.substring(0, Math.min(5, a.length)));
+  }
+  return false;
+}
+
+async function getSofaMatchContext(homeTeam, awayTeam, sofaEvents) {
+  try {
+    const event = sofaEvents.find(e =>
+      sofaTeamMatch(homeTeam, e.homeTeam?.name) && sofaTeamMatch(awayTeam, e.awayTeam?.name)
+    );
+    if (!event) {
+      console.log(`SofaScore: sin match para ${homeTeam} vs ${awayTeam}`);
+      return null;
+    }
+
+    const [detailRes, homeFormRes, awayFormRes] = await Promise.allSettled([
+      axios.get(`https://api.sofascore.com/api/v1/event/${event.id}`, { headers: _sofaHeaders(), timeout: 8000 }),
+      axios.get(`https://api.sofascore.com/api/v1/team/${event.homeTeam.id}/last/0`, { headers: _sofaHeaders(), timeout: 8000 }),
+      axios.get(`https://api.sofascore.com/api/v1/team/${event.awayTeam.id}/last/0`, { headers: _sofaHeaders(), timeout: 8000 }),
+    ]);
+
+    const result = { fuente: 'sofascore' };
+
+    // Árbitro con stats pre-calculados + rankings FIFA (desde detalle del evento)
+    if (detailRes.status === 'fulfilled') {
+      const ev  = detailRes.value.data?.event;
+      const ref = ev?.referee;
+      if (ref) {
+        const games = ref.games || ref.gamesCount || 1;
+        const amarPP = (ref.yellowCards && games > 1) ? +(ref.yellowCards / games).toFixed(2) : null;
+        const rojPP  = (ref.redCards    && games > 1) ? +(ref.redCards    / games).toFixed(2) : null;
+        result.arbitro = {
+          nombre:                      ref.name,
+          partidos:                    games,
+          amarillas_por_partido:       (amarPP !== null && amarPP < 15) ? amarPP : null,
+          rojas_por_partido:           (rojPP  !== null && rojPP  < 3)  ? rojPP  : null,
+          penaltis_por_partido:        (ref.penaltyCount && games > 1) ? +(ref.penaltyCount / games).toFixed(2) : null,
+        };
+        console.log(`🃏 Árbitro [${homeTeam}]: ${ref.name} | partidos=${games} | amarPP=${amarPP}`);
+      }
+
+      // Rankings FIFA (presentes en partidos internacionales)
+      const rankH = ev?.homeTeam?.ranking ?? ev?.homeTeamScore?.ranking ?? null;
+      const rankA = ev?.awayTeam?.ranking ?? ev?.awayTeamScore?.ranking ?? null;
+      if (rankH != null || rankA != null) {
+        result.rankingsFIFA = {
+          local:     rankH ? `#${rankH}` : null,
+          visitante: rankA ? `#${rankA}` : null,
+        };
+        console.log(`🌍 Rankings FIFA: local=#${rankH} visitante=#${rankA}`);
+      }
+    }
+
+    // Forma reciente local
+    if (homeFormRes.status === 'fulfilled') {
+      const evs = homeFormRes.value.data?.events || [];
+      const hid = event.homeTeam.id;
+      result.formaLocal = evs.slice(0, 6).map(e => {
+        const esL = e.homeTeam?.id === hid;
+        const mis = esL ? e.homeScore?.current : e.awayScore?.current;
+        const opp = esL ? e.awayScore?.current : e.homeScore?.current;
+        if (mis == null || opp == null) return '?';
+        return mis > opp ? 'G' : mis < opp ? 'P' : 'E';
+      }).join('-');
+    }
+
+    // Forma reciente visitante
+    if (awayFormRes.status === 'fulfilled') {
+      const evs = awayFormRes.value.data?.events || [];
+      const aid = event.awayTeam.id;
+      result.formaVisitante = evs.slice(0, 6).map(e => {
+        const esL = e.homeTeam?.id === aid;
+        const mis = esL ? e.homeScore?.current : e.awayScore?.current;
+        const opp = esL ? e.awayScore?.current : e.homeScore?.current;
+        if (mis == null || opp == null) return '?';
+        return mis > opp ? 'G' : mis < opp ? 'P' : 'E';
+      }).join('-');
+    }
+
+    return result;
+  } catch (e) {
+    console.warn('getSofaMatchContext error:', e.message);
+    return null;
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function getH2H(id1, id2) {
   const { data } = await API.get('/fixtures/headtohead', { params: { h2h: `${id1}-${id2}`, last: 10 } });
@@ -1080,8 +1287,11 @@ Si no hay picks con STAKE 6+: "No hay picks de valor en este partido. Mejor no a
 
 FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 
-🌍 [País] — [Liga]
+🌍 [País] — [Liga]  ← SOLO el nombre de liga que viene en el JSON. NUNCA añadas "(Amistoso Internacional)" ni etiquetas inventadas. Si la liga es "FIFA World Cup", escríbela tal cual.
 ⚽ [Local] vs [Visitante] | ⏰ [Hora Colombia]
+📍 [Estadio, Ciudad]  ← usa partido.estadio y partido.ciudad del JSON. Si son null escribe "No disponible".
+🃏 Árbitro: [Nombre] — 🟨 [X.XX/partido] 🟥 [X.XX/partido]  ← usa estadisticasArbitro del JSON (amarillas_por_partido y rojas_por_partido). Si es null, escribe "No disponible".
+[Si rankingsFIFA existe en el JSON] 🌐 Ranking FIFA: [Local] [#N] vs [Visitante] [#N]  ← omite esta línea si rankingsFIFA no está en el JSON.
 ━━━━━━━━━━━━━━━━━━━
 
 📊 *ESTADÍSTICAS CLAVE*
@@ -1089,8 +1299,8 @@ FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 ▸ [Visitante] anota fuera: *X.X* por partido
 ▸ [Local] recibe en casa: *X.X* por partido
 ▸ Ambos marcan en H2H: *X de 10* partidos
-▸ Forma reciente [Local]: *GGPGE*
-▸ Forma reciente [Visitante]: *PGEGG*
+▸ Forma reciente [Local]: *GGPGE*  ← usa formaLocalSofa si existe, si no usa la de statsLocal
+▸ Forma reciente [Visitante]: *PGEGG*  ← usa formaVisitanteSofa si existe, si no usa la de statsVisitante
 
 🎯 *PICK [N]: [Mercado en español]*
 ┌ Selección: [Qué apostar exactamente]
@@ -1559,10 +1769,23 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 6000));
   }
 
-  const enriched = selected.map((f, i) => {
+  // SofaScore: 1 llamada para todos los eventos del día (en caché)
+  const sofaEventsHoy = await fetchSofaScoreEvents(today).catch(() => []);
+
+  const enrichedRaw = selected.map((f, i) => {
     const homeStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
     const awayStats = statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
     const probBlock = buildProbBlock(homeStats, awayStats, []);
+    return { f, homeStats, awayStats, probBlock };
+  });
+
+  // Obtener contexto SofaScore (árbitro, rankings, forma) para cada partido en paralelo
+  const sofaContexts = await Promise.allSettled(
+    enrichedRaw.map(({ f }) => getSofaMatchContext(f.homeTeam, f.awayTeam, sofaEventsHoy))
+  );
+
+  const enriched = enrichedRaw.map(({ f, homeStats, awayStats, probBlock }, i) => {
+    const sofa = sofaContexts[i].status === 'fulfilled' ? sofaContexts[i].value : null;
     return {
       fixtureId:      f.fixtureId,
       liga:           f.leagueName,
@@ -1570,9 +1793,16 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       visitante:      f.awayTeam,
       hora:           formatHour(f.date),
       fechaPartido:   f.date,
+      estadio:        f.venue?.name  || null,
+      ciudad:         f.venue?.city  || null,
+      arbitro:        sofa?.arbitro?.nombre || null,
       statsLocal:     homeStats,
       statsVisitante: awayStats,
-      ...(probBlock && { probabilidadesCalculadas: probBlock }),
+      ...(probBlock         && { probabilidadesCalculadas: probBlock }),
+      ...(sofa?.arbitro     && { estadisticasArbitro: sofa.arbitro }),
+      ...(sofa?.rankingsFIFA && { rankingsFIFA: sofa.rankingsFIFA }),
+      ...(sofa?.formaLocal      && { formaLocalSofa: sofa.formaLocal }),
+      ...(sofa?.formaVisitante  && { formaVisitanteSofa: sofa.formaVisitante }),
     };
   });
 
@@ -1580,7 +1810,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   const picksText = await sonnet(
     PICKS_HOY_SYSTEM,
-    `Partidos del día ${today} (hora Colombia). DATOS REALES DE API-FOOTBALL:\n\n${JSON.stringify(enriched, null, 2)}\n\nEmite EXACTAMENTE 3 picks individuales + 1 combinada basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
+    `Partidos del día ${today} (hora Colombia). DATOS REALES DE API-FOOTBALL + SOFASCORE:\n\n${JSON.stringify(enriched, null, 2)}\n\nEmite EXACTAMENTE 3 picks individuales + 1 combinada basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
   );
 
   // Guardar en caché para evitar re-análisis y picks contradictorios
@@ -1642,10 +1872,21 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
     if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 6000));
   }
 
-  const enriched = fixtures.map((f, i) => {
+  const sofaEventsLiga = await fetchSofaScoreEvents(today).catch(() => []);
+
+  const enrichedRawLiga = fixtures.map((f, i) => {
     const homeStats = statsResults[i * 2]?.status === 'fulfilled' ? statsResults[i * 2].value : null;
     const awayStats = statsResults[i * 2 + 1]?.status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
     const probBlock = buildProbBlock(homeStats, awayStats, []);
+    return { f, homeStats, awayStats, probBlock };
+  });
+
+  const sofaContextsLiga = await Promise.allSettled(
+    enrichedRawLiga.map(({ f }) => getSofaMatchContext(f.homeTeam, f.awayTeam, sofaEventsLiga))
+  );
+
+  const enriched = enrichedRawLiga.map(({ f, homeStats, awayStats, probBlock }, i) => {
+    const sofa = sofaContextsLiga[i].status === 'fulfilled' ? sofaContextsLiga[i].value : null;
     return {
       fixtureId:      f.fixtureId,
       liga:           f.leagueName,
@@ -1653,9 +1894,16 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
       visitante:      f.awayTeam,
       hora:           formatHour(f.date),
       fechaPartido:   f.date,
+      estadio:        f.venue?.name || null,
+      ciudad:         f.venue?.city || null,
+      arbitro:        sofa?.arbitro?.nombre || f.referee || null,
       statsLocal:     homeStats,
       statsVisitante: awayStats,
-      ...(probBlock && { probabilidadesCalculadas: probBlock }),
+      ...(probBlock             && { probabilidadesCalculadas: probBlock }),
+      ...(sofa?.arbitro         && { estadisticasArbitro: sofa.arbitro }),
+      ...(sofa?.rankingsFIFA    && { rankingsFIFA: sofa.rankingsFIFA }),
+      ...(sofa?.formaLocal      && { formaLocalSofa: sofa.formaLocal }),
+      ...(sofa?.formaVisitante  && { formaVisitanteSofa: sofa.formaVisitante }),
     };
   });
 
@@ -1663,7 +1911,7 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
 
   const picksText = await sonnet(
     PICKS_HOY_SYSTEM,
-    `Partidos de ${displayName} del día ${today}. DATOS REALES DE API:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y emite picks de valor basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
+    `Partidos de ${displayName} del día ${today}. DATOS REALES DE API + SOFASCORE:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y emite picks de valor basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
   );
 
   // Guardar en caché para evitar re-análisis y picks contradictorios
@@ -1746,18 +1994,30 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     ? calcLiveGoalLines(currentGoalsTotal, elapsed)
     : null;
 
+  // Árbitro (nombre) desde API-Football; stats desde SofaScore (pre-calculados)
+  const fixtureDate = nextRaw.fixture.date.split('T')[0];
+  const sofaEvents  = await fetchSofaScoreEvents(fixtureDate).catch(() => []);
+  const sofaCtx     = await getSofaMatchContext(homeTeam, awayTeam, sofaEvents).catch(() => null);
+
   const analysisData = {
     partido: {
       liga:      nextRaw.league.name,
       pais:      nextRaw.league.country,
-      fecha:     nextRaw.fixture.date.split('T')[0],
+      fecha:     fixtureDate,
       hora:      formatHour(nextRaw.fixture.date),
       local:     homeTeam,
       visitante: awayTeam,
+      estadio:   nextRaw.fixture.venue?.name  || null,
+      ciudad:    nextRaw.fixture.venue?.city  || null,
+      arbitro:   sofaCtx?.arbitro?.nombre || nextRaw.fixture.referee || null,
       enVivo:    isLive,
       minuto:    elapsed || null,
       marcador:  isLive ? `${nextRaw.goals?.home ?? 0}-${nextRaw.goals?.away ?? 0}` : null,
     },
+    ...(sofaCtx?.arbitro         && { estadisticasArbitro: sofaCtx.arbitro }),
+    ...(sofaCtx?.rankingsFIFA    && { rankingsFIFA: sofaCtx.rankingsFIFA }),
+    ...(sofaCtx?.formaLocal      && { formaLocalSofa: sofaCtx.formaLocal }),
+    ...(sofaCtx?.formaVisitante  && { formaVisitanteSofa: sofaCtx.formaVisitante }),
     h2h:            h2hData,
     bttsEnH2H:      h2hData.filter(m => m.btts).length,
     statsLocal:     homeStatsData,
@@ -1803,41 +2063,42 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
     toAnalyze.map(f => getFixtureStatistics(f.fixtureId))
   );
 
+  const sofaEventsVivo = await fetchSofaScoreEvents(todayDate()).catch(() => []);
+  const sofaContextsVivo = await Promise.allSettled(
+    toAnalyze.map(f => getSofaMatchContext(f.homeTeam, f.awayTeam, sofaEventsVivo))
+  );
+
   const enriched = toAnalyze.map((f, i) => {
     const liveStats = statsResults[i].status === 'fulfilled' ? statsResults[i].value : null;
+    const sofa      = sofaContextsVivo[i].status === 'fulfilled' ? sofaContextsVivo[i].value : null;
     const elapsed   = f.elapsed || 0;
 
-    // Momentum en vivo
     const momentum = calcLiveMomentum(liveStats, f.homeTeam, f.awayTeam);
 
-    // Proyección de corners al ritmo actual
     const homeCorners = liveStats ? (Object.values(liveStats)[0]?.['Corner Kicks'] ?? 0) : 0;
     const awayCorners = liveStats ? (Object.values(liveStats)[1]?.['Corner Kicks'] ?? 0) : 0;
-    const cornersProj = elapsed > 0
-      ? calcLiveProjection(homeCorners + awayCorners, elapsed)
-      : null;
+    const cornersProj = elapsed > 0 ? calcLiveProjection(homeCorners + awayCorners, elapsed) : null;
 
-    // Proyección de tarjetas
     const homeCards = liveStats
       ? ((Object.values(liveStats)[0]?.['Yellow Cards'] ?? 0) + (Object.values(liveStats)[0]?.['Red Cards'] ?? 0))
       : 0;
     const awayCards = liveStats
       ? ((Object.values(liveStats)[1]?.['Yellow Cards'] ?? 0) + (Object.values(liveStats)[1]?.['Red Cards'] ?? 0))
       : 0;
-    const cardsProj = elapsed > 0
-      ? calcLiveProjection(homeCards + awayCards, elapsed)
-      : null;
+    const cardsProj = elapsed > 0 ? calcLiveProjection(homeCards + awayCards, elapsed) : null;
 
-    // Líneas de goles con valor real dado el marcador actual
-    const currentGoals = (f.homeGoals ?? 0) + (f.awayGoals ?? 0);
-    const goalLinesProj = elapsed > 0
-      ? calcLiveGoalLines(currentGoals, elapsed)
-      : null;
+    const currentGoals  = (f.homeGoals ?? 0) + (f.awayGoals ?? 0);
+    const goalLinesProj = elapsed > 0 ? calcLiveGoalLines(currentGoals, elapsed) : null;
 
     return {
       ...f,
-      marcador: `${f.homeGoals ?? 0}-${f.awayGoals ?? 0}`,
+      marcador:         `${f.homeGoals ?? 0}-${f.awayGoals ?? 0}`,
+      estadio:          f.venue?.name || null,
+      ciudad:           f.venue?.city || null,
+      arbitro:          sofa?.arbitro?.nombre || f.referee || null,
       estadisticasVivo: liveStats,
+      ...(sofa?.arbitro      && { estadisticasArbitro: sofa.arbitro }),
+      ...(sofa?.rankingsFIFA && { rankingsFIFA: sofa.rankingsFIFA }),
       ...(momentum      && { momentumEnVivo: momentum }),
       ...(cornersProj   && { proyeccionCorners: cornersProj }),
       ...(cardsProj     && { proyeccionTarjetas: cardsProj }),
@@ -1848,7 +2109,7 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
   await bot.sendMessage(chatId, '🎯 Identificando picks de valor...');
   const analysis = await sonnet(
     INPLAY_SYSTEM,
-    `DATOS REALES EN VIVO de API-Football:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y da picks de valor in-play para los mejores partidos.`
+    `DATOS REALES EN VIVO de API-Football + SofaScore:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y da picks de valor in-play para los mejores partidos.`
   );
   await sendLong(chatId, `🔴 *PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}*\n\n${analysis}`, { parse_mode: 'Markdown' });
   recordPicks(analysis, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.homeTeam, visitante: f.awayTeam, liga: f.leagueName, fechaPartido: f.date }))).catch(e => console.error('recordPicks:', e.message));
@@ -1947,25 +2208,35 @@ async function handleEspecifica(chatId, intent) {
 
   await bot.sendMessage(chatId, `📊 Recopilando datos históricos...`);
 
-  const [h2hRes, homeStatsRes, awayStatsRes] = await Promise.allSettled([
+  const fixtureDate2 = nextRaw.fixture.date.split('T')[0];
+  const [h2hRes, homeStatsRes, awayStatsRes, sofaEventsRes2] = await Promise.allSettled([
     getH2H(homeId, awayId),
     getTeamStats(homeId, leagueId),
     getTeamStats(awayId, leagueId),
+    fetchSofaScoreEvents(fixtureDate2),
   ]);
 
   const h2hData2       = h2hRes.status === 'fulfilled' ? h2hRes.value : [];
   const homeStatsData2 = homeStatsRes.status === 'fulfilled' ? homeStatsRes.value : null;
   const awayStatsData2 = awayStatsRes.status === 'fulfilled' ? awayStatsRes.value : null;
+  const sofaEvs2       = sofaEventsRes2.status === 'fulfilled' ? sofaEventsRes2.value : [];
+  const sofaCtx2       = await getSofaMatchContext(homeTeam, awayTeam, sofaEvs2).catch(() => null);
   const probBlock2     = buildProbBlock(homeStatsData2, awayStatsData2, h2hData2);
 
   const analysisData = {
     partido: {
       liga:      nextRaw.league.name,
-      fecha:     nextRaw.fixture.date.split('T')[0],
+      pais:      nextRaw.league.country,
+      fecha:     fixtureDate2,
       hora:      formatHour(nextRaw.fixture.date),
       local:     homeTeam,
       visitante: awayTeam,
+      estadio:   nextRaw.fixture.venue?.name || null,
+      ciudad:    nextRaw.fixture.venue?.city || null,
+      arbitro:   sofaCtx2?.arbitro?.nombre || nextRaw.fixture.referee || null,
     },
+    ...(sofaCtx2?.arbitro      && { estadisticasArbitro: sofaCtx2.arbitro }),
+    ...(sofaCtx2?.rankingsFIFA && { rankingsFIFA: sofaCtx2.rankingsFIFA }),
     equipoConsultado: teamFull,
     rolEnPartido: isHome ? 'LOCAL' : 'VISITANTE',
     h2h:          h2hData2,
