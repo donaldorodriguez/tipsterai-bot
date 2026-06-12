@@ -3666,11 +3666,11 @@ REGLA DE PUBLICACIÓN — OBLIGATORIO 3 PICKS POR PARTIDO:
 
 FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 
-🌍 [País] — [Liga]  ← copia EXACTAMENTE el campo "liga" del JSON. PROHIBIDO añadir texto extra como "(Amistoso Internacional)" o "(Friendly)".
+🌍 [País] — [Liga]  ← copia EXACTAMENTE el campo "liga" del JSON. PROHIBIDO añadir "(Amistoso Internacional)" u otros textos.
 ⚽ [Local] vs [Visitante] | ⏰ [Hora Colombia]
-[Si partido.grupo existe]: 🏆 [grupo] | [jornada]
-📍 [partido.estadio o "No disponible"], [partido.ciudad o ""]  ← usa EXACTAMENTE los campos estadio y ciudad del JSON.
-🃏 Árbitro: [partido.arbitro o "No disponible"]
+[Si Contexto.grupo o partido.grupo existe]: 🏆 [grupo] | [jornada]
+📍 [Contexto.estadio o partido.estadio o "No disponible"], [Contexto.ciudad o partido.ciudad o ""]  ← usa el campo estadio/ciudad del JSON (Contexto o partido).
+🃏 Árbitro: [Contexto.arbitro o partido.arbitro o "No disponible"]  ← usa el campo arbitro del JSON (Contexto o partido).
 ━━━━━━━━━━━━━━━━━━━
 
 🔍 *CONTEXTO DEL PARTIDO*
@@ -3925,11 +3925,11 @@ PREDICCIÓN API (prediccionAPI):
 FORMATO OBLIGATORIO (Telegram Markdown)
 ═══════════════════════════════════════
 
-🌍 [País] — [Liga]  ← copia EXACTAMENTE el campo "liga" del JSON. PROHIBIDO añadir texto extra como "(Amistoso Internacional)" o "(Friendly)".
+🌍 [País] — [Liga]  ← copia EXACTAMENTE el campo "liga" del JSON. PROHIBIDO añadir "(Amistoso Internacional)" u otros textos.
 ⚽ [Local] vs [Visitante] | ⏰ [Hora Colombia]
-[Si partido.grupo existe]: 🏆 [grupo] | [jornada]
-📍 [partido.estadio o "No disponible"], [partido.ciudad o ""]  ← usa EXACTAMENTE los campos estadio y ciudad del JSON.
-🃏 Árbitro: [partido.arbitro o "No disponible"]
+[Si Contexto.grupo o partido.grupo existe]: 🏆 [grupo] | [jornada]
+📍 [Contexto.estadio o partido.estadio o "No disponible"], [Contexto.ciudad o partido.ciudad o ""]  ← usa el campo estadio/ciudad del JSON (Contexto o partido).
+🃏 Árbitro: [Contexto.arbitro o partido.arbitro o "No disponible"]  ← usa el campo arbitro del JSON (Contexto o partido).
 ━━━━━━━━━━━━━━━━━━━
 
 🔍 *CONTEXTO DEL PARTIDO*
@@ -5939,9 +5939,17 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   let analysis;
   if (partidoPicks.length >= 1 && realOdds && !isKnockout) {
     // Motor JS encontró valor en partido normal → LLM solo formatea
+    const matchCtx = {
+      estadio:  analysisData.partido.estadio,
+      ciudad:   analysisData.partido.ciudad,
+      grupo:    analysisData.partido.grupo,
+      jornada:  analysisData.partido.jornada,
+      arbitro:  analysisData.partido.arbitro,
+      rankingsFIFA: analysisData.rankingsFIFA || null,
+    };
     analysis = await sonnet(
       PICKS_HOY_FORMATTER_SYSTEM,
-      `Partido: ${homeTeam} vs ${awayTeam} | ${nextRaw.league.name}\n\nPICKS SELECCIONADOS — NO cambies ni añadas:\n\n${JSON.stringify(partidoPicks, null, 2)}\n\nH2H reciente:\n${JSON.stringify(h2hData.slice(0, 5), null, 2)}\n\n${contextoEliminatoria ? 'CONTEXTO ELIMINATORIA:\n'+JSON.stringify(contextoEliminatoria) : ''}`
+      `Partido: ${homeTeam} vs ${awayTeam} | ${nextRaw.league.name}\nContexto: ${JSON.stringify(matchCtx)}\n\nPICKS SELECCIONADOS — NO cambies ni añadas:\n\n${JSON.stringify(partidoPicks, null, 2)}\n\nH2H reciente:\n${JSON.stringify(h2hData.slice(0, 5), null, 2)}\n\n${contextoEliminatoria ? 'CONTEXTO ELIMINATORIA:\n'+JSON.stringify(contextoEliminatoria) : ''}`
     );
   } else {
     // Análisis profundo completo (partido especial, eliminatoria, o sin picks automáticos)
