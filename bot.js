@@ -82,6 +82,8 @@ const LEAGUE_SEASONS = {
   // Resto
   671:2025,          // Azerbaijan Premier League
   103:2026,          // Norway Eliteserien
+  357:2025,          // Ireland Premier Division
+  358:2025,          // Ireland First Division
   // Competiciones internacionales
   4:2025,  5:2025,   480:2025,
   10:2026, 1:2026,   6:2026,  7:2026,  8:2026,
@@ -100,7 +102,7 @@ const LEAGUE_IDS = new Set([
   // Sudamérica
   11,13,71,128,239,262,253,72,66,129,263,240,65,  // 11=Sudamericana, 13=Libertadores
   // Otros
-  671,103,
+  671,103,357,358,
   // Competiciones internacionales
   1,4,5,6,7,8,10,29,32,480,
 ]);
@@ -179,6 +181,8 @@ const LEAGUE_MAP = {
   480:{ name:'Copa America',       country:'South Am.'   },
   // Otros
   671:{ name:'Premyer Liqa',       country:'Azerbaijan'  },
+  357:{ name:'Premier Division',   country:'Ireland'     },
+  358:{ name:'First Division',     country:'Ireland'     },
 };
 
 // Maps user-written league names → league ID
@@ -235,6 +239,10 @@ const LEAGUE_NAME_TO_ID = {
   'serbia':286, 'super liga serbia':286,
   'bulgaria':172, 'liga bulgaria':172, 'first league bulgaria':172, 'primera bulgaria':172,
   'suecia':113, 'sweden':113, 'allsvenskan':113,
+  // Irlanda
+  'irlanda':357, 'ireland':357, 'liga irlanda':357, 'league of ireland':357,
+  'premier division irlanda':357, 'ireland premier':357, 'liga de irlanda':357,
+  'primera division irlanda':357, 'first division irlanda':358, 'ireland first':358,
   'segunda liga portugal':95, 'liga portugal 2':95,
   'segunda liga':95,
   'noruega':103, 'eliteserien':103, 'norway':103,
