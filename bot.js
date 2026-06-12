@@ -7646,6 +7646,79 @@ bot.onText(/\/zcode[-_]?status/, async (msg) => {
   await bot.sendMessage(chatId, msg2, { parse_mode: 'Markdown' });
 });
 
+// ─── Command: /zcode-tools — explora Dropping Odds, Line Reversals, Totals Predictor ───
+bot.onText(/\/zcode[-_]?tools/, async (msg) => {
+  const telegramId = String(msg.from.id);
+  if (!ADMIN_IDS.has(telegramId)) return;
+  const chatId = String(msg.chat.id);
+
+  const TOOLS = [
+    { name: 'Dropping Odds',    url: 'https://zcodesystem.com/dropping_odds' },
+    { name: 'Line Reversals',   url: 'https://zcodesystem.com/line_reversals' },
+    { name: 'Totals Predictor', url: 'https://zcodesystem.com/totals_predictor' },
+    { name: 'Scores Predictor', url: 'https://zcodesystem.com/scorespredictor/' },
+    { name: 'EV Tool',          url: 'https://zcodesystem.com/evtool/' },
+  ];
+
+  await bot.sendMessage(chatId, `🔍 Explorando ${TOOLS.length} herramientas ZCode con Puppeteer...`);
+
+  let browser;
+  try {
+    browser = await _zbBrowser();
+
+    for (const tool of TOOLS) {
+      await bot.sendMessage(chatId, `\n🔧 *${tool.name}*`, { parse_mode: 'Markdown' });
+      const page = await browser.newPage();
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+
+      const apiCalls = [];
+      page.on('response', async (res) => {
+        const url = res.url();
+        const ct  = res.headers()['content-type'] || '';
+        if ((ct.includes('json') || url.includes('/api/') || url.includes('ajax') || url.includes('data'))
+            && !url.includes('google') && !url.includes('analytics') && !url.includes('facebook')) {
+          const body = await res.text().catch(() => '');
+          if (body.length > 10) apiCalls.push({ url, status: res.status(), body: body.slice(0, 500) });
+        }
+      });
+
+      const hasCookies = await _zbSetCookies(page);
+      try {
+        await page.goto(tool.url, { waitUntil: 'networkidle2', timeout: 35000 });
+        await new Promise(r => setTimeout(r, 4000));
+
+        // Screenshot
+        const shot = await page.screenshot({ type: 'png', fullPage: false });
+        await bot.sendPhoto(chatId, shot, { caption: `${tool.name} | cookies: ${hasCookies?'✅':'❌'}` });
+
+        // APIs encontradas
+        if (apiCalls.length > 0) {
+          let msg2 = `🔌 *${apiCalls.length} APIs detectadas:*\n`;
+          for (const c of apiCalls.slice(0, 5)) {
+            msg2 += `\n\`${c.url.slice(0, 90)}\`\n${c.body.slice(0, 200)}\n`;
+          }
+          await sendLong(chatId, msg2, { parse_mode: 'Markdown' }).catch(() =>
+            bot.sendMessage(chatId, `APIs: ${apiCalls.map(c=>c.url).join('\n')}`)
+          );
+        } else {
+          // Extraer texto relevante de la página
+          const pageText = await page.evaluate(() => document.body.innerText.slice(0, 800));
+          await bot.sendMessage(chatId, `📄 Texto:\n${pageText}`);
+        }
+      } catch (e) {
+        await bot.sendMessage(chatId, `⚠️ Error en ${tool.name}: ${e.message}`);
+      }
+      await page.close();
+    }
+
+    await bot.sendMessage(chatId, '✅ Exploración completada. Comparte los resultados para integrar los datos.');
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ Error general: ${e.message}`);
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+});
+
 bot.onText(/\/remarketing(?:\s+(.+))?/, async (msg, match) => {
   const chatId     = msg.chat.id;
   const telegramId = String(msg.from.id);
