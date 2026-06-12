@@ -3971,7 +3971,7 @@ REGLAS IRROMPIBLES:
 - La sección 📊 ANÁLISIS siempre muestra AMBOS equipos (▸ Local y ▸ Visitante) — nunca solo uno
 - Si motivacionLocal.estado o motivacionVisitante.estado es "desconocido" → no escribas "Sin datos de posición" — usa posicionLocal/posicionVisitante directamente o infiere del contexto
 - NO cambies el stake ni la cuota que viene en los datos
-- NO añadas ni elimines picks — publicas exactamente los que recibes
+- Si recibes 3 picks → publícalos todos. Si recibes 2 → añade un TERCER pick de un mercado distinto (corners, tarjetas equipo, portería a cero, DNB, doble oportunidad, goles 2T, etc.) usando los datos disponibles. SIEMPRE 3 picks.
 - El razonamiento debe conectar los números con la situación real del partido
 - Responde en español`;
 
@@ -5932,7 +5932,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   };
 
   const partidoCandidates = buildPickCandidates([fixtureForEngine]);
-  const partidoPicks      = selectDiversePicks(partidoCandidates, 2);
+  const partidoPicks      = selectDiversePicks(partidoCandidates, 3);
   console.log(`🎯 handlePartido — candidatos JS: ${partidoCandidates.length} | picks: ${partidoPicks.length} | cuotas: ${realOdds ? 'sí' : 'no'} | knockout: ${isKnockout}`);
 
   const season = LEAGUE_SEASONS[leagueId] || 2025;
