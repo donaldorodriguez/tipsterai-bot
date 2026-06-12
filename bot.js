@@ -3470,7 +3470,7 @@ PICKS QUE NUNCA DAS — aplica estos criterios internamente, sin mencionarlos al
 - Picks que cualquier persona sin conocimiento daría
 - BTTS No cuando un equipo ya marcó 2+ goles en el HT
 - PICKS YA RESUELTOS: si el mercado ya se cumplió (ej: BTTS cuando ya hay goles de ambos), omítelo completamente
-- MÁXIMO 2 PICKS POR PARTIDO — nunca más de 2 mercados distintos sobre el mismo partido. Si tienes 3 ideas para un partido, elige las 2 mejores y descarta la tercera
+- SIEMPRE 3 PICKS POR PARTIDO — exactamente 3 mercados distintos sobre el mismo partido. Nunca menos de 3.
 - BTTS en derbis o clásicos de alta tensión táctica (Milan vs Inter, Real Madrid vs Atlético, Arsenal vs Tottenham, Celtic vs Rangers, etc.) — se cierran defensivamente, BTTS falla sistemáticamente
 - Over 2.5 o Over 3.5 en FINALES de copa de partido único (FA Cup Final, Copa del Rey Final, Copa Italia Final, DFB-Pokal Final, etc.) con 0-0 al descanso — las finales son tácticamente cerradas, ambos equipos priorizan no perder, la prórroga es el resultado más probable cuando va 0-0 al HT. En estos casos busca Under 2.5, corners, tarjetas, o siguiente gol. NUNCA Over 3.5 en una final 0-0 al HT
 - Asian Handicap de -1 o mayor (-1, -1.5, -2). Máximo permitido: AH -0.5, y solo si el equipo promedia más de 2.0 goles en su contexto
@@ -3478,29 +3478,78 @@ PICKS QUE NUNCA DAS — aplica estos criterios internamente, sin mencionarlos al
 - Asian Handicap (AH) y Draw No Bet local (DNB_HOME) en picks automáticos del día. Solo usar DNB_AWAY si la probabilidad supera 75%
 - BTTS en La Liga cuando no son equipos ofensivos — la liga tiene solo 40% BTTS base, muy por debajo del umbral
 
-MERCADOS DONDE ESTÁ EL VALOR REAL:
-1. HT/FT combos específicos
-2. Corners Over/Under
-3. Tarjetas Over/Under
-4. BTTS cuando ambos marcan en más del 68% de sus partidos (umbral estricto)
-5. Over 3.5 goles cuando ambos tienen promedio goleador alto
-6. DNB (Draw No Bet)
-7. Asian Handicap -0.5 máximo
-8. HT Over 0.5 o 1.5
-9. Gana el visitante cuando el local tiene malos registros en casa
-10. Over goles 2T cuando el equipo tiene patrón de arrancar lento (ver LEAGUE_STATS_CONTEXT)
+MERCADOS DISPONIBLES — usa el que tenga más valor según los datos (no te limites a los primeros):
+
+MERCADOS DE GOLES:
+1. Over/Under 2.5 goles (FT)
+2. Over/Under 1.5 goles (FT) — especialmente útil en ligas defensivas
+3. Over/Under 3.5 goles (FT) — si ambos equipos promedian +2 goles
+4. Over/Under 0.5 goles en 1T — casi siempre hay gol en 1T si algún equipo ataca
+5. Over/Under 1.5 goles en 1T — si el local promedia marcar temprano
+6. Over/Under 0.5 goles en 2T
+7. Ambos Marcan (BTTS Sí/No)
+8. Local marca en ambos tiempos (si promedia +2.0 goles/partido)
+9. Visitante anota al menos 1 gol (si Away Team failedToScore < 30%)
+10. Local no recibe gol — Portería a cero (si golesRecibidosHome < 0.7/partido)
+11. Local gana sin encajar — Win to Nil
+
+MERCADOS DE RESULTADO:
+12. 1X2 estándar (solo si cuota > 1.80)
+13. Double Chance 1X — si el local empata mucho pero raramente pierde
+14. Double Chance X2 — si el visitante tiene buen rendimiento fuera
+15. Draw No Bet local (DNB) — solo si cuota de victoria local ≥ 2.00
+16. Draw No Bet visitante — solo si prob visitante > 72%
+17. Asian Handicap -0.5 local — si prob victoria local > 70%
+18. Asian Handicap +0.5 visitante — si visitante raramente pierde por 2+
+
+MERCADOS DE CORNERS:
+19. Corners Over/Under total (9.5, 10.5, 11.5) — suma promedios local casa + visitante fuera
+20. Corners local Over/Under específico (ej. Local Over 4.5 córners) — si el local promedia +5.5 córners en casa
+21. Corners visitante Over/Under específico — si el visitante promedia +4.5 córners fuera
+22. Córner en 1T Over/Under (4.5, 5.5)
+23. Primer equipo en sacar córner — si un equipo suele atacar desde el inicio
+
+MERCADOS DE TARJETAS:
+24. Tarjetas Over/Under total (3.5, 4.5) — suma promedios × factor árbitro
+25. Tarjetas local Over/Under específico (ej. Local más de 2.5 tarjetas)
+26. Tarjetas visitante Over/Under específico
+27. Primera tarjeta amarilla — equipo que suele cometer más faltas
+28. Tarjetas en 1T Over/Under
+
+MERCADOS ESPECIALES:
+29. HT/FT combo (ej. Empate al descanso / Local gana FT) — si el local remonta seguido
+30. Resultado exacto de alta probabilidad (ej. 1-0, 1-1, 2-1) — si H2H muestra patrón
+31. Multiples de gol — exactamente 2 goles, exactamente 3 goles
+32. Ambos equipos marcan en 2T (BTTS 2T)
+33. Local anota en 1T Y gana el partido
+
+PARA CADA PICK, INDICA QUÉ DATO DEL JSON LO RESPALDA:
+- Goles → usa golesAnotadosHome/Away, golesRecibidosHome/Away, xGLocal/xGVisitante
+- Portería a cero → usa cleanSheets, golesRecibidosHome
+- Sin marcar → usa failedToScore de cada equipo en su contexto
+- Corners → usa statsLocal.corners (si disponible) o estima de ligas ofensivas
+- Tarjetas → usa amarillasPorPartido de cada equipo + contexto árbitro si disponible
+- BTTS → usa probBTTS_Combinada + failedToScore de ambos equipos
 
 ${LEAGUE_STATS_CONTEXT}
 
-PROCESO DE ANÁLISIS OBLIGATORIO:
-Para BTTS: % local marcó en casa + % visitante marcó fuera + % BTTS en H2H. Los 3 deben superar 68% (umbral estricto). Usa probBTTS_Combinada: debe superar 65%. Si uno no llega, NO es pick.
-Para Corners: promedio local en casa + visitante fuera. Recomienda Over si total supera línea en +1.5.
-Para HT: % local gana 1T en casa. Solo si supera 60%.
-Para Tarjetas: suma promedios. Solo si supera línea en +1.
-Para Over/Under goles: usa probOver25 y probOver35 del modelo. Si probOver25 > 65% con EV positivo, considera pick.
-Para DNB: usa probDNB_Local o probDNB_Visitante. Solo si supera 72% para stake 7+.
-  REGLA DNB OBLIGATORIA: DNB solo tiene valor cuando la cuota de victoria directa (1X2) del equipo es ≥ 2.00. Si el equipo gana a 1.30-1.70, el DNB queda en ~1.10-1.45 — SIN NINGÚN VALOR. En esos casos BUSCA OTRO MERCADO (goles, corners, BTTS, AH). Si la cuota de victoria directa es ≥ 2.00 y con DNB queda en ~1.65-1.85, ahí sí tiene sentido.
-Para AH: solo -0.5. Solo si prob de victoria supera 70%. Nunca -1 ni -1.5.
+PROCESO DE ANÁLISIS OBLIGATORIO — BUSCA LOS 3 MEJORES MERCADOS:
+Para BTTS Sí: probBTTS_Combinada > 65%. Ambos equipos con failedToScore < 30%.
+Para BTTS No: failedToScore de algún equipo > 40% en su contexto (casa/fuera).
+Para Over/Under goles: usa probOver25, probOver35. Over si prob > 65% con EV positivo.
+Para Portería a cero local: golesRecibidosHome < 0.8/p AND cleanSheets > 40% en casa.
+Para Portería a cero visitante: golesRecibidosAway < 0.8/p AND cleanSheets > 35% fuera.
+Para Corners total: suma promedios cornersHome + cornersAway. Over si suma supera línea +1.5.
+Para Corners equipo específico: si un equipo promedia +5.5 córners en su contexto → Over equipo X.
+Para Tarjetas total: suma amarillasPorPartido ambos equipos. Over si supera línea +1.0.
+Para Tarjetas equipo específico: si un equipo promedia > 2.0 tarjetas en su contexto.
+Para HT result: % local gana 1T en casa > 60%.
+Para HT Over 0.5: casi siempre válido si algún equipo anota en 1T > 70% de los partidos.
+Para DNB: solo si cuota de victoria directa ≥ 2.00. Si gana a 1.30-1.70, el DNB no tiene valor.
+Para AH: -0.5 solo si prob victoria > 70%. Nunca AH -1 o mayor.
+Para Double Chance: útil cuando el equipo empata seguido pero raramente pierde.
+Para Goles 2T Over: si el equipo tiene patrón de marcar en 2T (arranca lento en 1T).
+Para Win to Nil: si local tiene cleanSheet > 45% en casa Y visitante failedToScore > 40% fuera.
 
 INSTRUCCIONES PARA USAR LAS PROBABILIDADES CALCULADAS:
 Si el JSON de datos incluye el campo "probabilidadesCalculadas", DEBES usarlo como base:
