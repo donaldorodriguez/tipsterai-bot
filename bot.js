@@ -1239,46 +1239,75 @@ function _sofaHeaders() {
 // FIFA publica los árbitros días antes — está en miles de sitios públicos.
 const refereeSearchCache = new Map();
 
-async function searchRefereeByWeb(homeTeam, awayTeam) {
+async function searchRefereeByWeb(homeTeam, awayTeam, wikiGroup = null, leagueName = '') {
   const key = `${homeTeam}:${awayTeam}`.toLowerCase();
   if (refereeSearchCache.has(key)) return refereeSearchCache.get(key);
 
-  try {
-    const q = encodeURIComponent(`referee "${homeTeam}" "${awayTeam}" 2026 World Cup official`);
-    const { data } = await axios.get(`https://html.duckduckgo.com/html/?q=${q}`, {
-      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' },
-      timeout: 10000,
-    });
+  // Construir URLs de Wikipedia a intentar
+  const year = new Date().getFullYear();
+  const wikiUrls = [];
 
-    // Extraer nombre del árbitro de los snippets
-    const text = data.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ');
-    const patterns = [
-      /[Rr]eferee\s+([A-Z][a-záéíóúñ]+ [A-Z][a-záéíóúñ]+(?:\s+[A-Z][a-záéíóúñ]+)?)/g,
-      /árbitro[:\s]+([A-Z][a-záéíóúñ]+ [A-Z][a-záéíóúñ]+(?:\s+[A-Z][a-záéíóúñ]+)?)/gi,
-      /official[:\s]+([A-Z][a-záéíóúñ]+ [A-Z][a-záéíóúñ]+(?:\s+[A-Z][a-záéíóúñ]+)?)/gi,
-    ];
+  // Copa del Mundo: buscar en la página del grupo
+  if (wikiGroup) {
+    const letter = wikiGroup.replace(/[^A-Z]/gi, '').toUpperCase();
+    wikiUrls.push(`https://en.wikipedia.org/wiki/${year}_FIFA_World_Cup_Group_${letter}`);
+  }
+  // Búsqueda genérica por equipos
+  wikiUrls.push(`https://en.wikipedia.org/wiki/${encodeURIComponent(homeTeam.replace(/ /g,'_'))}_v_${encodeURIComponent(awayTeam.replace(/ /g,'_'))}`);
 
-    const candidates = new Map();
-    for (const p of patterns) {
-      for (const m of text.matchAll(p)) {
-        const name = m[1].trim();
-        if (name.length >= 5 && name.length <= 50 && !/\b(Cup|World|FIFA|Match|Group|Round|Stage)\b/i.test(name)) {
-          candidates.set(name, (candidates.get(name) || 0) + 1);
+  for (const url of wikiUrls) {
+    try {
+      const { data } = await axios.get(url, {
+        headers: { 'User-Agent': 'tipster-bot/1.0 (contact: bot@tipster.ai)' },
+        timeout: 8000,
+      });
+
+      // Buscar patrón "Referee: Name" cerca de los equipos del partido
+      const text = data.replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/g, ' ').replace(/\s+/g, ' ');
+      const homeNorm = homeTeam.toLowerCase();
+      const awayNorm = awayTeam.toLowerCase();
+      const textNorm = text.toLowerCase();
+
+      // Encontrar zona del partido — buscar ambos equipos dentro de 300 chars entre sí
+      const matchIdx = (() => {
+        const h = textNorm.indexOf(homeNorm);
+        const a = textNorm.indexOf(awayNorm);
+        if (h === -1 || a === -1) return -1;
+        if (Math.abs(h - a) > 500) return -1; // muy separados = no es el mismo partido
+        return Math.min(h, a);
+      })();
+
+      if (matchIdx === -1) continue;
+
+      // Patrón Wikipedia: "Referee: NAME (Country) HomeTeam AwayTeam"
+      // Buscar el árbitro cuyo bloque incluye ambos equipos
+      const refPattern = /[Rr]eferee[:\s]+([A-Z][a-záéíóúñ]+(?: [A-Z][a-záéíóúñ]+){1,3})[^.]{0,200}/g;
+      let refMatch = null;
+      for (const m of text.matchAll(refPattern)) {
+        const block = m[0].toLowerCase();
+        if (block.includes(homeNorm) && block.includes(awayNorm)) {
+          refMatch = m;
+          break;
         }
       }
-    }
-
-    // El nombre que aparece más veces es el más probable
-    const best = [...candidates.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
-    if (best) console.log(`🔍 Árbitro web [${homeTeam}]: "${best}" (${candidates.get(best)} menciones)`);
-
-    refereeSearchCache.set(key, best);
-    setTimeout(() => refereeSearchCache.delete(key), 3_600_000); // 1h caché
-    return best;
-  } catch (e) {
-    console.warn('searchRefereeByWeb error:', e.message);
-    return null;
+      // Fallback: árbitro más cercano al bloque del partido
+      if (!refMatch) {
+        const window = text.slice(Math.max(0, matchIdx - 100), matchIdx + 800);
+        const fm = window.match(/[Rr]eferee[:\s]+([A-Z][a-záéíóúñ]+(?: [A-Z][a-záéíóúñ]+){1,3})/);
+        if (fm) refMatch = fm;
+      }
+      if (refMatch) {
+        const name = refMatch[1].trim();
+        console.log(`🔍 Árbitro Wikipedia [${homeTeam}]: "${name}"`);
+        refereeSearchCache.set(key, name);
+        setTimeout(() => refereeSearchCache.delete(key), 3_600_000);
+        return name;
+      }
+    } catch {}
   }
+
+  refereeSearchCache.set(key, null);
+  return null;
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -1301,16 +1330,16 @@ async function fetchTheSportsDBEvent(homeTeam, awayTeam, fixtureDateStr) {
       'https://www.thesportsdb.com/api/v1/json/3/searchevents.php',
       { params: { e: query, s: String(season) }, timeout: 8000 }
     );
-    const events = data?.events || [];
+    // TheSportsDB usa "event" (singular) como clave de respuesta
+    const events = data?.event || data?.events || [];
 
-    // Intentar con temporada anterior si no hay resultado (partidos de dic-enero)
     let ev = events[0];
     if (!ev && season > 2020) {
       const { data: d2 } = await axios.get(
         'https://www.thesportsdb.com/api/v1/json/3/searchevents.php',
         { params: { e: query, s: String(season - 1) }, timeout: 8000 }
       );
-      ev = (d2?.events || [])[0];
+      ev = (d2?.event || d2?.events || [])[0];
     }
 
     if (!ev) { tsdbCache.set(key, null); return null; }
@@ -5613,12 +5642,15 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
 
   // Fase 2: contexto externo en paralelo
   const apiReferee = nextRaw.fixture.referee || null;
-  const [sofaContext, tsdbData, webReferee] = await Promise.all([
+  const [sofaContext, tsdbData] = await Promise.all([
     getSofaMatchContext(homeTeam, awayTeam, sofaEvents).catch(() => null),
     fetchTheSportsDBEvent(homeTeam, awayTeam, fixtureDate).catch(() => null),
-    // Solo buscar árbitro por web si API-Football no lo tiene
-    apiReferee ? Promise.resolve(null) : searchRefereeByWeb(homeTeam, awayTeam).catch(() => null),
   ]);
+  // Árbitro: API-Football → SofaScore → Wikipedia (usa el grupo ya conocido de TSDB)
+  const wikiGroup = tsdbData?.grupo?.replace('Grupo ', '') || null;
+  const webReferee = (!apiReferee && !sofaContext?.arbitro?.nombre)
+    ? await searchRefereeByWeb(homeTeam, awayTeam, wikiGroup).catch(() => null)
+    : null;
   const referee = sofaContext?.arbitro?.nombre || apiReferee || webReferee || null;
 
   // Standings: extraer posición y motivación de cada equipo
@@ -6116,11 +6148,14 @@ async function handleEspecifica(chatId, intent) {
   const injAway2       = injAwayRes2?.status === 'fulfilled'  ? injAwayRes2.value   : [];
   const sofaEv2        = sofaEvRes2?.status === 'fulfilled'   ? sofaEvRes2.value    : [];
   const apiRef2 = nextRaw.fixture.referee || null;
-  const [sofaCtx2, tsdbData2, webRef2] = await Promise.all([
+  const [sofaCtx2, tsdbData2] = await Promise.all([
     getSofaMatchContext(homeTeam, awayTeam, sofaEv2).catch(() => null),
     fetchTheSportsDBEvent(homeTeam, awayTeam, fixtureDate2).catch(() => null),
-    apiRef2 ? Promise.resolve(null) : searchRefereeByWeb(homeTeam, awayTeam).catch(() => null),
   ]);
+  const wikiGroup2 = tsdbData2?.grupo?.replace('Grupo ', '') || null;
+  const webRef2 = (!apiRef2 && !sofaCtx2?.arbitro?.nombre)
+    ? await searchRefereeByWeb(homeTeam, awayTeam, wikiGroup2).catch(() => null)
+    : null;
   const referee2 = sofaCtx2?.arbitro?.nombre || apiRef2 || webRef2 || null;
 
   const homeStanding2  = standData2.teams?.find(t => t.teamId === homeId) || null;
