@@ -6708,87 +6708,109 @@ const _zlrStore  = new Map(); // key: normHome+'|||'+normAway → { reversal, ..
 let   _zdoLastRun = 0;
 const ZDO_INTERVAL = 15 * 60 * 1000; // cada 15 min
 
-async function scrapeZcodeMarketTool(page, url) {
-  await page.goto(url, { waitUntil: 'networkidle2', timeout: 40000 });
-  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-  await new Promise(r => setTimeout(r, 5000));
+// Construir cookie string desde ZCODE_COOKIES env
+function _zdoCookieStr() {
+  const raw = (process.env.ZCODE_COOKIES || '').trim();
+  if (!raw) return '';
+  try {
+    const parsed = JSON.parse(raw);
+    const arr = Array.isArray(parsed) ? parsed : (parsed.cookies || []);
+    return arr.map(c => `${c.name}=${c.value}`).join('; ');
+  } catch {
+    return raw; // ya es string de cookies
+  }
+}
 
-  // Extraer tabla de datos de la página
-  return page.evaluate(() => {
-    const rows = [];
-    // Buscar todas las filas de la tabla con equipos
-    document.querySelectorAll('tr, .match-row, .game-row, [class*="row"], [class*="match"]').forEach(row => {
-      const text = row.innerText?.trim();
-      if (!text || text.length < 10) return;
-      // Solo filas con cuotas numéricas (al menos 2 números decimales)
-      const nums = text.match(/\d+\.\d{2}/g);
-      if (!nums || nums.length < 2) return;
-      // Buscar equipos y porcentajes
-      const pct = text.match(/(\d{1,3})%/g);
-      const arrows = [...row.querySelectorAll('*')].some(el =>
-        el.className && /arrow|up|down|drop|rise/i.test(el.className)
-      );
-      rows.push({ text: text.slice(0, 200), odds: nums, pct, arrows });
-    });
-    return rows;
-  });
+function _zdoHeaders() {
+  return {
+    'Cookie': _zdoCookieStr(),
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    'Referer': 'https://zcodesystem.com/',
+    'X-Requested-With': 'XMLHttpRequest',
+    'Accept': 'application/json, text/javascript, */*',
+  };
+}
+
+// Parsear HTML de tabla ZCode → array de señales por equipo
+function _parseZcodeGameTable(html) {
+  const signals = [];
+  if (!html) return signals;
+
+  // Extraer bloques de partido: cada partido tiene TEAM1 y TEAM2 con sus cuotas
+  // Patrón: equipos con porcentajes de dinero (ej. "Bulgaria 75%" vs "Finland 25%")
+  const teamPctPattern = /([A-Za-zÀ-ÿ\s]+?)\s+(\d{1,3})%/g;
+  const oddsPattern = /\d+\.\d{2}/g;
+
+  // Dividir el HTML en bloques de partido
+  const gameBlocks = html.split(/class="GamesTableRow[^"]*"/).slice(1);
+
+  for (const block of gameBlocks) {
+    // Quitar tags HTML
+    const text = block.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
+    const teams = [...text.matchAll(teamPctPattern)];
+    const odds  = [...text.matchAll(oddsPattern)].map(m => parseFloat(m[0]));
+    const pcts  = teams.map(m => ({ team: m[1].trim(), pct: parseInt(m[2]) }))
+                       .filter(t => t.team.length > 2 && t.team.length < 30);
+
+    if (pcts.length >= 2 && odds.length >= 2) {
+      signals.push({
+        team1: pcts[0].team, pct1: pcts[0].pct,
+        team2: pcts[1].team, pct2: pcts[1].pct,
+        odds1: odds[0],      odds2: odds[1],
+        // Sharp side = equipo con más % de dinero de sharps (menor % público)
+        sharpSide: pcts[0].pct < pcts[1].pct ? pcts[1].team : pcts[0].team,
+      });
+    }
+  }
+  return signals;
 }
 
 async function runZcodeMarketScrape() {
   if (Date.now() - _zdoLastRun < ZDO_INTERVAL) return;
   if (!process.env.ZCODE_COOKIES) return;
 
-  let browser;
+  const headers = _zdoHeaders();
+  if (!headers.Cookie) return;
+
+  // --- Line Reversals — API directa (descubierta en network intercept) ---
   try {
-    browser = await _zbBrowser();
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-    await _zbSetCookies(page);
+    const { data } = await axios.get(
+      'https://zcodesystem.com/vipclub/linemovinggameslistn1.php',
+      { headers, timeout: 15000 }
+    );
+    const html = typeof data === 'string' ? data : data.html || '';
+    const signals = _parseZcodeGameTable(html);
+    let count = 0;
+    for (const s of signals) {
+      const k1 = _zbNorm(s.team1) + '|||' + _zbNorm(s.team2);
+      _zlrStore.set(k1, s);
+      count++;
+    }
+    console.log(`🔄 Line Reversals: ${count} partidos con señales de dinero`);
+  } catch (e) { console.warn('ZCode Line Reversals err:', e.message); }
 
-    // --- Dropping Odds ---
-    try {
-      const rows = await scrapeZcodeMarketTool(page, 'https://zcodesystem.com/dropping_odds');
-      let parsed = 0;
-      for (const row of rows) {
-        if (!row.pct || !row.odds.length) continue;
-        const pctVals = row.pct.map(p => parseInt(p));
-        const maxDrop = Math.max(...pctVals);
-        if (maxDrop < 3) continue; // ignorar cambios menores al 3%
-        // Extraer nombres de equipos del texto
-        const teamMatch = row.text.match(/^([A-Za-z\s]+?)\s+\d+\.\d{2}/);
-        if (!teamMatch) continue;
-        const team = teamMatch[1].trim();
-        const key = _zbNorm(team) + '|||';
-        const prev = _zdoStore.get(key) || {};
-        _zdoStore.set(key, { ...prev, droppingOdds: maxDrop, odds: row.odds, raw: row.text.slice(0, 100) });
-        parsed++;
-      }
-      console.log(`📉 Dropping Odds: ${parsed} movimientos significativos extraídos`);
-    } catch (e) { console.warn('ZCode Dropping Odds err:', e.message); }
+  // --- Dropping Odds — scraping DOM con axios ---
+  try {
+    const { data: html } = await axios.get(
+      'https://zcodesystem.com/dropping_odds',
+      { headers, timeout: 15000 }
+    );
+    // Extraer filas con porcentajes de caída de cuota
+    const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
+    const dropPattern = /([A-Za-zÀ-ÿ\s]{3,25})\s+(\d+\.\d{2})\s+[↑↓▲▼]?\s*(\d{1,3})%\s+(\d+\.\d{2})/g;
+    let count = 0;
+    for (const m of text.matchAll(dropPattern)) {
+      const [, team, oddBefore, pct, oddAfter] = m;
+      const drop = parseInt(pct);
+      if (drop < 3) continue;
+      const key = _zbNorm(team.trim()) + '|||';
+      _zdoStore.set(key, { team: team.trim(), oddBefore: parseFloat(oddBefore), drop, oddAfter: parseFloat(oddAfter) });
+      count++;
+    }
+    console.log(`📉 Dropping Odds: ${count} movimientos ≥3% extraídos`);
+  } catch (e) { console.warn('ZCode Dropping Odds err:', e.message); }
 
-    // --- Line Reversals ---
-    try {
-      const rows = await scrapeZcodeMarketTool(page, 'https://zcodesystem.com/line_reversals');
-      let parsed = 0;
-      for (const row of rows) {
-        if (!row.odds.length) continue;
-        const teamMatch = row.text.match(/^([A-Za-z\s]+?)\s+\d/);
-        if (!teamMatch) continue;
-        const team = teamMatch[1].trim();
-        const key = _zbNorm(team) + '|||';
-        _zlrStore.set(key, { reversal: true, odds: row.odds, raw: row.text.slice(0, 100) });
-        parsed++;
-      }
-      console.log(`🔄 Line Reversals: ${parsed} movimientos extraídos`);
-    } catch (e) { console.warn('ZCode Line Reversals err:', e.message); }
-
-    await page.close();
-    _zdoLastRun = Date.now();
-  } catch (e) {
-    console.warn('runZcodeMarketScrape err:', e.message);
-  } finally {
-    if (browser) await browser.close().catch(() => {});
-  }
+  _zdoLastRun = Date.now();
 }
 
 // Función para obtener señales de mercado para un partido específico
@@ -6797,18 +6819,31 @@ function getZcodeMarketSignals(homeTeam, awayTeam) {
   const hNorm = _zbNorm(homeTeam);
   const aNorm = _zbNorm(awayTeam);
 
-  // Buscar en Dropping Odds
+  // Buscar en Line Reversals (key = norm1+'|||'+norm2)
+  for (const [key, data] of _zlrStore) {
+    const [k1, k2] = key.split('|||');
+    if ((_zbMatch(hNorm, k1) && _zbMatch(aNorm, k2)) ||
+        (_zbMatch(hNorm, k2) && _zbMatch(aNorm, k1))) {
+      // Detectar qué lado tiene el dinero sharp (mayor %)
+      const localIsSide1 = _zbMatch(hNorm, k1);
+      signals.lineReversal = {
+        pctLocal:     localIsSide1 ? data.pct1 : data.pct2,
+        pctVisitante: localIsSide1 ? data.pct2 : data.pct1,
+        sharpSide:    data.sharpSide,
+        // Si el sharp está en el local o visitante
+        sharpEnLocal: _zbMatch(hNorm, _zbNorm(data.sharpSide || '')),
+      };
+      break;
+    }
+  }
+
+  // Buscar en Dropping Odds (key = normTeam+'|||')
   for (const [key, data] of _zdoStore) {
     const teamNorm = key.replace('|||', '');
     if (_zbMatch(hNorm, teamNorm)) signals.droppingOddsLocal = data;
     if (_zbMatch(aNorm, teamNorm)) signals.droppingOddsVisitante = data;
   }
-  // Buscar en Line Reversals
-  for (const [key, data] of _zlrStore) {
-    const teamNorm = key.replace('|||', '');
-    if (_zbMatch(hNorm, teamNorm)) signals.lineReversalLocal = data;
-    if (_zbMatch(aNorm, teamNorm)) signals.lineReversalVisitante = data;
-  }
+
   return Object.keys(signals).length > 0 ? signals : null;
 }
 // ─────────────────────────────────────────────────────────────────────────────
