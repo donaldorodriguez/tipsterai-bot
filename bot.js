@@ -7655,9 +7655,13 @@ bot.onText(/\/zcode[-_]?tools/, async (msg) => {
   const TOOLS = [
     { name: 'Dropping Odds',    url: 'https://zcodesystem.com/dropping_odds' },
     { name: 'Line Reversals',   url: 'https://zcodesystem.com/line_reversals' },
+    { name: 'Line Reversals VIP', url: 'https://zcodesystem.com/vipclub/linereversals.php' },
     { name: 'Totals Predictor', url: 'https://zcodesystem.com/totals_predictor' },
     { name: 'Scores Predictor', url: 'https://zcodesystem.com/scorespredictor/' },
     { name: 'EV Tool',          url: 'https://zcodesystem.com/evtool/' },
+    { name: 'Power Rankings',   url: 'https://zcodesystem.com/power_rankings.php' },
+    { name: 'Contrarian Bets',  url: 'https://zcodesystem.com/vipclub/contrarianbets.php' },
+    { name: 'Soccer Oscillator',url: 'https://zcodesystem.com/soccer_oscillator/' },
   ];
 
   await bot.sendMessage(chatId, `🔍 Explorando ${TOOLS.length} herramientas ZCode con Puppeteer...`);
