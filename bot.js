@@ -5937,27 +5937,16 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
 
   const season = LEAGUE_SEASONS[leagueId] || 2025;
   let analysis;
-  if (partidoPicks.length >= 1 && realOdds && !isKnockout) {
-    // Motor JS encontró valor en partido normal → LLM solo formatea
-    const matchCtx = {
-      estadio:  analysisData.partido.estadio,
-      ciudad:   analysisData.partido.ciudad,
-      grupo:    analysisData.partido.grupo,
-      jornada:  analysisData.partido.jornada,
-      arbitro:  analysisData.partido.arbitro,
-      rankingsFIFA: analysisData.rankingsFIFA || null,
-    };
-    analysis = await sonnet(
-      PICKS_HOY_FORMATTER_SYSTEM,
-      `Partido: ${homeTeam} vs ${awayTeam} | ${nextRaw.league.name}\nContexto: ${JSON.stringify(matchCtx)}\n\nPICKS SELECCIONADOS — NO cambies ni añadas:\n\n${JSON.stringify(partidoPicks, null, 2)}\n\nH2H reciente:\n${JSON.stringify(h2hData.slice(0, 5), null, 2)}\n\n${contextoEliminatoria ? 'CONTEXTO ELIMINATORIA:\n'+JSON.stringify(contextoEliminatoria) : ''}`
-    );
-  } else {
-    // Análisis profundo completo (partido especial, eliminatoria, o sin picks automáticos)
-    analysis = await sonnet(
-      PARTIDO_DEEP_SYSTEM,
-      `Analiza este partido en profundidad (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}`
-    );
+  // Para partido individual siempre análisis profundo con todos los datos.
+  // El motor JS pre-calcula candidatos que se incluyen en analysisData como
+  // referencia matemática, pero el LLM elige los 3 mejores con datos reales.
+  if (partidoPicks.length >= 1) {
+    analysisData.picksMotorJS = partidoPicks; // referencia, el LLM puede usarlos o enriquecerlos
   }
+  analysis = await sonnet(
+    PARTIDO_DEEP_SYSTEM,
+    `Analiza este partido en profundidad (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}`
+  );
 
   try {
     await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
