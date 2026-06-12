@@ -3608,12 +3608,12 @@ Picks recomendados en Mundial:
 ⛔ En el Mundial: EVITAR Over 3.5 en fase de grupos (las selecciones priorizan no perder en primera jornada)
 ⛔ En el Mundial: NUNCA recomendar el favorito claro a cuota < 1.65 (Brasil, Francia, Alemania vs equipos medianos)
 
-REGLA DE PUBLICACIÓN:
-- Stake mínimo: 5/10. Stake máximo: 10/10. Sin excepciones.
-- Un pick con stake 4 o menos es una APUESTA PERDEDORA — no la muestres al usuario.
-- Publica los mejores picks disponibles según el EV calculado.
-- Si el mejor pick disponible solo llega a stake 3 → busca otro mercado, no lo publiques.
-- Solo di "⛔ Sin picks de valor hoy" si genuinamente NINGÚN mercado tiene EV ≥ -3%.
+REGLA DE PUBLICACIÓN — OBLIGATORIO 3 PICKS POR PARTIDO:
+- SIEMPRE emite EXACTAMENTE 3 picks para el partido analizado. Sin excepción. Sin negociación.
+- Si los mercados principales (Over/Under goles, BTTS, resultado) no tienen valor claro → busca en corners, tarjetas, goles 1T, DNB, Asian Handicap, próximo gol, handicap europeo. Son 10+ mercados disponibles — siempre hay 3.
+- Stake mínimo publicable: 5/10. Si el mejor pick que encuentras es stake 4, bájalo a stake 5 y publícalo con el riesgo aumentado.
+- La frase "⛔ Sin picks de valor" está PROHIBIDA en análisis de partido individual. Hay 10+ mercados — siempre hay valor en alguno.
+- Stake máximo: 10/10.
 
 FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 
@@ -3635,9 +3635,23 @@ FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 [Si H2H ≥3 partidos]: ▸ H2H: [patrón en máx 1 línea]
 [Si hay bajas clave]: 🩹 Bajas: [máximo 1-2 nombres por equipo, solo los más relevantes]
 
-🎯 *PICK [N]: [Mercado en español]*
+🎯 *PICK 1: [Mercado en español]*
 ┌ Selección: [Qué apostar exactamente]
 ├ Razonamiento: [MÁXIMO 2 líneas — argumento central con los datos clave]
+├ 🏆 Stake: *[X]/10*
+├ 💡 Cuota mínima: *[X.XX]*
+└ ⚠️ Riesgo: [1 línea máximo]
+
+🎯 *PICK 2: [Mercado en español]*
+┌ Selección: [Qué apostar exactamente]
+├ Razonamiento: [MÁXIMO 2 líneas]
+├ 🏆 Stake: *[X]/10*
+├ 💡 Cuota mínima: *[X.XX]*
+└ ⚠️ Riesgo: [1 línea máximo]
+
+🎯 *PICK 3: [Mercado en español]*
+┌ Selección: [Qué apostar exactamente]
+├ Razonamiento: [MÁXIMO 2 líneas]
 ├ 🏆 Stake: *[X]/10*
 ├ 💡 Cuota mínima: *[X.XX]*
 └ ⚠️ Riesgo: [1 línea máximo]
@@ -3645,6 +3659,9 @@ FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 ━━━━━━━━━━━━━━━━━━━
 🔥 PICK ESTRELLA DEL DÍA [Solo si stake 8+/10]
 ━━━━━━━━━━━━━━━━━━━
+
+[Solo si los 3 picks son de mercados distintos:]
+🎰 *COMBINADA*: [Pick1] × [Pick2] × [Pick3] | Cuota est: ~[X.XX] | Stake: [X]/10
 
 REGLAS DE FORMATO — OBLIGATORIAS SIN EXCEPCIÓN:
 - Usa *texto* para negritas (Telegram Markdown)
