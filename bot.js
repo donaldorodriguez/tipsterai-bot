@@ -1234,6 +1234,54 @@ function _sofaHeaders() {
   };
 }
 
+// ── Búsqueda de árbitro via DuckDuckGo ───────────────────────────────────────
+// Fallback cuando API-Football no tiene el árbitro asignado aún.
+// FIFA publica los árbitros días antes — está en miles de sitios públicos.
+const refereeSearchCache = new Map();
+
+async function searchRefereeByWeb(homeTeam, awayTeam) {
+  const key = `${homeTeam}:${awayTeam}`.toLowerCase();
+  if (refereeSearchCache.has(key)) return refereeSearchCache.get(key);
+
+  try {
+    const q = encodeURIComponent(`referee "${homeTeam}" "${awayTeam}" 2026 World Cup official`);
+    const { data } = await axios.get(`https://html.duckduckgo.com/html/?q=${q}`, {
+      headers: { 'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36' },
+      timeout: 10000,
+    });
+
+    // Extraer nombre del árbitro de los snippets
+    const text = data.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ');
+    const patterns = [
+      /[Rr]eferee\s+([A-Z][a-záéíóúñ]+ [A-Z][a-záéíóúñ]+(?:\s+[A-Z][a-záéíóúñ]+)?)/g,
+      /árbitro[:\s]+([A-Z][a-záéíóúñ]+ [A-Z][a-záéíóúñ]+(?:\s+[A-Z][a-záéíóúñ]+)?)/gi,
+      /official[:\s]+([A-Z][a-záéíóúñ]+ [A-Z][a-záéíóúñ]+(?:\s+[A-Z][a-záéíóúñ]+)?)/gi,
+    ];
+
+    const candidates = new Map();
+    for (const p of patterns) {
+      for (const m of text.matchAll(p)) {
+        const name = m[1].trim();
+        if (name.length >= 5 && name.length <= 50 && !/\b(Cup|World|FIFA|Match|Group|Round|Stage)\b/i.test(name)) {
+          candidates.set(name, (candidates.get(name) || 0) + 1);
+        }
+      }
+    }
+
+    // El nombre que aparece más veces es el más probable
+    const best = [...candidates.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || null;
+    if (best) console.log(`🔍 Árbitro web [${homeTeam}]: "${best}" (${candidates.get(best)} menciones)`);
+
+    refereeSearchCache.set(key, best);
+    setTimeout(() => refereeSearchCache.delete(key), 3_600_000); // 1h caché
+    return best;
+  } catch (e) {
+    console.warn('searchRefereeByWeb error:', e.message);
+    return null;
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 // ── TheSportsDB — estadio, ciudad, grupo, jornada ────────────────────────────
 // API gratuita sin key. Funciona para partidos de ligas grandes + selecciones.
 const tsdbCache = new Map();
@@ -5563,11 +5611,15 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const homeBaseForNat  = homeStatsData;
   const awayBaseForNat  = awayStatsData;
 
-  // Fase 2: contexto externo (SofaScore + TheSportsDB en paralelo)
-  const [sofaContext, tsdbData] = await Promise.all([
+  // Fase 2: contexto externo en paralelo
+  const apiReferee = nextRaw.fixture.referee || null;
+  const [sofaContext, tsdbData, webReferee] = await Promise.all([
     getSofaMatchContext(homeTeam, awayTeam, sofaEvents).catch(() => null),
     fetchTheSportsDBEvent(homeTeam, awayTeam, fixtureDate).catch(() => null),
+    // Solo buscar árbitro por web si API-Football no lo tiene
+    apiReferee ? Promise.resolve(null) : searchRefereeByWeb(homeTeam, awayTeam).catch(() => null),
   ]);
+  const referee = sofaContext?.arbitro?.nombre || apiReferee || webReferee || null;
 
   // Standings: extraer posición y motivación de cada equipo
   const homeStanding = standingsData.teams.find(t => t.teamId === homeId) || null;
@@ -5687,7 +5739,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       enVivo:    isLive,
       minuto:    elapsed || null,
       marcador:  isLive ? `${nextRaw.goals?.home ?? 0}-${nextRaw.goals?.away ?? 0}` : null,
-      arbitro:   sofaContext?.arbitro?.nombre || nextRaw.fixture.referee || null,
+      arbitro:   referee,
       estadio:   tsdbData?.estadio || nextRaw.fixture.venue?.name || null,
       ciudad:    tsdbData?.ciudad  || nextRaw.fixture.venue?.city  || null,
       grupo:     tsdbData?.grupo   || null,
@@ -6063,10 +6115,13 @@ async function handleEspecifica(chatId, intent) {
   const injHome2       = injHomeRes2?.status === 'fulfilled'  ? injHomeRes2.value   : [];
   const injAway2       = injAwayRes2?.status === 'fulfilled'  ? injAwayRes2.value   : [];
   const sofaEv2        = sofaEvRes2?.status === 'fulfilled'   ? sofaEvRes2.value    : [];
-  const [sofaCtx2, tsdbData2] = await Promise.all([
+  const apiRef2 = nextRaw.fixture.referee || null;
+  const [sofaCtx2, tsdbData2, webRef2] = await Promise.all([
     getSofaMatchContext(homeTeam, awayTeam, sofaEv2).catch(() => null),
     fetchTheSportsDBEvent(homeTeam, awayTeam, fixtureDate2).catch(() => null),
+    apiRef2 ? Promise.resolve(null) : searchRefereeByWeb(homeTeam, awayTeam).catch(() => null),
   ]);
+  const referee2 = sofaCtx2?.arbitro?.nombre || apiRef2 || webRef2 || null;
 
   const homeStanding2  = standData2.teams?.find(t => t.teamId === homeId) || null;
   const awayStanding2  = standData2.teams?.find(t => t.teamId === awayId) || null;
@@ -6082,7 +6137,7 @@ async function handleEspecifica(chatId, intent) {
       hora:      formatHour(nextRaw.fixture.date),
       local:     homeTeam,
       visitante: awayTeam,
-      arbitro:   sofaCtx2?.arbitro?.nombre || nextRaw.fixture.referee || null,
+      arbitro:   referee2,
       estadio:   tsdbData2?.estadio || nextRaw.fixture.venue?.name || null,
       ciudad:    tsdbData2?.ciudad  || nextRaw.fixture.venue?.city  || null,
       grupo:     tsdbData2?.grupo   || null,
