@@ -7679,21 +7679,33 @@ bot.onText(/\/zcode[-_]?tools/, async (msg) => {
       page.on('response', async (res) => {
         const url = res.url();
         const ct  = res.headers()['content-type'] || '';
-        if ((ct.includes('json') || url.includes('/api/') || url.includes('ajax') || url.includes('data'))
-            && !url.includes('google') && !url.includes('analytics') && !url.includes('facebook')) {
+        const isJS  = url.endsWith('.js') || url.includes('.js?') || url.includes('moment') || url.includes('jquery');
+        const isCSS = url.endsWith('.css') || url.includes('.css?');
+        const isYT  = url.includes('youtube') || url.includes('ytimg') || url.includes('googlevideo');
+        const isTrack = url.includes('analytics') || url.includes('facebook') || url.includes('logevent') || url.includes('pixel') || url.includes('gtm');
+        if (isJS || isCSS || isYT || isTrack) return;
+        const isJson = ct.includes('json') || ct.includes('javascript');
+        const isData = url.includes('/api/') || url.includes('ajax') || url.includes('.php') || url.includes('predict') || url.includes('odds') || url.includes('reversal') || url.includes('ranking') || url.includes('contrarian') || url.includes('oscillator') || url.includes('soccer');
+        if (isJson || isData) {
           const body = await res.text().catch(() => '');
-          if (body.length > 10) apiCalls.push({ url, status: res.status(), body: body.slice(0, 500) });
+          if (body.length > 20 && body.length < 500000) {
+            apiCalls.push({ url, status: res.status(), body: body.slice(0, 600) });
+          }
         }
       });
 
       const hasCookies = await _zbSetCookies(page);
       try {
         await page.goto(tool.url, { waitUntil: 'networkidle2', timeout: 35000 });
-        await new Promise(r => setTimeout(r, 4000));
+        // Scroll para activar lazy loading
+        await page.evaluate(() => window.scrollBy(0, 600));
+        await new Promise(r => setTimeout(r, 6000));
+        await page.evaluate(() => window.scrollBy(0, 600));
+        await new Promise(r => setTimeout(r, 3000));
 
-        // Screenshot
-        const shot = await page.screenshot({ type: 'png', fullPage: false });
-        await bot.sendPhoto(chatId, shot, { caption: `${tool.name} | cookies: ${hasCookies?'✅':'❌'}` });
+        // Screenshot full page para ver contenido real
+        const shot = await page.screenshot({ type: 'png', fullPage: true });
+        await bot.sendPhoto(chatId, shot, { caption: `${tool.name} | cookies: ${hasCookies?'✅':'❌'} | URL: ${page.url().slice(0,60)}` });
 
         // APIs encontradas
         if (apiCalls.length > 0) {
@@ -7704,11 +7716,16 @@ bot.onText(/\/zcode[-_]?tools/, async (msg) => {
           await sendLong(chatId, msg2, { parse_mode: 'Markdown' }).catch(() =>
             bot.sendMessage(chatId, `APIs: ${apiCalls.map(c=>c.url).join('\n')}`)
           );
-        } else {
-          // Extraer texto relevante de la página
-          const pageText = await page.evaluate(() => document.body.innerText.slice(0, 800));
-          await bot.sendMessage(chatId, `📄 Texto:\n${pageText}`);
         }
+        // Siempre extraer texto de la página para ver qué contiene
+        const pageText = await page.evaluate(() => {
+          // Quitar scripts y estilos del texto
+          document.querySelectorAll('script,style,nav,footer').forEach(el => el.remove());
+          return document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 1000);
+        });
+        await bot.sendMessage(chatId, `📄 *${tool.name}* texto:\n${pageText.slice(0, 600)}`, { parse_mode: 'Markdown' }).catch(
+          () => bot.sendMessage(chatId, `📄 ${tool.name}: ${pageText.slice(0, 400)}`)
+        );
       } catch (e) {
         await bot.sendMessage(chatId, `⚠️ Error en ${tool.name}: ${e.message}`);
       }
