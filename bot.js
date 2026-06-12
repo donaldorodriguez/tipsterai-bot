@@ -3577,6 +3577,11 @@ Si el JSON de datos incluye el campo "probabilidadesCalculadas", DEBES usarlo co
   * Si soccerBuddy contradice nuestro modelo (ej. nosotros: Over25 65%, ellos: over25_pct 35%) → NO emitas ese pick. Hay señal mixta.
   * NUNCA menciones "ZCode", "Soccer Buddy" ni "simulación Monte Carlo" al usuario. Solo usa los datos en silencio para calibrar.
   * Los valores LOCKED (que aparecen como null en el JSON) simplemente no los uses — no dan señal.
+- mercadoZCode: señales de mercado real (dinero de apostadores profesionales). Si está presente:
+  * droppingOddsLocal.droppingOdds > 8% → cuota del local bajó bruscamente = dinero entrando al local → refuerza picks locales, sube stake +1.
+  * droppingOddsVisitante.droppingOdds > 8% → dinero al visitante → refuerza picks visitante.
+  * lineReversalLocal / lineReversalVisitante → la línea se movió CONTRA el público = apostadores sharps en ese equipo → señal fuerte de valor.
+  * NUNCA menciones "Dropping Odds", "Line Reversals" ni "mercado" al usuario — úsalos en silencio para calibrar stakes.
 
 INSTRUCCIONES PARA MOMENTUM EN VIVO:
 Si el JSON incluye "momentumEnVivo", úsalo para detectar oportunidades en tiempo real:
@@ -5096,6 +5101,16 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       }
     }
     console.log(`📡 Soccer Buddy: ${zbHits}/${enriched.length} partidos con señales ZCode`);
+  }
+
+  // ── Dropping Odds + Line Reversals ──────────────────────────────────────────
+  if (_zdoStore.size > 0 || _zlrStore.size > 0) {
+    let mktHits = 0;
+    for (const e of enriched) {
+      const mkt = getZcodeMarketSignals(e.local, e.visitante);
+      if (mkt) { e.mercadoZCode = mkt; mktHits++; }
+    }
+    if (mktHits > 0) console.log(`📉 Dropping Odds/Line Reversals: ${mktHits} partidos con señales de mercado`);
   }
 
   await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV por mercado...`);
@@ -6687,6 +6702,117 @@ const _zbStore    = new Map();         // key: normHome+'|'+normAway → signals
 let   _zbLastRun  = 0;
 let   _zbApiEndpoints = [];            // endpoints descubiertos
 
+// ── ZCode Dropping Odds & Line Reversals store ────────────────────────────────
+const _zdoStore  = new Map(); // key: normHome+'|||'+normAway → { drop1, drop2, ... }
+const _zlrStore  = new Map(); // key: normHome+'|||'+normAway → { reversal, ... }
+let   _zdoLastRun = 0;
+const ZDO_INTERVAL = 15 * 60 * 1000; // cada 15 min
+
+async function scrapeZcodeMarketTool(page, url) {
+  await page.goto(url, { waitUntil: 'networkidle2', timeout: 40000 });
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await new Promise(r => setTimeout(r, 5000));
+
+  // Extraer tabla de datos de la página
+  return page.evaluate(() => {
+    const rows = [];
+    // Buscar todas las filas de la tabla con equipos
+    document.querySelectorAll('tr, .match-row, .game-row, [class*="row"], [class*="match"]').forEach(row => {
+      const text = row.innerText?.trim();
+      if (!text || text.length < 10) return;
+      // Solo filas con cuotas numéricas (al menos 2 números decimales)
+      const nums = text.match(/\d+\.\d{2}/g);
+      if (!nums || nums.length < 2) return;
+      // Buscar equipos y porcentajes
+      const pct = text.match(/(\d{1,3})%/g);
+      const arrows = [...row.querySelectorAll('*')].some(el =>
+        el.className && /arrow|up|down|drop|rise/i.test(el.className)
+      );
+      rows.push({ text: text.slice(0, 200), odds: nums, pct, arrows });
+    });
+    return rows;
+  });
+}
+
+async function runZcodeMarketScrape() {
+  if (Date.now() - _zdoLastRun < ZDO_INTERVAL) return;
+  if (!process.env.ZCODE_COOKIES) return;
+
+  let browser;
+  try {
+    browser = await _zbBrowser();
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+    await _zbSetCookies(page);
+
+    // --- Dropping Odds ---
+    try {
+      const rows = await scrapeZcodeMarketTool(page, 'https://zcodesystem.com/dropping_odds');
+      let parsed = 0;
+      for (const row of rows) {
+        if (!row.pct || !row.odds.length) continue;
+        const pctVals = row.pct.map(p => parseInt(p));
+        const maxDrop = Math.max(...pctVals);
+        if (maxDrop < 3) continue; // ignorar cambios menores al 3%
+        // Extraer nombres de equipos del texto
+        const teamMatch = row.text.match(/^([A-Za-z\s]+?)\s+\d+\.\d{2}/);
+        if (!teamMatch) continue;
+        const team = teamMatch[1].trim();
+        const key = _zbNorm(team) + '|||';
+        const prev = _zdoStore.get(key) || {};
+        _zdoStore.set(key, { ...prev, droppingOdds: maxDrop, odds: row.odds, raw: row.text.slice(0, 100) });
+        parsed++;
+      }
+      console.log(`📉 Dropping Odds: ${parsed} movimientos significativos extraídos`);
+    } catch (e) { console.warn('ZCode Dropping Odds err:', e.message); }
+
+    // --- Line Reversals ---
+    try {
+      const rows = await scrapeZcodeMarketTool(page, 'https://zcodesystem.com/line_reversals');
+      let parsed = 0;
+      for (const row of rows) {
+        if (!row.odds.length) continue;
+        const teamMatch = row.text.match(/^([A-Za-z\s]+?)\s+\d/);
+        if (!teamMatch) continue;
+        const team = teamMatch[1].trim();
+        const key = _zbNorm(team) + '|||';
+        _zlrStore.set(key, { reversal: true, odds: row.odds, raw: row.text.slice(0, 100) });
+        parsed++;
+      }
+      console.log(`🔄 Line Reversals: ${parsed} movimientos extraídos`);
+    } catch (e) { console.warn('ZCode Line Reversals err:', e.message); }
+
+    await page.close();
+    _zdoLastRun = Date.now();
+  } catch (e) {
+    console.warn('runZcodeMarketScrape err:', e.message);
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+}
+
+// Función para obtener señales de mercado para un partido específico
+function getZcodeMarketSignals(homeTeam, awayTeam) {
+  const signals = {};
+  const hNorm = _zbNorm(homeTeam);
+  const aNorm = _zbNorm(awayTeam);
+
+  // Buscar en Dropping Odds
+  for (const [key, data] of _zdoStore) {
+    const teamNorm = key.replace('|||', '');
+    if (_zbMatch(hNorm, teamNorm)) signals.droppingOddsLocal = data;
+    if (_zbMatch(aNorm, teamNorm)) signals.droppingOddsVisitante = data;
+  }
+  // Buscar en Line Reversals
+  for (const [key, data] of _zlrStore) {
+    const teamNorm = key.replace('|||', '');
+    if (_zbMatch(hNorm, teamNorm)) signals.lineReversalLocal = data;
+    if (_zbMatch(aNorm, teamNorm)) signals.lineReversalVisitante = data;
+  }
+  return Object.keys(signals).length > 0 ? signals : null;
+}
+// ─────────────────────────────────────────────────────────────────────────────
+
 // Lanzar browser con flags para Railway (sin GPU, sin sandbox)
 async function _zbBrowser() {
   return puppeteer.launch({
@@ -7096,7 +7222,10 @@ function zbSchedule() {
   }
   zbScrapeOnce().catch(e => console.error('ZB scheduled scrape:', e.message));
   setInterval(() => zbScrapeOnce().catch(e => console.error('ZB interval:', e.message)), ZB_INTERVAL);
-  console.log(`📡 Soccer Buddy scraping activo (cada ${ZB_INTERVAL / 60000} min)`);
+  // Dropping Odds + Line Reversals — scrape inicial y cada 15 min
+  runZcodeMarketScrape().catch(e => console.error('ZDO initial:', e.message));
+  setInterval(() => runZcodeMarketScrape().catch(e => console.error('ZDO interval:', e.message)), ZDO_INTERVAL);
+  console.log(`📡 Soccer Buddy scraping activo (cada ${ZB_INTERVAL / 60000} min) | Dropping Odds cada ${ZDO_INTERVAL/60000} min`);
 }
 
 // Búsqueda de señales para un partido dado
