@@ -6769,48 +6769,103 @@ async function runZcodeMarketScrape() {
   if (Date.now() - _zdoLastRun < ZDO_INTERVAL) return;
   if (!process.env.ZCODE_COOKIES) return;
 
-  const headers = _zdoHeaders();
-  if (!headers.Cookie) return;
-
-  // --- Line Reversals — API directa (descubierta en network intercept) ---
+  let browser;
   try {
-    const { data } = await axios.get(
-      'https://zcodesystem.com/vipclub/linemovinggameslistn1.php',
-      { headers, timeout: 15000 }
-    );
-    const html = typeof data === 'string' ? data : data.html || '';
-    const signals = _parseZcodeGameTable(html);
-    let count = 0;
-    for (const s of signals) {
-      const k1 = _zbNorm(s.team1) + '|||' + _zbNorm(s.team2);
-      _zlrStore.set(k1, s);
-      count++;
-    }
-    console.log(`🔄 Line Reversals: ${count} partidos con señales de dinero`);
-  } catch (e) { console.warn('ZCode Line Reversals err:', e.message); }
+    browser = await _zbBrowser();
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+    await _zbSetCookies(page);
 
-  // --- Dropping Odds — scraping DOM con axios ---
-  try {
-    const { data: html } = await axios.get(
-      'https://zcodesystem.com/dropping_odds',
-      { headers, timeout: 15000 }
-    );
-    // Extraer filas con porcentajes de caída de cuota
-    const text = html.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ');
-    const dropPattern = /([A-Za-zÀ-ÿ\s]{3,25})\s+(\d+\.\d{2})\s+[↑↓▲▼]?\s*(\d{1,3})%\s+(\d+\.\d{2})/g;
-    let count = 0;
-    for (const m of text.matchAll(dropPattern)) {
-      const [, team, oddBefore, pct, oddAfter] = m;
-      const drop = parseInt(pct);
-      if (drop < 3) continue;
-      const key = _zbNorm(team.trim()) + '|||';
-      _zdoStore.set(key, { team: team.trim(), oddBefore: parseFloat(oddBefore), drop, oddAfter: parseFloat(oddAfter) });
-      count++;
-    }
-    console.log(`📉 Dropping Odds: ${count} movimientos ≥3% extraídos`);
-  } catch (e) { console.warn('ZCode Dropping Odds err:', e.message); }
+    // --- Line Reversals — interceptar linemovinggameslistn1.php ---
+    let lrHtml = '';
+    let doHtml  = '';
+    page.on('response', async (res) => {
+      const url = res.url();
+      if (url.includes('linemovinggameslistn1')) {
+        const body = await res.text().catch(() => '');
+        try { lrHtml = JSON.parse(body).html || body; } catch { lrHtml = body; }
+      }
+      if (url.includes('droppingodds') || url.includes('dropping_odds')) {
+        const ct = res.headers()['content-type'] || '';
+        if (ct.includes('json') || url.includes('.php')) {
+          const body = await res.text().catch(() => '');
+          try { doHtml = JSON.parse(body).html || body; } catch { doHtml = body; }
+        }
+      }
+    });
 
-  _zdoLastRun = Date.now();
+    try {
+      await page.goto('https://zcodesystem.com/line_reversals', { waitUntil: 'networkidle2', timeout: 40000 });
+      await new Promise(r => setTimeout(r, 5000));
+
+      if (lrHtml) {
+        const signals = _parseZcodeGameTable(lrHtml);
+        let count = 0;
+        for (const s of signals) {
+          const k = _zbNorm(s.team1) + '|||' + _zbNorm(s.team2);
+          _zlrStore.set(k, s);
+          count++;
+        }
+        console.log(`🔄 Line Reversals: ${count} partidos con señales de dinero`);
+      } else {
+        // Fallback: extraer tabla directamente del DOM
+        const domData = await page.evaluate(() => {
+          const rows = [];
+          document.querySelectorAll('.GamesTableRow, [class*="TableRow"]').forEach(row => {
+            const text = row.innerText?.replace(/\s+/g,' ').trim();
+            if (text && text.length > 20) rows.push(text.slice(0,200));
+          });
+          return rows;
+        });
+        console.log(`🔄 Line Reversals DOM fallback: ${domData.length} filas`);
+        for (const text of domData) {
+          const pcts = [...text.matchAll(/(\d{1,3})%/g)].map(m=>parseInt(m[1]));
+          const odds = [...text.matchAll(/\d+\.\d{2}/g)].map(m=>parseFloat(m[0]));
+          const teams = text.match(/^([A-Za-z\s]{3,20})/);
+          if (teams && pcts.length >= 2 && odds.length >= 2) {
+            const k = _zbNorm(teams[1]) + '|||';
+            _zlrStore.set(k, { team1: teams[1].trim(), pct1: pcts[0], pct2: pcts[1], odds1: odds[0], odds2: odds[1] });
+          }
+        }
+      }
+    } catch (e) { console.warn('ZCode Line Reversals nav err:', e.message); }
+
+    // --- Dropping Odds ---
+    try {
+      await page.goto('https://zcodesystem.com/dropping_odds', { waitUntil: 'networkidle2', timeout: 40000 });
+      await new Promise(r => setTimeout(r, 5000));
+
+      const dropData = await page.evaluate(() => {
+        const rows = [];
+        document.querySelectorAll('tr, .GamesTableRow, [class*="Row"]').forEach(row => {
+          const text = row.innerText?.replace(/\s+/g,' ').trim();
+          if (text && /\d+%/.test(text) && /\d+\.\d{2}/.test(text)) rows.push(text.slice(0,200));
+        });
+        return rows;
+      });
+
+      let count = 0;
+      for (const text of dropData) {
+        const pcts = [...text.matchAll(/(\d{1,3})%/g)].map(m=>parseInt(m[1]));
+        const odds = [...text.matchAll(/(\d+\.\d{2})/g)].map(m=>parseFloat(m[1]));
+        const maxDrop = Math.max(...pcts);
+        if (maxDrop < 3 || odds.length < 2) continue;
+        const teamMatch = text.match(/^([A-Za-zÀ-ÿ\s]{3,25})/);
+        if (!teamMatch) continue;
+        const key = _zbNorm(teamMatch[1].trim()) + '|||';
+        _zdoStore.set(key, { team: teamMatch[1].trim(), drop: maxDrop, oddBefore: odds[0], oddAfter: odds[1] });
+        count++;
+      }
+      console.log(`📉 Dropping Odds: ${count} movimientos ≥3% extraídos`);
+    } catch (e) { console.warn('ZCode Dropping Odds err:', e.message); }
+
+    await page.close();
+    _zdoLastRun = Date.now();
+  } catch (e) {
+    console.warn('runZcodeMarketScrape err:', e.message);
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
 }
 
 // Función para obtener señales de mercado para un partido específico
