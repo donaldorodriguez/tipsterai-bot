@@ -7936,14 +7936,24 @@ bot.onText(/\/zcode[-_]?tools/, async (msg) => {
             bot.sendMessage(chatId, `APIs: ${apiCalls.map(c=>c.url).join('\n')}`)
           );
         }
-        // Siempre extraer texto de la página para ver qué contiene
-        const pageText = await page.evaluate(() => {
-          // Quitar scripts y estilos del texto
-          document.querySelectorAll('script,style,nav,footer').forEach(el => el.remove());
-          return document.body.innerText.replace(/\s+/g, ' ').trim().slice(0, 1000);
+        // Extraer estructura DOM real: clases usadas y texto visible
+        const domInfo = await page.evaluate(() => {
+          // Clases únicas de todos los elementos
+          const classes = new Set();
+          document.querySelectorAll('[class]').forEach(el => {
+            el.className.split(' ').filter(c=>c.length>2).forEach(c=>classes.add(c));
+          });
+          // Texto limpio
+          document.querySelectorAll('script,style,nav,footer,header').forEach(el=>el.remove());
+          const text = document.body.innerText.replace(/\s+/g,' ').trim().slice(0,800);
+          // HTML de la primera tabla/div con datos
+          const table = document.querySelector('table, .GamesTable, [class*="Table"], [class*="Game"]');
+          const tableHtml = table ? table.outerHTML.slice(0,600) : 'no table found';
+          return { classes: [...classes].slice(0,40).join(', '), text, tableHtml };
         });
-        await bot.sendMessage(chatId, `📄 *${tool.name}* texto:\n${pageText.slice(0, 600)}`, { parse_mode: 'Markdown' }).catch(
-          () => bot.sendMessage(chatId, `📄 ${tool.name}: ${pageText.slice(0, 400)}`)
+        const info = `📄 *${tool.name}*\nClases DOM: \`${domInfo.classes.slice(0,200)}\`\nTexto: ${domInfo.text.slice(0,300)}\nPrimer table HTML: \`${domInfo.tableHtml.slice(0,300)}\``;
+        await sendLong(chatId, info, { parse_mode: 'Markdown' }).catch(
+          () => bot.sendMessage(chatId, `📄 ${tool.name}: ${domInfo.text.slice(0,400)}`)
         );
       } catch (e) {
         await bot.sendMessage(chatId, `⚠️ Error en ${tool.name}: ${e.message}`);
