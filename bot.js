@@ -2673,22 +2673,53 @@ function calcCornersProjection(current, elapsed, homeGoals = 0, awayGoals = 0, t
 }
 
 /**
+ * Calcula promedios de goles desde los últimos N partidos (cross-competición).
+ * Fallback cuando la liga tiene muestra pequeña (ej: Mundial fase de grupos).
+ */
+function computeAvgFromFixtures(teamId, fixtures) {
+  if (!fixtures || fixtures.length === 0) return null;
+  const home = fixtures.filter(f => f.homeId === teamId);
+  const away = fixtures.filter(f => f.awayId === teamId);
+  return {
+    golesAnotadosHome:  home.length > 0 ? +(home.reduce((s, f) => s + f.goalsHome, 0) / home.length).toFixed(2) : null,
+    golesRecibidosHome: home.length > 0 ? +(home.reduce((s, f) => s + f.goalsAway, 0) / home.length).toFixed(2) : null,
+    golesAnotadosAway:  away.length > 0 ? +(away.reduce((s, f) => s + f.goalsAway, 0) / away.length).toFixed(2) : null,
+    golesRecibidosAway: away.length > 0 ? +(away.reduce((s, f) => s + f.goalsHome, 0) / away.length).toFixed(2) : null,
+    partidos: fixtures.length,
+  };
+}
+
+/**
  * Enriquece los datos de un partido con probabilidades calculadas.
  * Se añade el bloque `probabilidades` al objeto de análisis.
  *
- * @param {object} homeStats - Stats del equipo local (de getTeamStats)
- * @param {object} awayStats - Stats del equipo visitante (de getTeamStats)
- * @param {Array}  h2h       - Array de H2H (de getH2H)
- * @param {boolean} isHome   - true si homeStats es el equipo local
+ * @param {object} homeStats    - Stats del equipo local (de getTeamStats)
+ * @param {object} awayStats    - Stats del equipo visitante (de getTeamStats)
+ * @param {Array}  h2h          - Array de H2H (de getH2H)
+ * @param {number} leagueId     - ID de la liga
+ * @param {object} homeFallback - Promedios calculados desde últimos 20 partidos (fallback)
+ * @param {object} awayFallback - Promedios calculados desde últimos 20 partidos (fallback)
  * @returns {object} bloque de probabilidades para incluir en el prompt
  */
-function buildProbBlock(homeStats, awayStats, h2h = [], leagueId = null) {
-  if (!homeStats || !awayStats) return null;
+function buildProbBlock(homeStats, awayStats, h2h = [], leagueId = null, homeFallback = null, awayFallback = null) {
+  if (!homeStats && !homeFallback) return null;
+  if (!awayStats && !awayFallback) return null;
 
-  const hFor  = parseFloat(homeStats.golesAnotadosHome) || 0;
-  const hAgt  = parseFloat(homeStats.golesRecibidosHome) || 0;
-  const aFor  = parseFloat(awayStats.golesAnotadosAway) || 0;
-  const aAgt  = parseFloat(awayStats.golesRecibidosAway) || 0;
+  // Si la liga tiene menos de 5 partidos, usa los últimos 20 como base
+  const homeGames = homeStats
+    ? ((homeStats.victorias?.total || 0) + (homeStats.empates?.total || 0) + (homeStats.derrotas?.total || 0))
+    : 0;
+  const awayGames = awayStats
+    ? ((awayStats.victorias?.total || 0) + (awayStats.empates?.total || 0) + (awayStats.derrotas?.total || 0))
+    : 0;
+
+  const hSrc = (homeGames < 5 && homeFallback) ? homeFallback : homeStats;
+  const aSrc = (awayGames < 5 && awayFallback) ? awayFallback : awayStats;
+
+  const hFor  = parseFloat(hSrc?.golesAnotadosHome) || 0;
+  const hAgt  = parseFloat(hSrc?.golesRecibidosHome) || 0;
+  const aFor  = parseFloat(aSrc?.golesAnotadosAway) || 0;
+  const aAgt  = parseFloat(aSrc?.golesRecibidosAway) || 0;
 
   const probs = calcPoissonProbs(hFor, hAgt, aFor, aAgt);
 
@@ -3770,6 +3801,8 @@ INSTRUCCIONES ESPECIALES PARA PICKS DEL DÍA — VE DIRECTO AL RESULTADO:
 - PROHIBIDO dar picks de partidos donde statsLocal y statsVisitante son null o muestran datos limitados en más de 3 de los 5 indicadores clave (goles anotados, goles recibidos, forma reciente, porcentaje BTTS, porcentaje Over 2.5). Si no hay base estadística real, DESCARTA el partido completamente.
 - PARTIDOS CON MUESTRA REDUCIDA EN LA COMPETICIÓN ACTUAL: Si un equipo tiene menos de 5 partidos en esa copa/torneo específico, usa su liga doméstica como fuente principal de estadísticas. Si no hay NINGÚN dato adicional (ni liga doméstica ni H2H), descarta ese partido de los picks automáticos del día — el usuario puede preguntar por él directamente y el bot lo analiza con todos los factores disponibles.
 - PROHIBIDO inventar contexto del partido: solo usa el campo jornada/round, contextoPartido, motivacionLocal/Visitante que vienen en los datos. NUNCA uses tu conocimiento de entrenamiento para deducir si es una "final de copa", un "playoff por Champions" u otro contexto que no aparezca explícitamente en el JSON. Si no hay contexto claro → simplemente omite ese dato y describe la situación en tabla.
+- ⛔ NUNCA llames "anfitrión", "sede" ni "co-sede" a ningún equipo basándote en conocimiento previo. Qatar fue sede en 2022, NO en 2026. El Mundial 2026 lo organizan USA/Canadá/México — Qatar es PARTICIPANTE. Si el JSON no indica explícitamente que un equipo es anfitrión, NO lo supongas.
+- Si los campos statsLocal/statsVisitante tienen pocos partidos en la liga actual (menos de 5), usa ultimosPartidosLocal y ultimosPartidosVisitante del JSON para calcular promedios reales de los últimos 20 partidos entre todas las competiciones. Menciona en el análisis que usas el historial reciente completo.
 - ÚLTIMA JORNADA / FIN DE TEMPORADA — REGLA CRÍTICA: Si motivacionLocal.estado o motivacionVisitante.estado contiene "posible_asegurado" o "última jornada", NO escribas que el equipo "necesita ganar" ni que "lucha por" esa plaza. Escribe en su lugar: "[Equipo] (Xº, Y pts) — plaza [Champions/Europa] posiblemente ya asegurada, posibles rotaciones". Si la clasificación ya NO está en disputa ese día, la motivación es BAJA, no alta. Un equipo que ya clasificó puede alinear suplentes y gestionar esfuerzo — el razonamiento de pick debe reflejar esto, NO lo contrario.
 - ESTADÍSTICAS DE TEMPORADA: solo usa los números que aparecen en los campos statsLocal y statsVisitante del JSON. Si esos campos son null o tienen datos del año anterior (temporada distinta a la actual), MENCIONA "datos limitados de temporada actual" — NUNCA rellenes con estadísticas de tu entrenamiento.
 - Siempre busca llegar a 3 picks — solo da menos si genuinamente no hay suficientes partidos con datos mínimos.
@@ -5677,10 +5710,12 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     getApiPrediction(nextRaw.fixture.id),                      // 6
     getLeagueStandings(leagueId).catch(() => ({ teams: [] })), // 7
     fetchSofaScoreEvents(fixtureDate).catch(() => []),          // 8
+    getTeamLastFixtures(homeId, 20),                           // 9
+    getTeamLastFixtures(awayId, 20),                           // 10
   ];
   if (isLive) {
-    requests.push(getFixtureStatistics(nextRaw.fixture.id)); // 9
-    requests.push(getFixtureEvents(nextRaw.fixture.id));     // 10
+    requests.push(getFixtureStatistics(nextRaw.fixture.id)); // 11
+    requests.push(getFixtureEvents(nextRaw.fixture.id));     // 12
   }
   if (isEuropean) {
     requests.push(
@@ -5695,20 +5730,22 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   // Disparar llamadas adicionales en paralelo solo provocaría rate-limit en API-Football.
 
   const results = await Promise.allSettled(requests);
-  const h2hRes        = results[0];
-  const homeStatsRes  = results[1];
-  const awayStatsRes  = results[2];
-  const lineupsRes    = results[3];
-  const injHomeRes    = results[4];
-  const injAwayRes    = results[5];
-  const predRes       = results[6];
-  const standingsRes  = results[7];
-  const sofaEventsRes = results[8];
-  const liveStatsRes  = isLive ? results[9]  : null;
-  const liveEventsRes = isLive ? results[10] : null;
-  const euroBase      = isLive ? 11 : 9;
-  const homedomRes    = isEuropean ? results[euroBase]     : null;
-  const awaydomRes    = isEuropean ? results[euroBase + 1] : null;
+  const h2hRes             = results[0];
+  const homeStatsRes       = results[1];
+  const awayStatsRes       = results[2];
+  const lineupsRes         = results[3];
+  const injHomeRes         = results[4];
+  const injAwayRes         = results[5];
+  const predRes            = results[6];
+  const standingsRes       = results[7];
+  const sofaEventsRes      = results[8];
+  const homeLastFixturesRes = results[9];
+  const awayLastFixturesRes = results[10];
+  const liveStatsRes       = isLive ? results[11] : null;
+  const liveEventsRes      = isLive ? results[12] : null;
+  const euroBase           = isLive ? 13 : 11;
+  const homedomRes         = isEuropean ? results[euroBase]     : null;
+  const awaydomRes         = isEuropean ? results[euroBase + 1] : null;
 
   const h2hData         = h2hRes.status === 'fulfilled'        ? h2hRes.value        : [];
   const homeStatsData   = homeStatsRes.status === 'fulfilled'   ? homeStatsRes.value   : null;
@@ -5719,6 +5756,8 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const predData        = predRes?.status === 'fulfilled'       ? predRes.value       : null;
   const standingsData   = standingsRes?.status === 'fulfilled'  ? standingsRes.value  : { teams: [] };
   const sofaEvents      = sofaEventsRes?.status === 'fulfilled' ? sofaEventsRes.value : [];
+  const homeLastFixtures = homeLastFixturesRes?.status === 'fulfilled' ? homeLastFixturesRes.value : [];
+  const awayLastFixtures = awayLastFixturesRes?.status === 'fulfilled' ? awayLastFixturesRes.value : [];
   const liveStatsData   = (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
   const rawEventsData   = (isLive && liveEventsRes?.status === 'fulfilled') ? liveEventsRes.value : [];
   const liveEventsData  = rawEventsData.length > 0 ? summarizeEvents(rawEventsData, homeTeam, awayTeam) : null;
@@ -5815,7 +5854,9 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   // Europeas → stats domésticas; Selecciones → combinar todas las fuentes; Resto → stats de temporada
   const homeBase = homeDomStats || (isNationalTeamMatch ? homeBaseForNat : homeStatsData);
   const awayBase = awayDomStats || (isNationalTeamMatch ? awayBaseForNat : awayStatsData);
-  let probBlock = buildProbBlock(homeBase, awayBase, h2hData, leagueId);
+  const homeFallback = computeAvgFromFixtures(homeId, homeLastFixtures);
+  const awayFallback = computeAvgFromFixtures(awayId, awayLastFixtures);
+  let probBlock = buildProbBlock(homeBase, awayBase, h2hData, leagueId, homeFallback, awayFallback);
   if (isSingleLegFinal && probBlock) {
     // Reducir un 30% los xG para reflejar que las finales producen ~1.8 goles de media vs ~2.7 en liga
     const FINAL_FACTOR = 0.70;
@@ -5889,6 +5930,8 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       : null,
     ...(homeDomStats && { statsLocalLigaDomestica:     { ...homeDomStats,     _fuente: 'promedio liga doméstica' } }),
     ...(awayDomStats && { statsVisitanteLigaDomestica: { ...awayDomStats,     _fuente: 'promedio liga doméstica' } }),
+    ultimosPartidosLocal:     homeLastFixtures,
+    ultimosPartidosVisitante: awayLastFixtures,
     estadisticasVivo: liveStatsData,
     ...(liveEventsData && { eventosPartido: liveEventsData }),  // ← goles con jugador, tarjetas, cambios
     ...(lineupsData && lineupsData.length > 0 && { alineaciones: lineupsData }),
