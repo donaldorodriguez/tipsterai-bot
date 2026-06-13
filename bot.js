@@ -2646,6 +2646,113 @@ function calcCardsProjection(current, elapsed, homeCards = 0, awayCards = 0, tot
 }
 
 /**
+ * Calcula qué líneas de CORNERS tienen valor real en vivo (prob 20-80%).
+ * Usa Poisson con blend entre ritmo actual e histórico de corners.
+ * Promedio histórico: ~10 corners/90 min.
+ */
+function calcLiveCornersLines(currentCorners, elapsed, chaseFactor = 1.08) {
+  if (!elapsed || elapsed <= 0) return null;
+  const minutesRemaining = Math.max(1, 90 - elapsed);
+  const currentPace    = currentCorners / elapsed;
+  const historicalRate = 10 / 90;  // ~10 corners/partido histórico
+  const blendWeight    = Math.min(elapsed / 70, 0.65);
+  const blendedRate    = currentPace * blendWeight + historicalRate * (1 - blendWeight);
+  const lambda         = blendedRate * minutesRemaining * chaseFactor;
+
+  const probAtLeast = (k) => {
+    if (lambda <= 0) return k <= 0 ? 1 : 0;
+    let cumul = 0;
+    for (let i = 0; i < k; i++) cumul += poissonPMF(lambda, i);
+    return 1 - cumul;
+  };
+
+  const lines = [];
+  for (const extra of [0.5, 1.5, 2.5, 3.5, 4.5, 5.5]) {
+    const totalLine   = currentCorners + extra;
+    const needed      = Math.ceil(extra);
+    const pOver       = +(probAtLeast(needed) * 100).toFixed(1);
+    const pUnder      = +(100 - pOver).toFixed(1);
+    const overHasValue  = pOver  >= 20 && pOver  <= 80;
+    const underHasValue = pUnder >= 20 && pUnder <= 80;
+    lines.push({
+      linea: `${totalLine}`,
+      overProb: pOver, underProb: pUnder,
+      overValor: overHasValue, underValor: underHasValue,
+      nota: pOver > 80
+        ? `Over ${totalLine} casi garantizado — cuota < 1.25, sin valor`
+        : pOver < 20
+        ? `Over ${totalLine} muy improbable — sin valor`
+        : `Over ${totalLine} (${pOver}%) | Under ${totalLine} (${pUnder}%)`,
+    });
+  }
+
+  const lineasConValor = lines.filter(l => l.overValor || l.underValor);
+  return {
+    cornersActuales:  currentCorners,
+    minutosJugados:   elapsed,
+    lambdaRestante:   +lambda.toFixed(2),
+    proyeccionTotal:  +(currentCorners + lambda).toFixed(1),
+    lineas:           lines,
+    lineasConValor:   lineasConValor.length > 0
+      ? lineasConValor
+      : [{ nota: 'Sin líneas de corners con valor real — cuotas demasiado bajas o altas' }],
+  };
+}
+
+/**
+ * Calcula qué líneas de TARJETAS tienen valor real en vivo (prob 20-80%).
+ * Usa Poisson con factor de regresión (equipos con amarillas se cuidan en 2T).
+ */
+function calcLiveCardsLines(currentCards, elapsed, regressionFactor = 0.85) {
+  if (!elapsed || elapsed <= 0) return null;
+  const minutesRemaining = Math.max(1, 90 - elapsed);
+  const currentPace    = currentCards / elapsed;
+  const historicalRate = 4 / 90;  // ~4 tarjetas/partido histórico
+  const blendWeight    = Math.min(elapsed / 70, 0.65);
+  const blendedRate    = currentPace * blendWeight + historicalRate * (1 - blendWeight);
+  const lambda         = blendedRate * minutesRemaining * regressionFactor;
+
+  const probAtLeast = (k) => {
+    if (lambda <= 0) return k <= 0 ? 1 : 0;
+    let cumul = 0;
+    for (let i = 0; i < k; i++) cumul += poissonPMF(lambda, i);
+    return 1 - cumul;
+  };
+
+  const lines = [];
+  for (const extra of [0.5, 1.5, 2.5, 3.5, 4.5]) {
+    const totalLine   = currentCards + extra;
+    const needed      = Math.ceil(extra);
+    const pOver       = +(probAtLeast(needed) * 100).toFixed(1);
+    const pUnder      = +(100 - pOver).toFixed(1);
+    const overHasValue  = pOver  >= 20 && pOver  <= 80;
+    const underHasValue = pUnder >= 20 && pUnder <= 80;
+    lines.push({
+      linea: `${totalLine}`,
+      overProb: pOver, underProb: pUnder,
+      overValor: overHasValue, underValor: underHasValue,
+      nota: pOver > 80
+        ? `Over ${totalLine} casi garantizado — cuota < 1.25, sin valor`
+        : pOver < 20
+        ? `Over ${totalLine} muy improbable — sin valor`
+        : `Over ${totalLine} (${pOver}%) | Under ${totalLine} (${pUnder}%)`,
+    });
+  }
+
+  const lineasConValor = lines.filter(l => l.overValor || l.underValor);
+  return {
+    tarjetasActuales: currentCards,
+    minutosJugados:   elapsed,
+    lambdaRestante:   +lambda.toFixed(2),
+    proyeccionTotal:  +(currentCards + lambda).toFixed(1),
+    lineas:           lines,
+    lineasConValor:   lineasConValor.length > 0
+      ? lineasConValor
+      : [{ nota: 'Sin líneas de tarjetas con valor real — cuotas demasiado bajas o altas' }],
+  };
+}
+
+/**
  * Proyección de CORNERS con factor de "caza de resultado".
  * El equipo que va perdiendo empuja más → más corners en 2T.
  * El 2T en general genera ~10-15% más corners que el 1T (presión final).
@@ -3618,10 +3725,15 @@ INSTRUCCIONES PARA MOMENTUM EN VIVO:
 Si el JSON incluye "momentumEnVivo", úsalo para detectar oportunidades en tiempo real:
 - Si domina un equipo (score > 15) pero el marcador no lo refleja aún, considera apuesta al próximo gol de ese equipo.
 - Si está equilibrado, prioriza mercados de corners o tarjetas sobre resultado.
-- CORNERS EN VIVO: usa proyeccionCorners.current (ya ocurridos) y .remaining (esperados restantes).
-  La línea válida debe ser: current + (remaining * 0.6) como mínimo. Si current ya supera o está cerca de la línea estándar (9.5/10.5), esa línea NO tiene valor — busca una línea mayor o descarta el mercado.
-  Ejemplo correcto: 8 corners al min 55, remaining=5.1 → proyecta 13. Recomienda Over 11.5 o Over 12.5, NO Over 9.5.
-- TARJETAS EN VIVO: misma lógica. Si ya van 3 tarjetas y projected=5, Over 3.5 no tiene valor. Busca Over 4.5.
+- CORNERS EN VIVO: usa EXCLUSIVAMENTE el campo "lineasCornersVivo.lineasConValor" del JSON.
+  Ese campo ya calcula con Poisson qué líneas tienen probabilidad 20-80% (valor real de apuesta).
+  Si lineasConValor está vacío o dice "sin líneas con valor" → NO recomiendes ningún mercado de corners.
+  NUNCA recomiendes una línea que no aparezca en lineasConValor — aunque la proyección parezca alta.
+  Ejemplo correcto: 7 corners al min 45 → Over 10.5 tiene prob 87% (sin valor, cuota ~1.15). El campo
+  lineasConValor mostraría Over 12.5 o Over 13.5 como las líneas con prob 20-80%.
+- TARJETAS EN VIVO: usa EXCLUSIVAMENTE el campo "lineasCardsVivo.lineasConValor" del JSON.
+  Misma lógica: solo líneas con probabilidad 20-80%. Si 3 tarjetas al descanso, Over 3.5 tiene
+  prob 85%+ (cuota ~1.18, sin valor). El campo mostrará Over 5.5 u Over 6.5 si tienen valor real.
 
 TRADUCCIÓN OBLIGATORIA DE TÉRMINOS TÉCNICOS — SIEMPRE en español:
 - failedToScore → "partidos sin marcar"
@@ -4062,12 +4174,13 @@ PROYECCIONES EN TIEMPO REAL:
     • "Solo falta N gol en M minutos" → no tiene cuota mínima válida → NO hagas ese pick.
     • Si haces un pick de goles, la cuota real en casas de apuestas está entre 1.65-2.50 → escribe ese rango estimado.
 
-- CORNERS: proyeccionCorners.remaining ya incluye factor de "caza" cuando hay gol en el marcador.
-  Línea mínima = current + 4. Úsalo tal cual — NO multipliques current por 2.
-- TARJETAS: proyeccionTarjetas.projected ya aplica factor de regresión (cuando hay 3+ amarillas en un equipo, el ritmo baja en 2T — jugadores más cautelosos).
+- CORNERS: usa ÚNICAMENTE las líneas de "lineasCornersVivo.lineasConValor". Ese campo contiene solo
+  líneas con probabilidad 20-80% — es decir, cuotas reales entre 1.25 y 5.0. Si está vacío, NO hagas
+  pick de corners. La proyección general (proyeccionCorners.projected) es solo contexto — nunca base
+  para elegir la línea directamente.
+- TARJETAS: usa ÚNICAMENTE las líneas de "lineasCardsVivo.lineasConValor". Mismo criterio.
   ⛔ PROHIBIDO multiplicar por 2 los datos del 1T para proyectar el partido completo.
-  Usa SIEMPRE proyeccionTarjetas.projected del JSON. Si hay "nota" de regresión, menciónala.
-  Línea mínima = current + 3. Si proyeccionTarjetas.projected = 7.2, la línea con valor es Over 6.5 o Over 7.5 — no Over 5.5.
+  ⛔ PROHIBIDO recomendar Over X tarjetas si ya hay X-1 o X tarjetas — la cuota real sería < 1.25.
 - BTTS: si el equipo perdedor tiene que atacar → BTTS gana probabilidad real.
 
 DIVERSIDAD DE PICKS EN VIVO — REGLA OBLIGATORIA:
@@ -5875,8 +5988,9 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const awayCorners= liveStatsData ? (awayStats(liveStatsData)?.['Corner Kicks'] ?? 0) : 0;
   const liveHomeGoals = nextRaw.goals?.home ?? 0;
   const liveAwayGoals = nextRaw.goals?.away ?? 0;
+  const totalCorners = homeCorners + awayCorners;
   const cornersProj= isLive && elapsed > 0
-    ? calcCornersProjection(homeCorners + awayCorners, elapsed, liveHomeGoals, liveAwayGoals)
+    ? calcCornersProjection(totalCorners, elapsed, liveHomeGoals, liveAwayGoals)
     : null;
   const homeCards  = liveStatsData
     ? ((homeStats(liveStatsData)?.['Yellow Cards'] ?? 0) + (homeStats(liveStatsData)?.['Red Cards'] ?? 0))
@@ -5884,8 +5998,18 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const awayCards  = liveStatsData
     ? ((awayStats(liveStatsData)?.['Yellow Cards'] ?? 0) + (awayStats(liveStatsData)?.['Red Cards'] ?? 0))
     : 0;
+  const totalCards = homeCards + awayCards;
   const cardsProj  = isLive && elapsed > 0
-    ? calcCardsProjection(homeCards + awayCards, elapsed, homeCards, awayCards)
+    ? calcCardsProjection(totalCards, elapsed, homeCards, awayCards)
+    : null;
+  // Líneas con valor real (prob 20-80%) para corners y tarjetas
+  const chaseFactor      = cornersProj?.chaseFactor ?? 1.08;
+  const regressionFactor = cardsProj?.regressionFactor ?? 0.85;
+  const cornersLines = isLive && elapsed > 0
+    ? calcLiveCornersLines(totalCorners, elapsed, chaseFactor)
+    : null;
+  const cardsLines   = isLive && elapsed > 0
+    ? calcLiveCardsLines(totalCards, elapsed, regressionFactor)
     : null;
 
   const analysisData = {
@@ -5940,10 +6064,12 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     ...(sofaContext?.formaLocal     && { formaRecienteLocalSofascore:     sofaContext.formaLocal }),
     ...(sofaContext?.formaVisitante && { formaRecienteVisitanteSofascore: sofaContext.formaVisitante }),
     ...(contextoEliminatoria && { contextoEliminatoria }),
-    ...(probBlock   && { probabilidadesCalculadas: probBlock }),
-    ...(momentum    && { momentumEnVivo: momentum }),
-    ...(cornersProj && { proyeccionCorners: cornersProj }),
-    ...(cardsProj   && { proyeccionTarjetas: cardsProj }),
+    ...(probBlock    && { probabilidadesCalculadas: probBlock }),
+    ...(momentum     && { momentumEnVivo: momentum }),
+    ...(cornersProj  && { proyeccionCorners: cornersProj }),
+    ...(cardsProj    && { proyeccionTarjetas: cardsProj }),
+    ...(cornersLines && { lineasCornersVivo: cornersLines }),
+    ...(cardsLines   && { lineasCardsVivo: cardsLines }),
   };
 
   await bot.sendMessage(chatId, '⚡ Procesando análisis profundo...');
@@ -6081,13 +6207,21 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
     const momentum    = calcLiveMomentum(liveStats, f.homeTeam, f.awayTeam);
     const homeCorners = liveStats ? (homeStats(liveStats)?.['Corner Kicks'] ?? 0) : 0;
     const awayCorners = liveStats ? (awayStats(liveStats)?.['Corner Kicks'] ?? 0) : 0;
+    const totalCornersV = homeCorners + awayCorners;
     const cornersProj = elapsed > 0
-      ? calcCornersProjection(homeCorners + awayCorners, elapsed, f.homeGoals ?? 0, f.awayGoals ?? 0)
+      ? calcCornersProjection(totalCornersV, elapsed, f.homeGoals ?? 0, f.awayGoals ?? 0)
       : null;
     const homeCards   = liveStats ? ((homeStats(liveStats)?.['Yellow Cards']??0)+(homeStats(liveStats)?.['Red Cards']??0)) : 0;
     const awayCards   = liveStats ? ((awayStats(liveStats)?.['Yellow Cards']??0)+(awayStats(liveStats)?.['Red Cards']??0)) : 0;
+    const totalCardsV = homeCards + awayCards;
     const cardsProj   = elapsed > 0
-      ? calcCardsProjection(homeCards + awayCards, elapsed, homeCards, awayCards)
+      ? calcCardsProjection(totalCardsV, elapsed, homeCards, awayCards)
+      : null;
+    const cornersLinesV = elapsed > 0
+      ? calcLiveCornersLines(totalCornersV, elapsed, cornersProj?.chaseFactor ?? 1.08)
+      : null;
+    const cardsLinesV   = elapsed > 0
+      ? calcLiveCardsLines(totalCardsV, elapsed, cardsProj?.regressionFactor ?? 0.85)
       : null;
     const eventosResumen = rawEvents.length > 0 ? summarizeEvents(rawEvents, f.homeTeam, f.awayTeam) : null;
 
@@ -6111,9 +6245,11 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
       ...(sofa?.formaVisitante && { formaRecienteVisitanteSofascore: sofa.formaVisitante }),
       estadisticasVivo:  liveStats,
       eventosPartido:    eventosResumen,   // ← goles con jugador, tarjetas activas, cambios
-      ...(momentum    && { momentumEnVivo:       momentum }),
-      ...(cornersProj && { proyeccionCorners:    cornersProj }),
-      ...(cardsProj   && { proyeccionTarjetas:   cardsProj }),
+      ...(momentum      && { momentumEnVivo:       momentum }),
+      ...(cornersProj   && { proyeccionCorners:    cornersProj }),
+      ...(cardsProj     && { proyeccionTarjetas:   cardsProj }),
+      ...(cornersLinesV && { lineasCornersVivo:    cornersLinesV }),
+      ...(cardsLinesV   && { lineasCardsVivo:      cardsLinesV }),
     };
   });
 
