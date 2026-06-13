@@ -899,22 +899,55 @@ function calcLiveGoalLines(currentGoals, elapsed, homeFor = 1.3, awayFor = 1.0) 
 }
 
 /**
+ * Calcula promedios de goles desde los últimos N partidos de todas las competiciones.
+ * Se usa como fallback cuando los stats de liga tienen muestra pequeña.
+ */
+function computeAvgFromFixtures(teamId, fixtures) {
+  if (!fixtures || fixtures.length === 0) return null;
+  const home = fixtures.filter(f => f.homeId === teamId);
+  const away = fixtures.filter(f => f.awayId === teamId);
+  return {
+    golesAnotadosHome:  home.length > 0 ? +(home.reduce((s, f) => s + f.goalsHome, 0) / home.length).toFixed(2) : null,
+    golesRecibidosHome: home.length > 0 ? +(home.reduce((s, f) => s + f.goalsAway, 0) / home.length).toFixed(2) : null,
+    golesAnotadosAway:  away.length > 0 ? +(away.reduce((s, f) => s + f.goalsAway, 0) / away.length).toFixed(2) : null,
+    golesRecibidosAway: away.length > 0 ? +(away.reduce((s, f) => s + f.goalsHome, 0) / away.length).toFixed(2) : null,
+    partidos: fixtures.length,
+  };
+}
+
+/**
  * Enriquece los datos de un partido con probabilidades calculadas.
  * Se añade el bloque `probabilidades` al objeto de análisis.
  *
- * @param {object} homeStats - Stats del equipo local (de getTeamStats)
- * @param {object} awayStats - Stats del equipo visitante (de getTeamStats)
- * @param {Array}  h2h       - Array de H2H (de getH2H)
- * @param {boolean} isHome   - true si homeStats es el equipo local
+ * @param {object} homeStats    - Stats del equipo local (de getTeamStats)
+ * @param {object} awayStats    - Stats del equipo visitante (de getTeamStats)
+ * @param {Array}  h2h          - Array de H2H (de getH2H)
+ * @param {object} homeFallback - Promedios calculados desde últimos 20 partidos (fallback)
+ * @param {object} awayFallback - Promedios calculados desde últimos 20 partidos (fallback)
  * @returns {object} bloque de probabilidades para incluir en el prompt
  */
-function buildProbBlock(homeStats, awayStats, h2h = []) {
-  if (!homeStats || !awayStats) return null;
+function buildProbBlock(homeStats, awayStats, h2h = [], homeFallback = null, awayFallback = null) {
+  if (!homeStats && !homeFallback) return null;
+  if (!awayStats && !awayFallback) return null;
 
-  const hFor  = parseFloat(homeStats.golesAnotadosHome) || 0;
-  const hAgt  = parseFloat(homeStats.golesRecibidosHome) || 0;
-  const aFor  = parseFloat(awayStats.golesAnotadosAway) || 0;
-  const aAgt  = parseFloat(awayStats.golesRecibidosAway) || 0;
+  // Si la liga tiene menos de 5 partidos, usa los últimos 20 como base
+  const homeGames = homeStats
+    ? ((homeStats.victorias?.total || 0) + (homeStats.empates?.total || 0) + (homeStats.derrotas?.total || 0))
+    : 0;
+  const awayGames = awayStats
+    ? ((awayStats.victorias?.total || 0) + (awayStats.empates?.total || 0) + (awayStats.derrotas?.total || 0))
+    : 0;
+
+  const useHomeFallback = homeGames < 5 && homeFallback;
+  const useAwayFallback = awayGames < 5 && awayFallback;
+
+  const hSrc = useHomeFallback ? homeFallback : homeStats;
+  const aSrc = useAwayFallback ? awayFallback : awayStats;
+
+  const hFor  = parseFloat(hSrc?.golesAnotadosHome) || 0;
+  const hAgt  = parseFloat(hSrc?.golesRecibidosHome) || 0;
+  const aFor  = parseFloat(aSrc?.golesAnotadosAway) || 0;
+  const aAgt  = parseFloat(aSrc?.golesRecibidosAway) || 0;
 
   const probs = calcPoissonProbs(hFor, hAgt, aFor, aAgt);
 
@@ -1215,7 +1248,8 @@ async function sonnet(systemPrompt, userMessage) {
 
 const TIPSTER_SYSTEM = `Eres el mejor tipster profesional del mundo especializado en mercados de VALOR REAL.
 
-PICKS ABSOLUTAMENTE PROHIBIDAS - NUNCA las des:
+⛔ PICKS ABSOLUTAMENTE PROHIBIDAS - NUNCA las des:
+- Cualquier pick con stake 5 o menor — si no llega a 6/10, NO la publiques. Di "Sin picks de valor."
 - Gana el favorito obvio a cuota menor de 1.80 (gana Bayern, gana Madrid, gana City etc)
 - Over 2.5 en partidos del Real Madrid, Bayern, City, PSG - todo el mundo lo sabe
 - 1X2 simple a cuota menor de 1.75 - no es tipster, es obvio
@@ -1321,7 +1355,13 @@ REGLAS DE FORMATO:
 - El pie de página NUNCA debe decir de dónde vienen los datos
 - Si no hay picks válidos: escribe solo "⛔ Sin picks de valor hoy en este partido. Mejor no apostar."
 
-Responde en español. NUNCA inventes estadísticas. Usa SOLO los datos que recibes.`;
+Responde en español. NUNCA inventes estadísticas. Usa SOLO los datos que recibes.
+
+⛔ CONTEXTO PROHIBIDO — NUNCA inventes ni asumas:
+- NUNCA digas que un equipo es "anfitrión" o "sede" de un torneo a menos que el JSON lo diga explícitamente. El Mundial 2026 es en USA/Canadá/México — Qatar es PARTICIPANTE, NO sede.
+- NUNCA menciones tácticas, formaciones, entrenadores ni jugadores específicos a menos que los datos los incluyan.
+- NUNCA inventes contexto histórico ("debut memorable", "presión máxima", "favorito histórico") sin datos concretos.
+- Si los datos de "statsLocal" o "statsVisitante" tienen pocos partidos en la liga actual, usa "ultimosPartidosLocal" y "ultimosPartidosVisitante" para calcular promedios reales de los últimos 20 partidos entre todas las competiciones.`;
 
 const PICKS_HOY_SYSTEM = `${TIPSTER_SYSTEM}
 
@@ -1955,18 +1995,24 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     getH2H(homeId, awayId),
     getTeamStats(homeId, leagueId),
     getTeamStats(awayId, leagueId),
+    getTeamLastFixtures(homeId, 20),
+    getTeamLastFixtures(awayId, 20),
   ];
   if (isLive) requests.push(getFixtureStatistics(nextRaw.fixture.id));
 
-  const [h2hRes, homeStatsRes, awayStatsRes, liveStatsRes] = await Promise.allSettled(requests);
+  const [h2hRes, homeStatsRes, awayStatsRes, homeFixturesRes, awayFixturesRes, liveStatsRes] = await Promise.allSettled(requests);
 
-  const h2hData      = h2hRes.status === 'fulfilled'      ? h2hRes.value      : [];
-  const homeStatsData= homeStatsRes.status === 'fulfilled' ? homeStatsRes.value : null;
-  const awayStatsData= awayStatsRes.status === 'fulfilled' ? awayStatsRes.value : null;
-  const liveStatsData= (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
+  const h2hData          = h2hRes.status === 'fulfilled'          ? h2hRes.value          : [];
+  const homeStatsData    = homeStatsRes.status === 'fulfilled'    ? homeStatsRes.value    : null;
+  const awayStatsData    = awayStatsRes.status === 'fulfilled'    ? awayStatsRes.value    : null;
+  const homeLastFixtures = homeFixturesRes.status === 'fulfilled' ? homeFixturesRes.value : [];
+  const awayLastFixtures = awayFixturesRes.status === 'fulfilled' ? awayFixturesRes.value : [];
+  const liveStatsData    = (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
 
-  // Calcular probabilidades con modelo de Poisson
-  const probBlock = buildProbBlock(homeStatsData, awayStatsData, h2hData);
+  // Calcular probabilidades con modelo de Poisson (fallback a últimos 20 si liga tiene < 5 partidos)
+  const homeFallback = computeAvgFromFixtures(homeId, homeLastFixtures);
+  const awayFallback = computeAvgFromFixtures(awayId, awayLastFixtures);
+  const probBlock = buildProbBlock(homeStatsData, awayStatsData, h2hData, homeFallback, awayFallback);
 
   // Momentum y proyecciones en vivo
   const momentum   = isLive ? calcLiveMomentum(liveStatsData, homeTeam, awayTeam) : null;
@@ -2022,6 +2068,8 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     bttsEnH2H:      h2hData.filter(m => m.btts).length,
     statsLocal:     homeStatsData,
     statsVisitante: awayStatsData,
+    ultimosPartidosLocal:     homeLastFixtures,
+    ultimosPartidosVisitante: awayLastFixtures,
     estadisticasVivo: liveStatsData,
     ...(probBlock     && { probabilidadesCalculadas: probBlock }),
     ...(momentum      && { momentumEnVivo: momentum }),
