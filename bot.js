@@ -4237,6 +4237,13 @@ PROYECCIONES EN TIEMPO REAL:
   ⛔ PROHIBIDO recomendar Over X tarjetas si ya hay X-1 o X tarjetas — la cuota real sería < 1.25.
 - BTTS: si el equipo perdedor tiene que atacar → BTTS gana probabilidad real.
 
+⛔ COHERENCIA ENTRE PICKS — REGLA OBLIGATORIA:
+Antes de emitir los picks de un partido, verifica que no sean mutuamente excluyentes:
+- Si recomiendas BTTS Sí → NO puedes recomendar Under 0.5 o Under 1.5 goles restantes en el mismo partido (son incompatibles: BTTS requiere ≥2 goles, Under 0.5 requiere 0).
+- Si recomiendas Over X.5 goles → NO puedes recomendar Under X.5 o menos en el mismo partido.
+- Si recomiendas Victoria Local → NO recomiendes BTTS No si el visitante tiene que marcar para empatar.
+Si hay conflicto, elige el pick con mayor evidencia cuantitativa (Poisson + H2H) y descarta el otro.
+
 DIVERSIDAD DE PICKS EN VIVO — REGLA OBLIGATORIA:
 Máximo 1 pick de tarjetas y máximo 1 pick de corners en el análisis completo.
 Si analizas 3 partidos, no todos los picks pueden ser tarjetas/corners — debe haber variedad:
