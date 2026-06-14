@@ -4239,10 +4239,16 @@ PROYECCIONES EN TIEMPO REAL:
 
 ⛔ COHERENCIA ENTRE PICKS — REGLA OBLIGATORIA:
 Antes de emitir los picks de un partido, verifica que no sean mutuamente excluyentes:
-- Si recomiendas BTTS Sí → NO puedes recomendar Under 0.5 o Under 1.5 goles restantes en el mismo partido (son incompatibles: BTTS requiere ≥2 goles, Under 0.5 requiere 0).
+- Si recomiendas BTTS Sí → NO puedes recomendar Under 0.5 o Under 1.5 goles en el mismo partido (BTTS requiere ≥2 goles, Under 1.5 requiere ≤1 gol — imposibles juntos).
 - Si recomiendas Over X.5 goles → NO puedes recomendar Under X.5 o menos en el mismo partido.
 - Si recomiendas Victoria Local → NO recomiendes BTTS No si el visitante tiene que marcar para empatar.
 Si hay conflicto, elige el pick con mayor evidencia cuantitativa (Poisson + H2H) y descarta el otro.
+
+⛔ UNA SOLA FUENTE DE PROBABILIDAD POR PICK:
+El partido está en VIVO → la probabilidad oficial es la del modelo Poisson en tiempo real (lineasGolesVivo, lineasCornersVivo, lineasCardsVivo o probsVivo).
+NUNCA cites dos probabilidades distintas para el mismo mercado en el mismo pick.
+Si en el razonamiento dices "probabilidad X%" y en el aviso de riesgo dices "el modelo da Y%", estás mezclando fuentes — eso está PROHIBIDO.
+Regla: en partidos en vivo, usa ÚNICAMENTE la probabilidad del modelo en tiempo real. Las estadísticas históricas (H2H, forma reciente) son contexto narrativo, no una probabilidad alternativa a citar.
 
 DIVERSIDAD DE PICKS EN VIVO — REGLA OBLIGATORIA:
 Máximo 1 pick de tarjetas y máximo 1 pick de corners en el análisis completo.
