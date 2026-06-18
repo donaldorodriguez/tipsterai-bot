@@ -631,6 +631,35 @@ function normalizeTeamName(str) {
 // IDs directos para equipos que la API no encuentra bien por búsqueda de texto
 // Formato: 'alias normalizado' → teamId (número)
 const TEAM_ID_OVERRIDES = {
+  // ── Selecciones nacionales (IDs directos — evitan /teams?search= cuando la cuota es baja) ──
+  'uruguay':          7,
+  'colombia':         8,
+  'brasil':           6,
+  'brazil':           6,
+  'serbia':           14,
+  'south korea':      17,
+  'corea del sur':    17,
+  'corea sur':        17,
+  'korea del sur':    17,
+  'australia':        20,
+  'iran':             22,
+  'saudi arabia':     23,
+  'arabia saudi':     23,
+  'arabia saudita':   23,
+  'costa rica':       29,
+  'peru':             30,
+  'morocco':          31,
+  'marruecos':        31,
+  'maruecos':         31,
+  'japon':            12,
+  'japan':            12,
+  'panama':           11,
+  'panamá':           11,
+  'venezuela':        2379,
+  'paraguay':         2380,
+  'bolivia':          2381,
+  'ecuador':          2382,
+  'chile':            2383,
   // Ligue 1
   'monaco':           91,
   'mónaco':           91,
@@ -928,7 +957,7 @@ function scoreTeamResult(t, q, country = '', isNationalSearch = false) {
   const tname    = normalizeTeamName(t.team.name);
   const tcountry = (t.team.country || '').toLowerCase();
   const RESERVE  = /\b(ii|b|reserve|reserva|sub|youth|juvenil|u\d{2}|amateur|filial)\b/i;
-  const WOMEN    = /\b(women|femenin[ao]|ladies|femmes|damen|vrouwen|mujer|femenino|fem\.?)\b/i;
+  const WOMEN    = /\b(women|femenin[ao]|ladies|femmes|damen|vrouwen|mujer|femenino|fem\.?)\b| W$/i;
   const LOW_TIER = /\b(primera\s*[cd]|tercera|cuarta|regional|sunday|indoor|futsal|beach\s*soccer)\b/i;
   const CLUB_PREFIX = /^(fc|cf|ac|as|afc|rc|sc|bk|fk|sk|vfb?|sv|ss|us|ud|cd|sd|rcd|real\s|atletico\s|sporting\s|dynamo\s|dinamo\s)/i;
   const EURO_COUNTRIES = new Set(['switzerland','england','spain','italy','germany','france','netherlands','portugal','belgium','turkey','greece','russia','scotland','austria','sweden','norway','denmark','poland','ukraine','serbia','croatia','czech republic','romania','hungary','cyprus','israel','bulgaria','saudi arabia','egypt','south korea','japan','brazil','argentina','colombia','mexico','usa','united states','china','morocco','algeria','nigeria','south africa']);
