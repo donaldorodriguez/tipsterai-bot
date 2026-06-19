@@ -1557,61 +1557,41 @@ async function getFixtureInjuries(fixtureId) { return []; }
 
 async function getRealOdds(fixtureId) {
   try {
-    const { data } = await API.get('/odds/' + fixtureId);
-    const bookmakers = Array.isArray(data) ? data : (data.data || []);
-    if (!bookmakers.length) return null;
+    const { data } = await API.get('/odds', { params: { matchId: fixtureId } });
+    const items = data?.data;
+    if (!Array.isArray(items) || !items.length) return null;
+    const oddsArr = items[0]?.odds;
+    if (!Array.isArray(oddsArr) || !oddsArr.length) return null;
 
-    // Preferir Bet365, si no el primero disponible
-    const bk = bookmakers.find(b => /bet365/i.test(b.bookmaker || b.bookmakerName || b.name || ''))
-            || bookmakers[0];
-    const markets = bk.markets || bk.odds || [];
-    const result = {};
-
-    for (const mkt of markets) {
-      const mktName = (mkt.name || mkt.marketName || '').toLowerCase();
-      const outcomes = mkt.outcomes || mkt.selections || [];
-
-      if (/match winner|1x2|full.?time result/i.test(mktName)) {
-        for (const o of outcomes) {
-          const n = (o.name || o.outcomeName || '').toLowerCase();
-          const p = parseFloat(o.price || o.odd || o.value || 0);
-          if (!p) continue;
-          if (/^home$|^1$|^local/.test(n))   result.homeWin = p;
-          else if (/^draw$|^x$|empate/.test(n)) result.draw = p;
-          else if (/^away$|^2$|visit/.test(n))  result.awayWin = p;
-        }
-      }
-      if (/goals.*(over|under)|over.*under.*2\.5/i.test(mktName)) {
-        for (const o of outcomes) {
-          const n = (o.name || '').toLowerCase();
-          const p = parseFloat(o.price || o.odd || 0);
-          if (!p) continue;
-          if (/over.*2\.5|2\.5.*over/.test(n))  result.over25 = p;
-          if (/under.*2\.5|2\.5.*under/.test(n)) result.under25 = p;
-          if (/over.*3\.5|3\.5.*over/.test(n))  result.over35 = p;
-        }
-      }
-      if (/both teams.*score|btts|gg/i.test(mktName)) {
-        for (const o of outcomes) {
-          const n = (o.name || '').toLowerCase();
-          const p = parseFloat(o.price || o.odd || 0);
-          if (!p) continue;
-          if (/yes|si$|sí/.test(n)) result.btts = p;
-          if (/^no/.test(n))         result.noBtts = p;
-        }
-      }
-      if (/double chance/i.test(mktName)) {
-        for (const o of outcomes) {
-          const n = (o.name || '').toLowerCase();
-          const p = parseFloat(o.price || o.odd || 0);
-          if (!p) continue;
-          if (/1x|home.*draw/.test(n))  result.dc_1X = p;
-          if (/x2|draw.*away/.test(n))  result.dc_X2 = p;
-          if (/12|home.*away/.test(n))  result.dc_12 = p;
-        }
+    // Promediar cuotas de todas las casas por mercado+resultado
+    const totals = {}, counts = {};
+    for (const entry of oddsArr) {
+      const mkt = entry.market;
+      for (const v of (entry.values || [])) {
+        const key = `${mkt}||${v.value}`;
+        totals[key] = (totals[key] || 0) + (v.odd || 0);
+        counts[key] = (counts[key] || 0) + 1;
       }
     }
+    const avg = (mkt, val) => {
+      const key = `${mkt}||${val}`;
+      return counts[key] ? +(totals[key] / counts[key]).toFixed(2) : null;
+    };
 
+    const result = {};
+    result.homeWin = avg('Full Time Result', 'Home');
+    result.draw    = avg('Full Time Result', 'Draw');
+    result.awayWin = avg('Full Time Result', 'Away');
+    result.over25  = avg('Total Goals 2.5', 'Over');
+    result.under25 = avg('Total Goals 2.5', 'Under');
+    result.over35  = avg('Total Goals 3.5', 'Over');
+    result.under35 = avg('Total Goals 3.5', 'Under');
+    result.over15  = avg('Total Goals 1.5', 'Over');
+    result.under15 = avg('Total Goals 1.5', 'Under');
+    result.btts    = avg('Both Teams To Score', 'Yes');
+    result.noBtts  = avg('Both Teams To Score', 'No');
+
+    Object.keys(result).forEach(k => { if (!result[k]) delete result[k]; });
     if (!result.homeWin && !result.over25) return null;
     result._source = 'highlightly';
     return result;
@@ -4450,10 +4430,18 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       })
       .filter(Boolean);
 
-    const combined = [...withOdds, ...withImplied].slice(0, 40);
-    selected = combined.map(x => x.fixture);
-    oddsPreFetched = new Map(combined.map(x => [x.fixture.fixtureId, x.odds]));
-    console.log(`📊 ${withOdds.length} reales + ${withImplied.length} implícitas = ${combined.length} total`);
+    const combined = [...withOdds, ...withImplied];
+
+    if (combined.length === 0) {
+      // Sin cuotas ni predicciones: correr con modelo Poisson puro sobre el pool
+      selected = oddsPool.slice(0, 40);
+      oddsPreFetched = new Map();
+      console.log(`⚠️ Sin cuotas ni predicciones — modelo matemático puro para ${selected.length} partidos`);
+    } else {
+      selected = combined.slice(0, 40).map(x => x.fixture);
+      oddsPreFetched = new Map(combined.slice(0, 40).map(x => [x.fixture.fixtureId, x.odds]));
+      console.log(`📊 ${withOdds.length} reales + ${withImplied.length} implícitas = ${combined.length} total`);
+    }
   }
 
   await bot.sendMessage(chatId, `📊 ${withOdds.length} cuotas recopiladas | Analizando ${selected.length} partidos con el motor matemático...`);
@@ -4859,8 +4847,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     console.log(`📡 Motor: 0 picks válidos (sinCuotas=${sinCuotas}, partidos=${enriched.length}) — sin picks hoy`);
 
     if (sinCuotas) {
-      // Sin cuotas reales: no hay forma de calcular EV — inténtalo más tarde
-      picksText = `⏳ *Las cuotas del día aún no están disponibles en los mercados.*\n\nEl motor necesita cuotas reales para calcular valor esperado. Esto es normal en las primeras horas del día.\n\n📲 Vuelve a pedir los picks en *1-2 horas* cuando las casas hayan publicado sus líneas, o pide el análisis de un partido específico: _"analiza Real Madrid vs Barcelona"_`;
+      picksText = `⏳ *El análisis no encontró picks de valor suficiente hoy.*\n\nEsto puede ocurrir cuando los partidos del día aún no tienen información completa disponible. Prueba en unas horas o pide el análisis de un partido específico: _"analiza Real Madrid vs Barcelona"_`;
     } else {
       // Hay cuotas pero ningún mercado superó los umbrales de EV — honestidad total
       picksText = `🔍 *El motor analizó ${enriched.length} partidos con cuotas reales y no encontró valor matemático suficiente hoy.*\n\nEsto significa que las casas tienen precios correctos o ligeramente favorables para ellas en todos los mercados disponibles. Mejor no apostar que apostar sin ventaja real.\n\n💡 Puedes pedir el análisis de un partido específico: _"analiza [Equipo A] vs [Equipo B]"_\n\n📲 O intenta de nuevo más tarde si los partidos del día aún no tienen cuotas finales.`;
