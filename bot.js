@@ -5132,10 +5132,9 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   );
 
   // Ligas europeas (CL/EL/ECL): también buscar stats de liga doméstica para mejor baseline
-  const DOMESTIC_LEAGUE = { 2: 140, 3: 140, 135: 135, 78: 78, 61: 61, 94: 94 };
-  const isEuropean      = [2, 3, 848].includes(leagueId);
-  // Mundial y competiciones de selecciones nacionales
-  const NATIONAL_LEAGUES_SET = new Set([1, 4, 5, 6, 7, 8, 10, 29, 32]);
+  const isEuropean      = [2486, 3337, 722432].includes(leagueId);
+  // Mundial y competiciones de selecciones nacionales (IDs de Highlightly)
+  const NATIONAL_LEAGUES_SET = new Set([1635, 8443, 4188, 5039, 29718, 14400]);
   const isNationalTeamMatch  = NATIONAL_LEAGUES_SET.has(leagueId);
 
   const fixtureDate = nextRaw.fixture.date.split('T')[0];
@@ -5160,8 +5159,8 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   }
   if (isEuropean) {
     requests.push(
-      Promise.any([140,78,39,135,61,88,94].map(lid => getTeamStats(homeId, lid).then(s => s ? s : Promise.reject()))).catch(() => null),
-      Promise.any([140,78,39,135,61,88,94].map(lid => getTeamStats(awayId, lid).then(s => s ? s : Promise.reject()))).catch(() => null)
+      Promise.any([119924,67162,33973,115669,52695,75672,80778].map(lid => getTeamStats(homeId, lid).then(s => s ? s : Promise.reject()))).catch(() => null),
+      Promise.any([119924,67162,33973,115669,52695,75672,80778].map(lid => getTeamStats(awayId, lid).then(s => s ? s : Promise.reject()))).catch(() => null)
     );
   }
   // Para selecciones nacionales NO se disparan requests extra aquí:
@@ -6056,19 +6055,19 @@ async function handleRachas(chatId, intent) {
 // ─── Rachas por Fecha ─────────────────────────────────────────────────────────
 // Ligas incluidas en "rachas de hoy/mañana" (top-tier para mantener velocidad)
 const RACHAS_FECHA_LEAGUES = new Set([
-  39,40,   // Premier League + Championship
-  140,141, // La Liga + LaLiga2
-  135,136, // Serie A + Serie B
-  78,79,   // Bundesliga + 2.Bundesliga
-  61,62,   // Ligue 1 + Ligue 2
-  2,3,848, // UCL + UEL + UECL
-  88,94,   // Eredivisie + Primeira Liga
-  71,      // Brasileirao
-  11,13,   // Copa Sudamericana (11) + Copa Libertadores (13)
-  128,     // Liga Argentina
-  239,     // Liga Betplay Colombia
-  262,     // Liga MX
-  203,     // Süper Lig
+  33973,34824,   // Premier League + Championship
+  119924,120775, // La Liga + LaLiga2
+  115669,116520, // Serie A + Serie B
+  67162,68013,   // Bundesliga + 2.Bundesliga
+  52695,53546,   // Ligue 1 + Ligue 2
+  2486,3337,722432, // UCL + UEL + UECL
+  75672,80778,   // Eredivisie + Primeira Liga
+  61205,         // Brasileirao
+  10145,11847,   // Copa Sudamericana + Copa Libertadores
+  109712,        // Liga Argentina
+  204173,        // Liga Betplay Colombia
+  223746,        // Liga MX
+  173537,        // Süper Lig
 ]);
 
 // Simple in-memory cache for getTeamLastFixtures (TTL 4h)
