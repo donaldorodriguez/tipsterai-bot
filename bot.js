@@ -21,238 +21,230 @@ const bot = new TelegramBot(process.env.TELEGRAM_TOKEN, {
 });
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 
-// ─── API-Football ─────────────────────────────────────────────────────────────
+// ─── Highlightly API ──────────────────────────────────────────────────────────
 
 const API = axios.create({
-  baseURL: 'https://v3.football.api-sports.io',
-  headers: { 'x-apisports-key': process.env.APIFOOTBALL_KEY },
+  baseURL: 'https://soccer.highlightly.net',
+  headers: { 'x-rapidapi-key': process.env.HIGHLIGHTLY_KEY },
   timeout: 15000,
 });
 
-// Logging interceptor — every API call is logged
 API.interceptors.request.use(req => {
   const params = new URLSearchParams(req.params || {}).toString();
   console.log(`🔍 API: ${req.baseURL}${req.url}${params ? '?' + params : ''}`);
   return req;
 });
 API.interceptors.response.use(res => {
-  console.log(`📊 Respuesta: results=${res.data.results ?? '?'} errors=${JSON.stringify(res.data.errors || [])}`);
+  const n = Array.isArray(res.data)
+    ? res.data.length
+    : (res.data?.data?.length ?? res.data?.pagination?.totalCount ?? '?');
+  console.log(`📊 Respuesta: results=${n}`);
   return res;
 });
+
+// ─── Highlightly helpers ──────────────────────────────────────────────────────
+
+const HL_STATUS = {
+  'Not started':     'NS',
+  'First half':      '1H',
+  'Half time':       'HT',
+  'Second half':     '2H',
+  'Extra time':      'ET',
+  'Penalties':       'P',
+  'Break time':      'BT',
+  'Finished':        'FT',
+  'Finished (AET)':  'AET',
+  'Finished (PEN)':  'PEN',
+  'Postponed':       'PST',
+  'Cancelled':       'CANC',
+  'Suspended':       'SUSP',
+  'Awarded':         'AWD',
+  'Walkover':        'WO',
+  'Abandoned':       'ABD',
+};
+
+const LIVE_DESCS     = new Set(['First half', 'Half time', 'Second half', 'Extra time', 'Penalties', 'Break time']);
+const FINISHED_DESCS = new Set(['Finished', 'Finished (AET)', 'Finished (PEN)']);
+
+function parseHLScore(scoreStr) {
+  if (!scoreStr) return { home: null, away: null };
+  const parts = scoreStr.split(' - ');
+  return { home: parseInt(parts[0]) || 0, away: parseInt(parts[1]) || 0 };
+}
+
+// Convert Highlightly match → API-Football-compatible shape
+function hlToApif(m) {
+  const score = parseHLScore(m.state?.score?.current);
+  return {
+    fixture: {
+      id: m.id,
+      date: m.date,
+      status: { short: HL_STATUS[m.state?.description] || 'NS', elapsed: m.state?.clock || null },
+      referee: null,
+      venue: null,
+    },
+    league: { id: m.league.id, name: m.league.name, country: m.country?.name || 'World', round: m.league?.round || null },
+    teams: {
+      home: { id: m.homeTeam.id, name: m.homeTeam.name },
+      away: { id: m.awayTeam.id, name: m.awayTeam.name },
+    },
+    goals: { home: score.home, away: score.away },
+    score: { halftime: { home: null, away: null } },
+  };
+}
 
 // ─── League config ────────────────────────────────────────────────────────────
 
 const LEAGUE_SEASONS = {
-  // Europa — Top 5
-  39:2025, 140:2025, 135:2025, 78:2025, 61:2025,
-  // Europa — Segundas divisiones top 5
-  40:2025, 141:2025, 136:2025, 79:2025, 62:2025,
-  // Europa — Copas y ligas medianas
-  2:2025,  3:2025,   848:2025, 88:2025, 89:2025,
-  94:2025, 95:2025,  // Portugal 1a y 2a
-  179:2025,180:2025, // Scotland 1a y 2a
-  144:2025,169:2025, // Belgium
-  197:2025,          // Greece Super League 1
-  203:2025,          // Turkey Süper Lig
-  207:2025,          // Switzerland Super League
-  210:2025,          // Croatia HNL
-  218:2025,          // Austria Bundesliga
-  235:2025,          // Russia Premier Liga
-  333:2025,          // Ukraine Premier League
-  98:2025,           // Japan J League
-  // Europa — Más ligas
-  119:2025,          // Denmark Superliga
-  106:2025,          // Poland Ekstraklasa
-  283:2025,          // Romania Liga I
-  345:2025,          // Czech Fortuna Liga
-  286:2025,          // Serbia Super Liga
-  172:2025,          // Bulgaria First League
-  113:2026,          // Sweden Allsvenskan
-  // Medio Oriente / Asia / Africa
-  307:2025,          // Saudi Pro League
-  233:2025,          // Egypt Premier League
-  318:2025,          // Cyprus First Division
-  292:2026,          // South Korea K League 1
-  // Sudamérica
-  11:2026, 13:2026, 71:2026, 128:2026, 239:2026,  // 11=Sudamericana, 13=Libertadores
-  262:2026,253:2026, 72:2026, 66:2026, 129:2026,
-  263:2026,240:2026, 65:2026,
-  // Colombia
-  239:2026,          // Liga BetPlay Colombia
-  // Resto
-  671:2025,          // Azerbaijan Premier League
-  103:2026,          // Norway Eliteserien
-  357:2025,          // Ireland Premier Division
-  358:2025,          // Ireland First Division
-  // Competiciones internacionales
-  4:2025,  5:2025,   480:2025,
-  10:2026, 1:2026,   6:2026,  7:2026,  8:2026,
-  29:2026, 32:2026,
+  // Top 5 Europe
+  33973:2025, 119924:2025, 115669:2025, 67162:2025, 52695:2025,
+  // European 2nd tier
+  34824:2025, 120775:2025, 116520:2025, 68013:2025, 53546:2025,
+  // European club competitions
+  2486:2025, 3337:2025, 722432:2025,
+  // Other European leagues
+  75672:2025, 80778:2025, 153113:2025, 123328:2025, 168431:2025,
+  176941:2025, 179494:2025, 186302:2025, 102053:2025, 90990:2025,
+  96947:2025, 88437:2025, 244170:2025, 271402:2025,
+  // International
+  1635:2026, 8443:2024, 4188:2024, 5039:2024, 29718:2026, 14400:2025,
+  // South American club competitions
+  11847:2025, 10145:2025,
+  // South American leagues
+  61205:2025, 62056:2025, 109712:2025,
+  228852:2025, 230554:2025,
+  204173:2025, 205024:2025, 205875:2025,
+  226299:2025, 206726:2025, 255233:2025,
+  293528:2025, 213534:2025, 215236:2025,
+  239915:2025, 1049216:2025,
+  // CONCACAF
+  216087:2025, 223746:2025, 224597:2025,
+  // Asia / Africa
+  262041:2025, 84182:2025, 249276:2025, 199067:2025,
+  173537:2025, 304591:2025, 305442:2025,
 };
 
-const LEAGUE_IDS = new Set([
-  // Top 5 Europa + segundas
-  39,40,140,141,135,136,78,79,61,62,
-  // Otras ligas europeas
-  2,3,848,88,89,94,95,179,180,144,169,197,
-  203,207,210,218,235,333, // Turkey,Switzerland,Croatia,Austria,Russia,Ukraine
-  98,119,106,283,345,286,172,113, // Japan,Denmark,Poland,Romania,Czech,Serbia,Bulgaria,Sweden
-  // Oriente Medio / Asia / Africa
-  307,233,318,292,
-  // Sudamérica
-  11,13,71,128,239,262,253,72,66,129,263,240,65,  // 11=Sudamericana, 13=Libertadores
-  // Otros
-  671,103,357,358,
-  // Competiciones internacionales
-  1,4,5,6,7,8,10,29,32,480,
-]);
+const LEAGUE_IDS = new Set(Object.keys(LEAGUE_SEASONS).map(Number));
 
 const LEAGUE_MAP = {
-  // Top 5 Europa
-  39: { name:'Premier League',     country:'England'     },
-  140:{ name:'LaLiga',             country:'Spain'       },
-  135:{ name:'Serie A',            country:'Italy'       },
-  78: { name:'Bundesliga',         country:'Germany'     },
-  61: { name:'Ligue 1',            country:'France'      },
-  // Top 5 segundas divisiones
-  40: { name:'Championship',       country:'England'     },
-  141:{ name:'LaLiga2',            country:'Spain'       },
-  136:{ name:'Serie B',            country:'Italy'       },
-  79: { name:'2.Bundesliga',       country:'Germany'     },
-  62: { name:'Ligue 2',            country:'France'      },
-  // Copas europeas
-  2:  { name:'Champions League',   country:'Europe'      },
-  3:  { name:'Europa League',      country:'Europe'      },
-  848:{ name:'Conference League',  country:'Europe'      },
-  // Ligas europeas medianas (IDs verificados con API-Football)
-  88: { name:'Eredivisie',         country:'Netherlands' },
-  89: { name:'Eerste Divisie',     country:'Netherlands' },
-  94: { name:'Primeira Liga',      country:'Portugal'    },
-  95: { name:'Segunda Liga',       country:'Portugal'    },
-  179:{ name:'Scottish Premier',   country:'Scotland'    },
-  180:{ name:'Scottish Championship', country:'Scotland' },
-  144:{ name:'Jupiler Pro League', country:'Belgium'     },
-  169:{ name:'Jupiler Pro',        country:'Belgium'     },
-  197:{ name:'Super League 1',     country:'Greece'      },
-  203:{ name:'Süper Lig',          country:'Turkey'      },  // ← ID correcto Turkey
-  207:{ name:'Super League',       country:'Switzerland' }, // ← ID correcto Suiza
-  210:{ name:'HNL',                country:'Croatia'     }, // ← ID correcto Croacia
-  218:{ name:'Bundesliga',         country:'Austria'     }, // ← ID correcto Austria
-  235:{ name:'Premier Liga',       country:'Russia'      },
-  333:{ name:'Premier League',     country:'Ukraine'     }, // ← ID correcto Ucrania
-  // Ligas europeas adicionales (verificadas)
-  119:{ name:'Superliga',          country:'Denmark'     },
-  106:{ name:'Ekstraklasa',        country:'Poland'      },
-  283:{ name:'Liga I',             country:'Romania'     },
-  345:{ name:'Fortuna Liga',       country:'Czech Rep.'  },
-  286:{ name:'Super Liga',         country:'Serbia'      },
-  172:{ name:'First League',       country:'Bulgaria'    },
-  113:{ name:'Allsvenskan',        country:'Sweden'      },
-  103:{ name:'Eliteserien',        country:'Norway'      },
-  98: { name:'J League',           country:'Japan'       },
-  // Oriente Medio / Asia / Africa (IDs verificados)
-  307:{ name:'Pro League',         country:'Saudi Arabia'},// ← ID correcto Saudi
-  233:{ name:'Premier League',     country:'Egypt'       }, // ← ID correcto Egypt
-  318:{ name:'First Division',     country:'Cyprus'      }, // ← ID correcto Cyprus
-  292:{ name:'K League 1',         country:'South Korea' }, // ← ID correcto Korea
-  // Sudamérica
-  11: { name:'Sudamericana',       country:'South Am.'   },  // ID real API-Football
-  13: { name:'Libertadores',       country:'South Am.'   },  // ID real API-Football
-  71: { name:'Brasileirao',        country:'Brazil'      },
-  72: { name:'Brasileirao B',      country:'Brazil'      },
-  128:{ name:'Liga Argentina',     country:'Argentina'   },
-  129:{ name:'Primera B Argentina',country:'Argentina'   },
-  239:{ name:'Liga BetPlay',       country:'Colombia'    },
-  240:{ name:'Torneo Águila',      country:'Colombia'    },
-  66: { name:'Liga Colombia B',    country:'Colombia'    },
-  262:{ name:'Liga MX',            country:'Mexico'      },
-  263:{ name:'Ascenso MX',         country:'Mexico'      },
-  253:{ name:'MLS',                country:'USA'         },
-  // Competiciones internacionales
-  1:  { name:'World Cup',          country:'Mundial'     },
-  4:  { name:'Euro Championship',  country:'Europe'      },
-  5:  { name:'Nations League',     country:'Europe'      },
-  6:  { name:'WC Qualifiers',      country:'Mundial'     },
-  7:  { name:'AFC Asian Cup',      country:'Asia'        },
-  8:  { name:'Copa Africa',        country:'Africa'      },
-  10: { name:'Amistosos Int.',     country:'Mundial'     },
-  29: { name:'Nations League Play',country:'Europe'      },
-  32: { name:'Eliminatorias CONMEBOL', country:'South Am.'},
-  480:{ name:'Copa America',       country:'South Am.'   },
-  // Otros
-  671:{ name:'Premyer Liqa',       country:'Azerbaijan'  },
-  357:{ name:'Premier Division',   country:'Ireland'     },
-  358:{ name:'First Division',     country:'Ireland'     },
+  1635:  { name:'World Cup',          country:'World'       },
+  33973: { name:'Premier League',     country:'England'     },
+  119924:{ name:'LaLiga',             country:'Spain'       },
+  115669:{ name:'Serie A',            country:'Italy'       },
+  67162: { name:'Bundesliga',         country:'Germany'     },
+  52695: { name:'Ligue 1',            country:'France'      },
+  2486:  { name:'Champions League',   country:'Europe'      },
+  3337:  { name:'Europa League',      country:'Europe'      },
+  722432:{ name:'Conference League',  country:'Europe'      },
+  11847: { name:'Libertadores',       country:'South Am.'   },
+  10145: { name:'Sudamericana',       country:'South Am.'   },
+  61205: { name:'Brasileirao',        country:'Brazil'      },
+  204173:{ name:'Liga BetPlay',       country:'Colombia'    },
+  109712:{ name:'Liga Argentina',     country:'Argentina'   },
+  223746:{ name:'Liga MX',            country:'Mexico'      },
+  216087:{ name:'MLS',                country:'USA'         },
+  75672: { name:'Eredivisie',         country:'Netherlands' },
+  80778: { name:'Primeira Liga',      country:'Portugal'    },
+  173537:{ name:'Super Lig',          country:'Turkey'      },
+  262041:{ name:'Saudi Pro League',   country:'Saudi Arabia'},
+  123328:{ name:'Jupiler Pro League', country:'Belgium'     },
+  168431:{ name:'Super League 1',     country:'Greece'      },
+  199067:{ name:'Egyptian Premier',   country:'Egypt'       },
+  249276:{ name:'K League 1',         country:'South Korea' },
+  84182: { name:'J1 League',          country:'Japan'       },
+  153113:{ name:'Scottish Prem.',     country:'Scotland'    },
+  4188:  { name:'UEFA Euro',          country:'Europe'      },
+  5039:  { name:'Nations League',     country:'Europe'      },
+  8443:  { name:'Copa America',       country:'South Am.'   },
+  205024:{ name:'Primera B Colombia', country:'Colombia'    },
+  34824: { name:'Championship',       country:'England'     },
+  120775:{ name:'LaLiga2',            country:'Spain'       },
+  116520:{ name:'Serie B',            country:'Italy'       },
+  68013: { name:'2.Bundesliga',       country:'Germany'     },
+  53546: { name:'Ligue 2',            country:'France'      },
+  62056: { name:'Brasileirao B',      country:'Brazil'      },
+  224597:{ name:'Liga Expansión MX',  country:'Mexico'      },
+  88437: { name:'Eliteserien',        country:'Norway'      },
+  271402:{ name:'Primera División',   country:'Cyprus'      },
+  29718: { name:'Clasif. Mundial',    country:'South Am.'   },
+  228852:{ name:'Apertura Uruguay',   country:'Uruguay'     },
+  230554:{ name:'Clausura Uruguay',   country:'Uruguay'     },
+  226299:{ name:'Liga Chilena',       country:'Chile'       },
+  206726:{ name:'LigaPro Ecuador',    country:'Ecuador'     },
+  255233:{ name:'Liga Venezuela',     country:'Venezuela'   },
+  213534:{ name:'Apertura Paraguay',  country:'Paraguay'    },
+  215236:{ name:'Clausura Paraguay',  country:'Paraguay'    },
+  239915:{ name:'Liga 1 Perú',        country:'Peru'        },
+  293528:{ name:'Liga Boliviana',     country:'Bolivia'     },
+  205875:{ name:'Copa Colombia',      country:'Colombia'    },
+  176941:{ name:'Swiss SL',           country:'Switzerland' },
+  179494:{ name:'HNL Croatia',        country:'Croatia'     },
+  186302:{ name:'Bundesliga AT',      country:'Austria'     },
+  102053:{ name:'Superliga DK',       country:'Denmark'     },
+  90990: { name:'Ekstraklasa',        country:'Poland'      },
+  96947: { name:'Allsvenskan',        country:'Sweden'      },
+  244170:{ name:'Super Liga',         country:'Serbia'      },
+  304591:{ name:'League of Ireland',  country:'Ireland'     },
+  305442:{ name:'First Division IE',  country:'Ireland'     },
+  14400: { name:'CONCACAF CL',        country:'CONCACAF'    },
+  1049216:{ name:'Copa de la Liga PE',country:'Peru'        },
 };
 
 // Maps user-written league names → league ID
 const LEAGUE_NAME_TO_ID = {
-  'bundesliga':78, '2.bundesliga':79, 'segunda bundesliga':79,
-  'premier league':39, 'premier':39, 'epl':39,
-  'laliga':140, 'la liga':140, 'primera division':140,
-  'laliga2':141, 'segunda division':141,
-  'serie a':135, 'serie b':136,
-  'ligue 1':61, 'ligue1':61, 'ligue 2':62, 'ligue2':62,
-  'champions league':2, 'champions':2, 'ucl':2, 'champions league':2,
-  'europa league':3, 'europa':3, 'uel':3,
-  'conference league':848, 'conference':848,
-  'libertadores':13, 'copa libertadores':13,
-  'sudamericana':11, 'copa sudamericana':11,
-  'brasileirao':71, 'serie a brasileira':71, 'seriea brasileira':71,
-  'brasil':71, 'brazil':71, 'liga brasil':71, 'liga brazil':71,
-  'serie a brasil':71, 'seriea brasil':71, 'série a brasil':71,
-  'brasileirao b':72, 'serie b brasil':72, 'serieb brasil':72,
-  'liga betplay':239, 'primera a':239, 'liga colombia':239, 'betplay':239,
-  'liga colombia b':66, 'primera b':240, 'torneo aguila':240, 'torneo águila':240,
-  'liga argentina':128, 'primera division argentina':128, 'primera b argentina':129,
-  'liga mx':262, 'ligamx':262, 'ascenso mx':263,
-  'mls':253,
-  'eredivisie':88, 'eerste divisie':89,
-  'primeira liga':94, 'liga nos':94,
-  // Turkey — ID correcto 203
-  'super lig':203, 'superlig':203, 'turquia':203, 'turkey':203, 'liga turca':203, 'tff':203, 'turkiye':203,
-  // Saudi Arabia — ID correcto 307
-  'saudi pro league':307, 'saudi league':307, 'arabia saudita':307, 'saudi':307,
-  // Suiza — ID correcto 207
-  'switzerland':207, 'suiza':207, 'super league suiza':207, 'swiss super league':207,
-  // Croacia — ID correcto 210
-  'croacia':210, 'croatia':210, 'hnl':210, 'liga croacia':210,
-  // Austria — ID correcto 218
-  'austria':218, 'austria bundesliga':218, 'liga austria':218,
-  // Ucrania — ID correcto 333
-  'ucrania':333, 'ukraine':333, 'liga ucrania':333, 'premier league ucrania':333,
-  // Egipto — ID correcto 233
-  'liga egipto':233, 'egypt':233, 'egipto':233,
-  // Chipre — ID correcto 318
-  'chipre':318, 'primera division chipre':318, 'primera división chipre':318, 'cyprus':318,
-  // Corea — ID correcto 292
-  'k league':292, 'k-league':292, 'k league 1':292, 'corea':292, 'south korea':292,
-  'j league':98, 'j1 league':98,
-  'scottish premier':179, 'scottish premiership':179, 'scotland':179,
-  'scottish championship':180,
-  'championship':40,
-  // Nuevas ligas europeas
-  'dinamarca':119, 'denmark':119, 'superliga dinamarca':119, 'danish superliga':119,
-  'polonia':106, 'poland':106, 'ekstraklasa':106,
-  'rumania':283, 'romania':283, 'liga i':283, 'liga rumania':283,
-  'republica checa':345, 'czech':345, 'fortuna liga':345, 'czech liga':345,
-  'serbia':286, 'super liga serbia':286,
-  'bulgaria':172, 'liga bulgaria':172, 'first league bulgaria':172, 'primera bulgaria':172,
-  'suecia':113, 'sweden':113, 'allsvenskan':113,
-  // Irlanda
-  'irlanda':357, 'ireland':357, 'liga irlanda':357, 'league of ireland':357,
-  'premier division irlanda':357, 'ireland premier':357, 'liga de irlanda':357,
-  'primera division irlanda':357, 'first division irlanda':358, 'ireland first':358,
-  'segunda liga portugal':95, 'liga portugal 2':95,
-  'segunda liga':95,
-  'noruega':103, 'eliteserien':103, 'norway':103,
-  'azerbaiyan':671, 'azerbaiyán':671, 'azerbaijan':671, 'liga azerbaiyan':671, 'liga azerbaiyán':671,
-  'amistosos':10, 'amistoso':10, 'amistosos internacionales':10, 'friendly':10, 'friendlies':10, 'internacional':10,
-  'world cup':1, 'mundial':1, 'copa mundial':1,
-  'eliminatorias':6, 'qualifiers':6, 'wc qualifiers':6, 'clasificatorias':6,
-  'eliminatorias conmebol':32, 'conmebol':32, 'eliminatorias sudamericanas':32,
-  'copa africa':8, 'afcon':8,
-  'asian cup':7, 'copa asia':7,
+  'fifa world cup':1635, 'world cup':1635, 'mundial':1635, 'copa del mundo':1635,
+  'bundesliga':67162, '2.bundesliga':68013, 'segunda bundesliga':68013,
+  'premier league':33973, 'premier':33973, 'epl':33973,
+  'laliga':119924, 'la liga':119924, 'primera division':119924,
+  'laliga2':120775, 'segunda division':120775,
+  'serie a':115669, 'serie b':116520,
+  'ligue 1':52695, 'ligue1':52695, 'ligue 2':53546, 'ligue2':53546,
+  'champions league':2486, 'champions':2486, 'ucl':2486,
+  'europa league':3337, 'europa':3337, 'uel':3337,
+  'conference league':722432, 'conference':722432,
+  'libertadores':11847, 'copa libertadores':11847,
+  'sudamericana':10145, 'copa sudamericana':10145,
+  'brasileirao':61205, 'serie a brasileira':61205, 'seriea brasileira':61205,
+  'brasil':61205, 'brazil':61205, 'liga brasil':61205, 'liga brazil':61205,
+  'serie a brasil':61205, 'seriea brasil':61205, 'série a brasil':61205,
+  'brasileirao b':62056, 'serie b brasil':62056, 'serieb brasil':62056,
+  'liga betplay':204173, 'primera a':204173, 'liga colombia':204173, 'betplay':204173,
+  'liga colombia b':205024, 'primera b colombia':205024, 'torneo aguila':205024, 'torneo águila':205024,
+  'liga argentina':109712, 'primera division argentina':109712,
+  'liga mx':223746, 'ligamx':223746, 'ascenso mx':224597, 'liga expansion':224597,
+  'mls':216087,
+  'eredivisie':75672,
+  'primeira liga':80778, 'liga nos':80778,
+  'super lig':173537, 'superlig':173537, 'turquia':173537, 'turkey':173537, 'liga turca':173537, 'tff':173537, 'turkiye':173537,
+  'saudi pro league':262041, 'saudi league':262041, 'arabia saudita':262041, 'saudi':262041,
+  'jupiler pro league':123328, 'jupiler':123328,
+  'super league grecia':168431, 'super league':168431,
+  'liga egipto':199067, 'egypt':199067, 'egipto':199067,
+  'k league':249276, 'k-league':249276, 'k league 1':249276, 'corea':249276, 'south korea':249276,
+  'j league':84182, 'j1 league':84182,
+  'scottish premier':153113, 'scottish premiership':153113, 'scotland':153113,
+  'championship':34824,
+  'euro':4188, 'euro championship':4188, 'eurocopa':4188,
+  'nations league':5039, 'uefa nations league':5039,
+  'copa america':8443,
+  'chipre':271402, 'primera division chipre':271402, 'primera división chipre':271402, 'cyprus':271402,
+  'noruega':88437, 'eliteserien':88437, 'norway':88437,
+  'clasificatorias':29718, 'eliminatorias':29718, 'clasif mundial':29718,
+  'suecia':96947, 'sweden':96947, 'allsvenskan':96947,
+  'dinamarca':102053, 'denmark':102053, 'superliga dinamarca':102053, 'danish superliga':102053,
+  'polonia':90990, 'poland':90990, 'ekstraklasa':90990,
+  'serbia':244170, 'super liga serbia':244170,
+  'suiza':176941, 'switzerland':176941, 'swiss super league':176941,
+  'croacia':179494, 'croatia':179494, 'hnl':179494,
+  'austria':186302, 'austria bundesliga':186302,
+  'irlanda':304591, 'ireland':304591, 'liga irlanda':304591, 'league of ireland':304591,
+  'uruguay':228852, 'apertura uruguay':228852, 'clausura uruguay':230554,
+  'chile':226299, 'liga chilena':226299,
+  'ecuador':206726, 'ligapro':206726,
+  'venezuela':255233, 'liga venezolana':255233,
+  'paraguay':213534, 'apertura paraguay':213534, 'clausura paraguay':215236,
+  'peru':239915, 'liga 1 peru':239915, 'liga1 peru':239915,
+  'bolivia':293528, 'liga boliviana':293528,
 };
 
 function findLeagueId(name) {
@@ -277,92 +269,26 @@ function findLeagueId(name) {
 // ─── League priority for sorting ─────────────────────────────────────────────
 
 const LEAGUE_PRIORITY = {
-  // ── TIER 1: Competiciones internacionales top (prioridad 95–105) ─────────────
-  1:  105,  // World Cup
-  6:   98,  // WC Qualifiers
-  32:  97,  // Eliminatorias CONMEBOL
-  2:  100,  // Champions League
-  3:   95,  // Europa League
-  848: 90,  // Conference League
-  // ── TIER 2: Ligas top (prioridad 80–89) ──────────────────────────────────────
-  39:  88,  // Premier League
-  140: 87,  // LaLiga
-  135: 86,  // Serie A
-  78:  85,  // Bundesliga
-  61:  84,  // Ligue 1
-  11:  82,  // Copa Sudamericana (ID real)
-  13:  83,  // Copa Libertadores (ID real)
-  // ID 9 no existe en API-Football — Sudamericana=11, Libertadores=13
-  // ── TIER 3: Ligas de primera importancia regional (prioridad 60–79) ──────────
-  88:  75,  // Eredivisie
-  144: 73,  // Jupiler Pro League (Bélgica)
-  207: 68,  // Swiss Super League
-  94:  67,  // Primeira Liga
-  203: 66,  // Süper Lig (Turquía)
-  169: 65,  // Jupiler Pro (alt ID)
-  71:  65,  // Brasileirao
-  262: 64,  // Liga MX
-  179: 63,  // Scottish Premier
-  253: 62,  // MLS
-  // ── TIER 4: Segundas divisiones europeas importantes (prioridad 50–59) ────────
-  40:  58,  // Championship
-  141: 56,  // LaLiga2
-  136: 55,  // Serie B
-  79:  54,  // 2.Bundesliga
-  62:  53,  // Ligue 2
-  239: 52,  // Liga BetPlay Colombia
-  210: 50,  // HNL (Croacia)
-  218: 50,  // Bundesliga Austria
-  // ── TIER 5: Ligas europeas medianas (prioridad 35–49) ────────────────────────
-  119: 45,  // Superliga Dinamarca
-  103: 44,  // Eliteserien Noruega
-  113: 43,  // Allsvenskan Suecia
-  235: 42,  // Premier Liga Rusia
-  333: 41,  // Premier League Ucrania
-  106: 40,  // Ekstraklasa Polonia
-  283: 38,  // Liga I Rumania
-  286: 37,  // Super Liga Serbia
-  345: 36,  // Fortuna Liga Czech
-  172: 35,  // First League Bulgaria
-  89:  35,  // Eerste Divisie NL
-  95:  35,  // Segunda Liga Portugal
-  180: 34,  // Scottish Championship
-  // ── TIER 6: Ligas de cobertura limitada (prioridad ≤30) ─────────────────────
-  128: 30,  // Liga Argentina
-  72:  28,  // Brasileirao B
-  129: 25,  // Primera B Argentina
-  307: 28,  // Saudi Pro League
-  292: 27,  // K League
-  233: 26,  // Egyptian Premier
-  671: 25,  // Premyer Liqa Azerbaijan
-  98:  24,  // J League
-  318: 23,  // First Division Cyprus
-  // ── TIER 7: Ligas secundarias latinoamericanas (prioridad ≤20) ───────────────
-  // Estas ligas tienen cobertura de datos muy baja en API-Football.
-  // Rara vez producen picks confiables — están en PICKS_EXCLUDE_LEAGUES.
-  240: 15,  // Torneo Águila (Colombia segunda)
-  66:  14,  // Liga Colombia B
-  263: 13,  // Ascenso MX
-  // Internacionales menores
-  4:   50,  // Euro Championship
-  5:   48,  // Nations League
-  8:   35,  // Copa Africa
-  7:   34,  // AFC Asian Cup
-  29:  30,  // Nations League Play
-  480: 50,  // Copa America
-  10:  20,  // Amistosos internacionales
+  2486:100, 3337:95, 722432:90,
+  33973:88, 119924:87, 115669:86, 67162:85, 52695:84,
+  11847:80, 10145:78,
+  1635:77, 8443:76, 4188:75, 5039:74,
+  75672:70, 80778:69, 173537:68, 123328:67,
+  61205:65, 223746:64, 109712:63, 204173:62, 216087:61,
+  34824:55, 120775:54, 116520:53, 68013:52, 53546:51,
+  205024:45, 62056:44, 224597:41,
+  262041:38, 84182:37, 249276:36, 153113:35,
+  271402:33, 88437:32, 168431:31, 199067:30,
+  244170:29, 176941:28, 179494:27, 186302:26,
+  102053:25, 90990:24, 96947:23, 29718:22,
 };
 
 // Ligas excluidas de picks automáticos (picks de hoy, picks en vivo)
 // El bot sigue respondiendo si el usuario pregunta por estas ligas específicamente.
-// Criterio de exclusión: datos API muy escasos → picks inventados.
 const PICKS_EXCLUDE_LEAGUES = new Set([
-  94,   // Primeira Liga (cobertura de cuotas muy baja)
-  128,  // Liga Argentina (datos inconsistentes)
-  240,  // Torneo Águila — Colombia segunda división (sin datos fiables)
-  66,   // Liga Colombia B (sin datos fiables)
-  263,  // Ascenso MX (sin datos fiables)
-  129,  // Primera B Argentina (sin datos fiables)
+  205024,  // Primera B Colombia (datos insuficientes)
+  224597,  // Liga Expansión MX (datos insuficientes)
+  1049216, // Copa de la Liga Perú (datos insuficientes)
 ]);
 
 // Buffer de cuota que se suma a la cuota real al mostrarla al usuario.
@@ -379,40 +305,40 @@ const ODDS_DISPLAY_BUFFER = 0.15;
 // corners: promedio de corners totales por partido
 const LEAGUE_BASE_RATES = {
   // ── Ligas top europeas ────────────────────────────────────────────────────
-  39:  { over25: 56, btts: 61, cards: 3.8, corners: 10.2, name: 'Premier League' },
-  140: { over25: 52, btts: 55, cards: 4.9, corners:  9.8, name: 'LaLiga' },
-  135: { over25: 54, btts: 57, cards: 4.6, corners:  9.6, name: 'Serie A' },
-  78:  { over25: 62, btts: 60, cards: 3.6, corners: 10.1, name: 'Bundesliga' },
-  61:  { over25: 53, btts: 54, cards: 4.2, corners:  9.7, name: 'Ligue 1' },
+  33973: { over25: 56, btts: 61, cards: 3.8, corners: 10.2, name: 'Premier League' },
+  119924:{ over25: 52, btts: 55, cards: 4.9, corners:  9.8, name: 'LaLiga' },
+  115669:{ over25: 54, btts: 57, cards: 4.6, corners:  9.6, name: 'Serie A' },
+  67162: { over25: 62, btts: 60, cards: 3.6, corners: 10.1, name: 'Bundesliga' },
+  52695: { over25: 53, btts: 54, cards: 4.2, corners:  9.7, name: 'Ligue 1' },
   // ── Copas europeas ─────────────────────────────────────────────────────────
-  2:   { over25: 61, btts: 63, cards: 3.5, corners: 10.5, name: 'Champions League' },
-  3:   { over25: 58, btts: 59, cards: 3.7, corners: 10.0, name: 'Europa League' },
-  848: { over25: 57, btts: 58, cards: 3.6, corners:  9.8, name: 'Conference League' },
+  2486:  { over25: 61, btts: 63, cards: 3.5, corners: 10.5, name: 'Champions League' },
+  3337:  { over25: 58, btts: 59, cards: 3.7, corners: 10.0, name: 'Europa League' },
+  722432:{ over25: 57, btts: 58, cards: 3.6, corners:  9.8, name: 'Conference League' },
   // ── Otras europeas ─────────────────────────────────────────────────────────
-  88:  { over25: 57, btts: 61, cards: 3.4, corners: 10.4, name: 'Eredivisie' },
-  94:  { over25: 50, btts: 53, cards: 4.3, corners:  9.2, name: 'Primeira Liga' },
-  144: { over25: 58, btts: 60, cards: 3.5, corners: 10.0, name: 'Jupiler Pro League' },
-  203: { over25: 59, btts: 60, cards: 5.2, corners:  9.9, name: 'Süper Lig' },
-  207: { over25: 57, btts: 58, cards: 3.8, corners:  9.7, name: 'Swiss Super League' },
-  179: { over25: 55, btts: 57, cards: 3.9, corners:  9.5, name: 'Scottish Premier' },
-  119: { over25: 55, btts: 57, cards: 3.7, corners:  9.6, name: 'Superliga DK' },
-  40:  { over25: 55, btts: 59, cards: 3.9, corners: 10.3, name: 'Championship' },
-  141: { over25: 50, btts: 53, cards: 4.8, corners:  9.5, name: 'LaLiga2' },
-  136: { over25: 51, btts: 53, cards: 4.5, corners:  9.3, name: 'Serie B' },
-  79:  { over25: 58, btts: 57, cards: 3.8, corners: 10.0, name: '2. Bundesliga' },
-  62:  { over25: 52, btts: 54, cards: 4.0, corners:  9.4, name: 'Ligue 2' },
+  75672: { over25: 57, btts: 61, cards: 3.4, corners: 10.4, name: 'Eredivisie' },
+  80778: { over25: 50, btts: 53, cards: 4.3, corners:  9.2, name: 'Primeira Liga' },
+  123328:{ over25: 58, btts: 60, cards: 3.5, corners: 10.0, name: 'Jupiler Pro League' },
+  173537:{ over25: 59, btts: 60, cards: 5.2, corners:  9.9, name: 'Super Lig' },
+  176941:{ over25: 57, btts: 58, cards: 3.8, corners:  9.7, name: 'Swiss SL' },
+  153113:{ over25: 55, btts: 57, cards: 3.9, corners:  9.5, name: 'Scottish Prem.' },
+  102053:{ over25: 55, btts: 57, cards: 3.7, corners:  9.6, name: 'Superliga DK' },
+  34824: { over25: 55, btts: 59, cards: 3.9, corners: 10.3, name: 'Championship' },
+  120775:{ over25: 50, btts: 53, cards: 4.8, corners:  9.5, name: 'LaLiga2' },
+  116520:{ over25: 51, btts: 53, cards: 4.5, corners:  9.3, name: 'Serie B' },
+  68013: { over25: 58, btts: 57, cards: 3.8, corners: 10.0, name: '2. Bundesliga' },
+  53546: { over25: 52, btts: 54, cards: 4.0, corners:  9.4, name: 'Ligue 2' },
   // ── Sudamérica ─────────────────────────────────────────────────────────────
-  11:  { over25: 53, btts: 54, cards: 4.7, corners:  9.1, name: 'Copa Sudamericana' },
-  13:  { over25: 54, btts: 55, cards: 4.8, corners:  9.3, name: 'Copa Libertadores' },
-  71:  { over25: 55, btts: 58, cards: 4.5, corners:  9.0, name: 'Brasileirao' },
-  262: { over25: 54, btts: 56, cards: 4.3, corners:  9.2, name: 'Liga MX' },
-  239: { over25: 53, btts: 55, cards: 4.9, corners:  8.8, name: 'Liga BetPlay' },
-  253: { over25: 54, btts: 57, cards: 3.8, corners: 10.1, name: 'MLS' },
-  128: { over25: 48, btts: 50, cards: 5.1, corners:  8.7, name: 'Liga Argentina' },
+  10145: { over25: 53, btts: 54, cards: 4.7, corners:  9.1, name: 'Copa Sudamericana' },
+  11847: { over25: 54, btts: 55, cards: 4.8, corners:  9.3, name: 'Copa Libertadores' },
+  61205: { over25: 55, btts: 58, cards: 4.5, corners:  9.0, name: 'Brasileirao' },
+  223746:{ over25: 54, btts: 56, cards: 4.3, corners:  9.2, name: 'Liga MX' },
+  204173:{ over25: 53, btts: 55, cards: 4.9, corners:  8.8, name: 'Liga BetPlay' },
+  216087:{ over25: 54, btts: 57, cards: 3.8, corners: 10.1, name: 'MLS' },
+  109712:{ over25: 48, btts: 50, cards: 5.1, corners:  8.7, name: 'Liga Argentina' },
   // ── Asia / Oriente Medio ──────────────────────────────────────────────────
-  307: { over25: 57, btts: 60, cards: 3.9, corners:  9.8, name: 'Saudi Pro League' },
-  98:  { over25: 55, btts: 58, cards: 3.2, corners: 10.2, name: 'J League' },
-  292: { over25: 53, btts: 56, cards: 3.5, corners:  9.6, name: 'K League 1' },
+  262041:{ over25: 57, btts: 60, cards: 3.9, corners:  9.8, name: 'Saudi Pro League' },
+  84182: { over25: 55, btts: 58, cards: 3.2, corners: 10.2, name: 'J1 League' },
+  249276:{ over25: 53, btts: 56, cards: 3.5, corners:  9.6, name: 'K League 1' },
 };
 
 // ─── Plans config ─────────────────────────────────────────────────────────────
@@ -513,42 +439,53 @@ function setPicksCache(scope, picksText, fixtureIds) {
 
 // ─── API helpers ──────────────────────────────────────────────────────────────
 
-function parseFixture(f) {
+// Parses a Highlightly match object → internal fixture format
+function parseFixture(m) {
+  const score = parseHLScore(m.state?.score?.current);
   return {
-    fixtureId:  f.fixture.id,
-    date:       f.fixture.date,
-    status:     f.fixture.status.short,
-    elapsed:    f.fixture.status.elapsed,
-    leagueId:   f.league.id,
-    leagueName: LEAGUE_MAP[f.league.id]?.name || f.league.name,
-    country:    LEAGUE_MAP[f.league.id]?.country || f.league.country,
-    round:      f.league.round || null,
-    venue:      f.fixture.venue?.name || null,
-    homeId:     f.teams.home.id,
-    awayId:     f.teams.away.id,
-    homeTeam:   f.teams.home.name,
-    awayTeam:   f.teams.away.name,
-    homeGoals:  f.goals.home,
-    awayGoals:  f.goals.away,
-    referee:    f.fixture.referee || null,
+    fixtureId:  m.id,
+    date:       m.date,
+    status:     HL_STATUS[m.state?.description] || 'NS',
+    elapsed:    m.state?.clock || null,
+    leagueId:   m.league.id,
+    leagueName: LEAGUE_MAP[m.league.id]?.name || m.league.name,
+    country:    LEAGUE_MAP[m.league.id]?.country || m.country?.name || 'World',
+    round:      m.league?.round || null,
+    homeId:     m.homeTeam.id,
+    awayId:     m.awayTeam.id,
+    homeTeam:   m.homeTeam.name,
+    awayTeam:   m.awayTeam.name,
+    homeGoals:  score.home,
+    awayGoals:  score.away,
+    referee:    null,
+    venue:      null,
   };
 }
 
 async function fetchFixturesByDate(date) {
-  const cached = dateCache.get(date);
-  // Caché válido por 30 minutos para reflejar cambios de status durante el día
-  if (cached && (Date.now() - cached.ts) < 30 * 60 * 1000) return cached.data;
-  const { data } = await API.get('/fixtures', { params: { date } });
-  const result = data.response || [];
-  dateCache.set(date, { data: result, ts: Date.now() });
+  if (dateCache.has(date)) return dateCache.get(date);
+  const PAGE = 100;
+  const result = [];
+  let offset = 0;
+  let total = Infinity;
+  while (result.length < total) {
+    const { data } = await API.get('/matches', { params: { date, limit: PAGE, offset } });
+    const page = data.data || [];
+    result.push(...page);
+    total = data.pagination?.totalCount ?? result.length;
+    if (page.length < PAGE) break;
+    offset += PAGE;
+    if (result.length < total) await new Promise(r => setTimeout(r, 300));
+  }
+  dateCache.set(date, result);
   return result;
 }
 
 const FINISHED_STATUSES = new Set(['FT', 'AET', 'PEN', 'AWD', 'WO']);
 
 async function getFixturesByDate(date) {
-  // Colombia es UTC-5: partidos a las 7 PM+ Bogotá caen en la fecha UTC siguiente.
-  // Consultamos AMBAS fechas UTC (hoy + mañana) y filtramos por fecha Bogotá.
+  // Colombia is UTC-5: games at 7PM+ Bogotá fall on the next UTC date.
+  // Fetch both UTC dates and filter by Bogotá date.
   const nextUtcDate = (() => {
     const d = new Date(date + 'T00:00:00Z');
     d.setUTCDate(d.getUTCDate() + 1);
@@ -559,19 +496,18 @@ async function getFixturesByDate(date) {
     fetchFixturesByDate(nextUtcDate),
   ]);
   const all = [...allToday, ...allTomorrow];
-  // Deduplicar por fixtureId
   const seen = new Set();
-  const unique = all.filter(f => {
-    if (seen.has(f.fixture.id)) return false;
-    seen.add(f.fixture.id);
+  const unique = all.filter(m => {
+    if (seen.has(m.id)) return false;
+    seen.add(m.id);
     return true;
   });
   return unique
-    .filter(f => {
-      if (!LEAGUE_IDS.has(f.league.id)) return false;
-      if (FINISHED_STATUSES.has(f.fixture.status.short)) return false;
-      // Verificar que la fecha real del partido (en hora Bogotá) sea hoy
-      const fixtureDate = new Date(f.fixture.date).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    .filter(m => {
+      if (!LEAGUE_IDS.has(m.league?.id)) return false;
+      const st = HL_STATUS[m.state?.description] || 'NS';
+      if (FINISHED_STATUSES.has(st)) return false;
+      const fixtureDate = new Date(m.date).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
       return fixtureDate === date;
     })
     .map(parseFixture);
@@ -579,28 +515,45 @@ async function getFixturesByDate(date) {
 
 async function fetchLiveRaw() {
   if (Date.now() - liveCache.ts < 30000 && liveCache.raw) return liveCache.raw;
-  const { data } = await API.get('/fixtures', { params: { live: 'all' } });
-  liveCache = { raw: data.response || [], ts: Date.now() };
-  return liveCache.raw;
+  const today = new Date().toISOString().split('T')[0];
+  const allToday = await fetchFixturesByDate(today);
+  const raw = allToday.filter(m => LIVE_DESCS.has(m.state?.description));
+  liveCache = { raw, ts: Date.now() };
+  return raw;
 }
 
 async function getLiveFixtures(leagueId = null) {
   const raw = await fetchLiveRaw();
   const filtered = leagueId
-    ? raw.filter(f => f.league.id === leagueId)
-    : raw.filter(f => LEAGUE_IDS.has(f.league.id));
+    ? raw.filter(m => m.league?.id === leagueId)
+    : raw.filter(m => LEAGUE_IDS.has(m.league?.id));
   return filtered.map(parseFixture);
 }
 
+// Stat name mapping: Highlightly displayName → internal key used by calcLiveMomentum etc.
+const HL_STAT_MAP = {
+  'Shots on target':           'Shots on Goal',
+  'Corners':                   'Corner Kicks',
+  'Yellow cards':              'Yellow Cards',
+  'Red cards':                 'Red Cards',
+  'Shots within penalty area': 'Shots insidebox',
+};
+
 async function getFixtureStatistics(fixtureId) {
-  const { data } = await API.get('/fixtures/statistics', { params: { fixture: fixtureId } });
-  if (!data.response || data.response.length === 0) return null;
+  const { data } = await API.get('/statistics/' + fixtureId);
+  if (!data || data.length === 0) return null;
   const stats = {};
-  // La API siempre devuelve [local, visitante] en ese orden — marcamos explícitamente
-  data.response.forEach((teamStats, idx) => {
-    const key = teamStats.team.name;
-    stats[key] = {};
-    teamStats.statistics.forEach(s => { stats[key][s.type] = s.value; });
+  data.forEach((teamData, idx) => {
+    const key = teamData.team.name;
+    const raw = {};
+    teamData.statistics.forEach(s => { raw[s.displayName] = s.value; });
+    const totalShots = (raw['Shots on target'] || 0) + (raw['Shots off target'] || 0) + (raw['Blocked shots'] || 0);
+    const possession = raw['Possession'];
+    stats[key] = { 'Total Shots': totalShots || null };
+    if (possession != null) stats[key]['Ball Possession'] = `${Math.round(possession * 100)}%`;
+    for (const [hlName, apifName] of Object.entries(HL_STAT_MAP)) {
+      if (raw[hlName] != null) stats[key][apifName] = raw[hlName];
+    }
     if (idx === 0) stats._homeTeam = key;
     if (idx === 1) stats._awayTeam = key;
   });
@@ -628,8 +581,8 @@ function normalizeTeamName(str) {
     .trim();
 }
 
-// IDs directos para equipos que la API no encuentra bien por búsqueda de texto
-// Formato: 'alias normalizado' → teamId (número)
+// TEAM_ID_OVERRIDES removed — Highlightly team IDs differ from API-Football.
+// searchTeam uses text search with scoring instead.
 const TEAM_ID_OVERRIDES = {
   // ── Selecciones nacionales (IDs directos — evitan /teams?search= cuando la cuota es baja) ──
   'uruguay':          7,
@@ -953,6 +906,13 @@ const TEAM_ALIASES = {
   'la sele':         'Costa Rica',
 };
 
+function translateTeamName(name) {
+  const key = name.toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .trim();
+  return TEAM_ALIASES[key] || name;
+}
+
 function scoreTeamResult(t, q, country = '', isNationalSearch = false) {
   const tname    = normalizeTeamName(t.team.name);
   const tcountry = (t.team.country || '').toLowerCase();
@@ -979,47 +939,44 @@ function scoreTeamResult(t, q, country = '', isNationalSearch = false) {
 }
 
 async function searchTeam(name, countryHint = '') {
-  const aliasKey = name.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-
-  // Lookup directo por ID (evita fallos de búsqueda de texto para equipos conocidos)
-  if (TEAM_ID_OVERRIDES[aliasKey]) {
-    const { data } = await API.get('/teams', { params: { id: TEAM_ID_OVERRIDES[aliasKey] } });
-    if (data.response?.[0]) return data.response[0];
-  }
-
-  const stripped = name.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-  const resolvedName = TEAM_ALIASES[aliasKey] || stripped;
-
-  const { data } = await API.get('/teams', { params: { search: resolvedName } });
-  const results = data.response || [];
+  const apiName = translateTeamName(name);
+  const { data } = await API.get('/teams', { params: { name: apiName, limit: 20 } });
+  const results = data.data || [];
   if (results.length === 0) return null;
-  if (results.length === 1) return results[0];
 
-  const q = normalizeTeamName(resolvedName);
-  const country = countryHint.trim().toLowerCase();
+  const q = normalizeTeamName(apiName);
+  const RESERVE = /\b(ii|b|reserve|reserva|sub|youth|juvenil|u\d{2}|amateur|filial)\b/i;
+  const WOMEN   = /\b(women|femenin[ao]|ladies|femmes|damen|vrouwen|mujer|fem\.?)\b| W$/i;
 
-  return results.sort((a, b) => scoreTeamResult(b, q, country, false) - scoreTeamResult(a, q, country, false))[0];
+  function score(t) {
+    const tname = normalizeTeamName(t.name);
+    let s = 0;
+    if (tname === q) s += 100;
+    else if (tname.endsWith(' ' + q) || tname.endsWith(q)) s += 80;
+    else if (tname.startsWith(q + ' ') || tname.startsWith(q)) s += 50;
+    else if (tname.includes(q)) s += 20;
+    if (t.type === 'national') s += 15;
+    if (RESERVE.test(t.name)) s -= 40;
+    if (WOMEN.test(t.name))   s -= 60;
+    return s;
+  }
+  const best = results.sort((a, b) => score(b) - score(a))[0];
+  return best ? { team: { id: best.id, name: best.name } } : null;
 }
 
 // Verifica si un equipo está jugando ahora, hoy o en los próximos 2 días
 async function getTeamPlayingPriority(teamId) {
   try {
-    // Live now
     const live = liveCache.raw || [];
-    if (live.some(f => f.teams.home.id === teamId || f.teams.away.id === teamId)) return { priority: 3, label: '🔴 En vivo ahora' };
-    // Today
+    if (live.some(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId)) return { priority: 3, label: '🔴 En vivo ahora' };
     const today = todayDate();
-    const todayData = dateCache.get(today);
-    if (todayData) {
-      const todayFixtures = todayData.data || [];
-      if (todayFixtures.some(f => f.teams.home.id === teamId || f.teams.away.id === teamId)) return { priority: 2, label: '📅 Juega hoy' };
-    }
-    // Next 2 days
+    const todayFixtures = dateCache.get(today) || [];
+    if (todayFixtures.some(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId)) return { priority: 2, label: '📅 Juega hoy' };
     for (let d = 1; d <= 2; d++) {
       const dt = new Date(); dt.setDate(dt.getDate() + d);
       const ds = dt.toISOString().split('T')[0];
-      const cached = dateCache.get(ds);
-      if (cached && (cached.data || []).some(f => f.teams.home.id === teamId || f.teams.away.id === teamId)) {
+      const cached = dateCache.get(ds) || [];
+      if (cached.some(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId)) {
         return { priority: 1, label: `📆 Juega en ${d} día${d>1?'s':''}` };
       }
     }
@@ -1028,57 +985,40 @@ async function getTeamPlayingPriority(teamId) {
 }
 
 async function findTeamWithButtons(chatId, name, countryHint = '', intent = null) {
-  const aliasKey = name.toLowerCase().trim().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
-
-  // Lookup directo por ID (evita fallos de búsqueda de texto para equipos conocidos)
-  if (TEAM_ID_OVERRIDES[aliasKey]) {
-    const { data } = await API.get('/teams', { params: { id: TEAM_ID_OVERRIDES[aliasKey] } });
-    if (data.response?.[0]) return data.response[0];
-  }
-
-  const stripped = name.trim().normalize('NFD').replace(/[\u0300-\u036f]/g, ''); // sin tildes
-  const resolvedName = TEAM_ALIASES[aliasKey] || stripped;
-
-  const { data } = await API.get('/teams', { params: { search: resolvedName } });
-  const results = data.response || [];
+  const apiName = translateTeamName(name);
+  const { data } = await API.get('/teams', { params: { name: apiName, limit: 20 } });
+  const results = data.data || [];
   if (results.length === 0) return null;
 
-  const q       = normalizeTeamName(resolvedName);
-  const country = countryHint.trim().toLowerCase();
-
-  // Filtrar equipos no profesionales (sub20, sub21, reservas, filiales, tier3+)
+  const q = normalizeTeamName(apiName);
   const YOUTH_RE = /\b(u\d{2}|sub[\s-]?\d{2}|under[\s-]?\d{2}|ii|iii|iv|vi?|reserve|reserves|youth|juvenil|cadete|filial|amador|amateur)\b/i;
-  const filtered = results.filter(t => !YOUTH_RE.test(t.team.name));
-  const pool = filtered.length > 0 ? filtered : results; // fallback si todo es filtrado
+  const WOMEN_RE = /\b(women|femenin[ao]|ladies|femmes|damen|vrouwen|mujer|fem\.?)\b| W$/i;
+  const filtered = results.filter(t => !YOUTH_RE.test(t.name) && !WOMEN_RE.test(t.name));
+  const pool = filtered.length > 0 ? filtered : results;
 
-  // Puntuar todos los resultados
-  const scored = pool
-    .map(t => ({ ...t, _score: scoreTeamResult(t, q, country, false) }))
+  // Convert Highlightly results to { team: { id, name, country, national } } shape for scoreTeamResult
+  const poolApif = pool.map(t => ({ team: { id: t.id, name: t.name, country: t.country || '', national: t.type === 'national' } }));
+  const scored = poolApif
+    .map(t => ({ ...t, _score: scoreTeamResult(t, q, countryHint.trim().toLowerCase(), false) }))
     .filter(t => t._score > 0)
     .sort((a, b) => b._score - a._score)
     .slice(0, 5);
 
   if (scored.length === 0) return null;
 
-  // Si el mejor resultado gana por más de 30 puntos → elegir automático
   const gap = scored.length > 1 ? scored[0]._score - scored[1]._score : 999;
   if (gap > 30 || scored.length === 1) return scored[0];
 
-  // Hay ambigüedad → enriquecer candidatos con si juegan pronto
   const enriched = await Promise.all(scored.slice(0, 4).map(async t => {
     const playingInfo = await getTeamPlayingPriority(t.team.id);
     return { ...t, _priority: playingInfo.priority, _priorityLabel: playingInfo.label };
   }));
 
-  // Ordenar: primero los que juegan pronto, luego por score
   enriched.sort((a, b) => b._priority - a._priority || b._score - a._score);
 
-  // Solo auto-seleccionar por "juega hoy" si el nombre también es el mejor match (gap > 15)
-  // Evita elegir Hibernian cuando el usuario preguntó por Celtic solo porque Hibernian juega hoy
   const nameGapTop = enriched[0]._score - (enriched[1]?._score || 0);
   if (enriched[0]._priority >= 2 && (enriched[1]?._priority || 0) === 0 && nameGapTop > 15) return enriched[0];
 
-  // Codificar intencion en callback_data (sin estado en memoria)
   const intentCode = (intent?.intencion === 'rachas') ? 'r' : 'p';
 
   const buttons = enriched.map(t => [{
@@ -1096,89 +1036,102 @@ async function findTeamWithButtons(chatId, name, countryHint = '', intent = null
 }
 
 async function findNextFixtureByDate(teamId, daysAhead = 14) {
-  const LIVE_STATUSES = ['1H','HT','2H','ET','P','BT','LIVE'];
-  const UPCOMING_STATUSES = ['NS', ...LIVE_STATUSES];
-
-  // 1. Partido en vivo ahora mismo para este equipo (consulta fresca, sin cache)
-  try {
-    const { data } = await API.get('/fixtures', { params: { team: teamId, live: 'all' } });
-    const live = (data.response || []).find(f =>
-      f.teams.home.id === teamId || f.teams.away.id === teamId
-    );
-    if (live) return live;
-  } catch {}
-
-  // 2. Próximos partidos del equipo (1 sola llamada directa, más fiable que buscar por fecha)
+  const LIVE_STATUSES   = new Set(['First half', 'Half time', 'Second half', 'Extra time', 'Penalties', 'Break time']);
+  const UPCOMING_STATUSES = new Set(['Not started', ...LIVE_STATUSES]);
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() + daysAhead);
+
+  // 1. Partido en vivo hoy
   try {
-    const { data } = await API.get('/fixtures', { params: { team: teamId, next: 10 } });
-    const next = (data.response || []).find(f =>
-      UPCOMING_STATUSES.includes(f.fixture.status.short) &&
-      new Date(f.fixture.date) <= cutoff
+    const today = new Date().toISOString().split('T')[0];
+    const allToday = await fetchFixturesByDate(today);
+    const live = allToday.find(m =>
+      (m.homeTeam.id === teamId || m.awayTeam.id === teamId) &&
+      LIVE_STATUSES.has(m.state?.description)
     );
-    if (next) return next;
+    if (live) return hlToApif(live);
   } catch {}
 
-  // 3. Fallback: loop por fecha (por si next no devuelve el partido de hoy en edge cases)
-  const today = new Date();
-  for (let i = 0; i <= Math.min(daysAhead, 3); i++) {
-    const d = new Date(today);
-    d.setDate(d.getDate() + i);
-    const ds = d.toISOString().split('T')[0];
-    if (i === 0) dateCache.delete(ds);
-    const all = await fetchFixturesByDate(ds);
-    const match = all.find(f =>
-      (f.teams.home.id === teamId || f.teams.away.id === teamId) &&
-      UPCOMING_STATUSES.includes(f.fixture.status.short)
-    );
-    if (match) return match;
-  }
+  // 2. Próximos partidos en casa
+  try {
+    const { data } = await API.get('/matches', { params: { homeTeamId: teamId, limit: 10 } });
+    const next = (data.data || [])
+      .filter(m => UPCOMING_STATUSES.has(m.state?.description) && new Date(m.date) <= cutoff)
+      .sort((a, b) => new Date(a.date) - new Date(b.date))[0];
+    if (next) return hlToApif(next);
+  } catch {}
+
+  // 3. Próximos partidos fuera
+  try {
+    const { data } = await API.get('/matches', { params: { awayTeamId: teamId, limit: 10 } });
+    const next = (data.data || [])
+      .filter(m => UPCOMING_STATUSES.has(m.state?.description) && new Date(m.date) <= cutoff)
+      .sort((a, b) => new Date(a.date) - new Date(b.date))[0];
+    if (next) return hlToApif(next);
+  } catch {}
+
   return null;
 }
 
 async function getTeamLastFixtures(teamId, last = 15, venue = null) {
-  const params = { team: teamId, last };
-  if (venue === 'home') params.venue = 'home';
-  else if (venue === 'away') params.venue = 'away';
-  const { data } = await API.get('/fixtures', { params });
-  return (data.response || [])
-    .filter(f => f.fixture.status.short === 'FT')
-    .map(f => ({
-      fixtureId:  f.fixture.id,
-      date:       f.fixture.date.split('T')[0],
-      homeTeam:   f.teams.home.name,
-      awayTeam:   f.teams.away.name,
-      homeId:     f.teams.home.id,
-      awayId:     f.teams.away.id,
-      leagueName: f.league.name,
-      leagueId:   f.league.id,
-      goalsHome:  f.goals.home ?? 0,
-      goalsAway:  f.goals.away ?? 0,
-      htHome:     f.score?.halftime?.home ?? null,
-      htAway:     f.score?.halftime?.away ?? null,
-    }));
+  const matches = [];
+  if (venue !== 'away') {
+    try {
+      const { data } = await API.get('/matches', { params: { homeTeamId: teamId, limit: 50 } });
+      (data.data || []).filter(m => FINISHED_DESCS.has(m.state?.description)).forEach(m => matches.push(m));
+    } catch {}
+  }
+  if (venue !== 'home') {
+    try {
+      const { data } = await API.get('/matches', { params: { awayTeamId: teamId, limit: 50 } });
+      (data.data || []).filter(m => FINISHED_DESCS.has(m.state?.description)).forEach(m => matches.push(m));
+    } catch {}
+  }
+  const seen = new Set();
+  return matches
+    .filter(m => { if (seen.has(m.id)) return false; seen.add(m.id); return true; })
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .slice(0, last)
+    .map(m => {
+      const score = parseHLScore(m.state?.score?.current || '0 - 0');
+      return {
+        fixtureId:  m.id,
+        date:       m.date.split('T')[0],
+        homeTeam:   m.homeTeam.name,
+        awayTeam:   m.awayTeam.name,
+        homeId:     m.homeTeam.id,
+        awayId:     m.awayTeam.id,
+        leagueName: m.league.name,
+        leagueId:   m.league.id,
+        goalsHome:  score.home ?? 0,
+        goalsAway:  score.away ?? 0,
+        htHome:     null,
+        htAway:     null,
+      };
+    });
 }
 
 async function getLeagueStandings(leagueId) {
   const season = LEAGUE_SEASONS[leagueId] || 2025;
-  const { data } = await API.get('/standings', { params: { league: leagueId, season } });
-  const standings = data.response?.[0]?.league?.standings;
-  if (!standings) return { teams: [], total: 0 };
-  const group = Array.isArray(standings[0]) ? standings[0] : standings;
-  const teams = group.map(s => ({
-    teamId:      s.team.id,
-    teamName:    s.team.name,
-    rank:        s.rank,
-    points:      s.points,
-    goalDiff:    s.goalsDiff,
-    played:      s.all?.played || 0,
-    description: s.description || null,
-    form:        s.form || null,
-  }));
-  return { teams, total: group.length };
+  try {
+    const { data } = await API.get('/standings', { params: { leagueId, season } });
+    const groups = data.groups || [];
+    const group = groups[0]?.standings || [];
+    return {
+      teams: group.map(s => ({
+        teamId:   s.team.id,
+        teamName: s.team.name,
+        rank:     s.position,
+        points:   s.points ?? null,
+        goalDiff: null,
+        played:   s.played ?? 0,
+        description: null,
+        form:     null,
+      })),
+      total: group.length,
+    };
+  } catch { return { teams: [], total: 0 }; }
 }
-
 function getTeamMotivation(standing, totalTeams) {
   if (!standing) return { estado: 'desconocido', texto: 'Sin datos de posición' };
   const { rank, description, points, played, form } = standing;
@@ -1568,796 +1521,97 @@ async function getSofaMatchContext(homeTeam, awayTeam, sofaEvents) {
 }
 
 async function getH2H(id1, id2) {
-  const { data } = await API.get('/fixtures/headtohead', { params: { h2h: `${id1}-${id2}`, last: 10 } });
-  return (data.response || []).map(f => ({
-    date:      f.fixture.date.split('T')[0],
-    home:      f.teams.home.name,
-    away:      f.teams.away.name,
-    golesHome: f.goals.home,
-    golesAway: f.goals.away,
-    btts:      f.goals.home > 0 && f.goals.away > 0,
-  }));
+  const { data } = await API.get('/head-2-head', { params: { teamIdOne: id1, teamIdTwo: id2, limit: 10 } });
+  const matches = Array.isArray(data) ? data : (data.data || []);
+  return matches
+    .filter(m => FINISHED_DESCS.has(m.state?.description))
+    .map(m => {
+      const score = parseHLScore(m.state?.score?.current || '0 - 0');
+      return {
+        date:      m.date.split('T')[0],
+        home:      m.homeTeam.name,
+        away:      m.awayTeam.name,
+        golesHome: score.home ?? 0,
+        golesAway: score.away ?? 0,
+        btts:      (score.home ?? 0) > 0 && (score.away ?? 0) > 0,
+      };
+    });
 }
 
-async function getLineups(fixtureId) {
-  try {
-    const { data } = await API.get('/fixtures/lineups', { params: { fixture: fixtureId } });
-    const res = data.response || [];
-    return res.map(t => ({
-      team: t.team.name,
-      formation: t.formation,
-      startXI: (t.startXI || []).map(p => ({
-        name: p.player.name,
-        number: p.player.number,
-        pos: p.player.pos,
-      })),
-      coach: t.coach?.name,
-    }));
-  } catch { return null; }
-}
+// Highlightly does not have lineup/events/injuries/odds endpoints — stub safely
+async function getLineups(fixtureId) { return null; }
 
 /**
- * Eventos del partido: goles, tarjetas, cambios — con minuto y jugador.
- * Esencial para análisis en vivo (quién marcó, quién está en riesgo, cambios tácticos).
+ * Eventos del partido: Highlightly no expone este endpoint.
+ * summarizeEvents() handles null/empty gracefully.
  */
-async function getFixtureEvents(fixtureId) {
-  try {
-    const { data } = await API.get('/fixtures/events', { params: { fixture: fixtureId } });
-    const res = data.response || [];
-    return res.map(e => ({
-      minuto:    e.time?.elapsed ?? null,
-      minExtra:  e.time?.extra   ?? null,
-      equipo:    e.team?.name    ?? null,
-      equipoId:  e.team?.id      ?? null,
-      jugador:   e.player?.name  ?? null,
-      asistente: e.assist?.name  ?? null,  // en goles: quien asistió
-      tipo:      e.type          ?? null,  // 'Goal' | 'Card' | 'subst' | 'Var'
-      detalle:   e.detail        ?? null,  // 'Normal Goal' | 'Yellow Card' | 'Red Card' | 'Penalty' | 'Own Goal' | etc.
-      comentario:e.comments      ?? null,
-    }));
-  } catch { return []; }
-}
+async function getFixtureEvents(fixtureId) { return []; }
 
-/**
- * Resumen legible de eventos: goles, tarjetas activas (riesgo 2ª amarilla), cambios.
- * Se inyecta directo en el contexto de Claude para análisis en vivo.
- */
 function summarizeEvents(events, homeTeam, awayTeam) {
   if (!events || events.length === 0) return null;
-
-  const goals   = events.filter(e => e.tipo === 'Goal');
-  const cards   = events.filter(e => e.tipo === 'Card');
-  const substs  = events.filter(e => e.tipo === 'subst');
-
-  // Jugadores con amarilla → riesgo de 2ª
-  const yellowsByPlayer = {};
-  cards.filter(c => c.detalle === 'Yellow Card').forEach(c => {
-    const key = `${c.jugador}__${c.equipoId}`;
-    yellowsByPlayer[key] = (yellowsByPlayer[key] || 0) + 1;
-  });
-  const doubleYellowRisk = Object.entries(yellowsByPlayer)
-    .filter(([, cnt]) => cnt >= 1)
-    .map(([key]) => {
-      const [nombre] = key.split('__');
-      return nombre;
-    });
-
-  return {
-    goles: goals.map(g => ({
-      min:     g.minuto,
-      equipo:  g.equipo,
-      jugador: g.jugador,
-      asiste:  g.asistente,
-      tipo:    g.detalle, // 'Normal Goal' | 'Own Goal' | 'Penalty'
-    })),
-    tarjetas: {
-      amarillas: cards.filter(c => c.detalle === 'Yellow Card').map(c => ({ min: c.minuto, jugador: c.jugador, equipo: c.equipo })),
-      rojas:     cards.filter(c => c.detalle?.includes('Red')).map(c => ({ min: c.minuto, jugador: c.jugador, equipo: c.equipo })),
-      riesgo2aAmarilla: doubleYellowRisk, // jugadores con 1 amarilla → si juegan agresivo pueden ser expulsados
-    },
-    cambios: substs.map(s => ({
-      min:    s.minuto,
-      equipo: s.equipo,
-      sale:   s.jugador,
-      entra:  s.asistente,
-    })),
-    resumenTexto: [
-      goals.length  > 0 ? `⚽ Goles: ${goals.map(g => `${g.jugador} (${g.equipo}, ${g.minuto}')`).join(', ')}` : null,
-      doubleYellowRisk.length > 0 ? `⚠️ Riesgo expulsión: ${doubleYellowRisk.join(', ')}` : null,
-      substs.length > 0 ? `🔄 Cambios recientes: ${substs.slice(-3).map(s => `${s.asistente}↑ por ${s.jugador} (${s.equipo}, ${s.minuto}')`).join(' | ')}` : null,
-    ].filter(Boolean).join('\n'),
-  };
+  return null; // Highlightly does not provide live events
 }
 
-async function getInjuries(teamId, leagueId) {
-  try {
-    const season = LEAGUE_SEASONS[leagueId] || 2025;
-    const { data } = await API.get('/injuries', { params: { team: teamId, league: leagueId, season } });
-    const res = data.response || [];
-    return res.slice(0, 5).map(i => ({
-      player: i.player.name,
-      type: i.player.type,
-      reason: i.player.reason,
-    }));
-  } catch { return []; }
-}
+async function getInjuries(teamId, leagueId) { return []; }
+async function getFixtureInjuries(fixtureId) { return []; }
 
-/**
- * Obtiene jugadores lesionados/sancionados confirmados para un fixture específico.
- * Usa el endpoint /injuries?fixture=X que devuelve bajas concretas para ese partido.
- * Retorna { homeTeamId, players: [{nombre, equipo, equipoId, tipo, razon}] }
- */
-async function getFixtureInjuries(fixtureId) {
-  try {
-    const { data } = await API.get('/injuries', { params: { fixture: fixtureId } });
-    const res = data.response || [];
-    return res.map(i => ({
-      nombre:   i.player?.name  || 'Desconocido',
-      equipoId: i.team?.id      || null,
-      equipo:   i.team?.name    || null,
-      tipo:     i.player?.type === 'Missing Fixture' ? 'Suspendido' : 'Lesionado',
-      razon:    i.player?.reason || null,
-    }));
-  } catch { return []; }
-}
-
-async function getRealOdds(fixtureId) {
-  try {
-    // Intentar primero sin filtro de bookmaker para obtener lo que esté disponible
-    const { data } = await API.get('/odds', { params: { fixture: fixtureId } });
-    // Tomar el primer bookmaker disponible (prioriza Bet365 id=6, sino cualquiera)
-    const bookmakers = data.response?.[0]?.bookmakers || [];
-    const bm = bookmakers.find(b => b.id === 6) || bookmakers[0];
-    const bets = bm?.bets || [];
-    const odds = {};
-    for (const bet of bets) {
-      if (bet.name === 'Match Winner') {
-        odds.homeWin = parseFloat(bet.values.find(v => v.value === 'Home')?.odd) || null;
-        odds.draw    = parseFloat(bet.values.find(v => v.value === 'Draw')?.odd) || null;
-        odds.awayWin = parseFloat(bet.values.find(v => v.value === 'Away')?.odd) || null;
-      }
-      if (bet.name === 'Both Teams Score') {
-        odds.bttsYes = parseFloat(bet.values.find(v => v.value === 'Yes')?.odd) || null;
-        odds.bttsNo  = parseFloat(bet.values.find(v => v.value === 'No')?.odd) || null;
-      }
-      if (bet.name === 'Goals Over/Under') {
-        odds.over05  = parseFloat(bet.values.find(v => v.value === 'Over 0.5')?.odd)  || null;
-        odds.over15  = parseFloat(bet.values.find(v => v.value === 'Over 1.5')?.odd)  || null;
-        odds.over25  = parseFloat(bet.values.find(v => v.value === 'Over 2.5')?.odd)  || null;
-        odds.under25 = parseFloat(bet.values.find(v => v.value === 'Under 2.5')?.odd) || null;
-        odds.over35  = parseFloat(bet.values.find(v => v.value === 'Over 3.5')?.odd)  || null;
-        odds.under35 = parseFloat(bet.values.find(v => v.value === 'Under 3.5')?.odd) || null;
-      }
-      if (bet.name === 'Goals Over/Under First Half') {
-        odds.over05_1T = parseFloat(bet.values.find(v => v.value === 'Over 0.5')?.odd) || null;
-        odds.over15_1T = parseFloat(bet.values.find(v => v.value === 'Over 1.5')?.odd) || null;
-      }
-      if (bet.name === 'First Half Winner') {
-        odds.homeWin_1T = parseFloat(bet.values.find(v => v.value === 'Home')?.odd) || null;
-        odds.draw_1T    = parseFloat(bet.values.find(v => v.value === 'Draw')?.odd) || null;
-        odds.awayWin_1T = parseFloat(bet.values.find(v => v.value === 'Away')?.odd) || null;
-      }
-      if (bet.name === 'Double Chance') {
-        for (const v of bet.values) {
-          if (v.value === '1X') odds.dc_1X = parseFloat(v.odd) || null;
-          if (v.value === 'X2') odds.dc_X2 = parseFloat(v.odd) || null;
-          if (v.value === '12') odds.dc_12 = parseFloat(v.odd) || null;
-        }
-      }
-      if (bet.name === 'Asian Handicap') {
-        for (const v of bet.values) {
-          if (v.value === 'Home -0.5') odds.ah_home_m05 = parseFloat(v.odd) || null;
-          if (v.value === 'Away -0.5') odds.ah_away_m05 = parseFloat(v.odd) || null;
-          if (v.value === 'Home +0.5') odds.ah_home_p05 = parseFloat(v.odd) || null;
-          if (v.value === 'Away +0.5') odds.ah_away_p05 = parseFloat(v.odd) || null;
-        }
-      }
-      if (bet.name === 'Corners Over/Under') {
-        for (const v of bet.values) {
-          if (v.value === 'Over 7.5')   odds.cornersOver75  = parseFloat(v.odd) || null;
-          if (v.value === 'Over 8.5')   odds.cornersOver85  = parseFloat(v.odd) || null;
-          if (v.value === 'Over 9.5')   odds.cornersOver95  = parseFloat(v.odd) || null;
-          if (v.value === 'Over 10.5')  odds.cornersOver105 = parseFloat(v.odd) || null;
-          if (v.value === 'Over 11.5')  odds.cornersOver115 = parseFloat(v.odd) || null;
-          if (v.value === 'Under 7.5')  odds.cornersUnder75 = parseFloat(v.odd) || null;
-          if (v.value === 'Under 8.5')  odds.cornersUnder85 = parseFloat(v.odd) || null;
-          if (v.value === 'Under 9.5')  odds.cornersUnder95 = parseFloat(v.odd) || null;
-        }
-      }
-      if (bet.name === 'Cards Over/Under') {
-        for (const v of bet.values) {
-          if (v.value === 'Over 2.5')  odds.cardsOver25  = parseFloat(v.odd) || null;
-          if (v.value === 'Over 3.5')  odds.cardsOver35  = parseFloat(v.odd) || null;
-          if (v.value === 'Over 4.5')  odds.cardsOver45  = parseFloat(v.odd) || null;
-          if (v.value === 'Over 5.5')  odds.cardsOver55  = parseFloat(v.odd) || null;
-          if (v.value === 'Under 3.5') odds.cardsUnder35 = parseFloat(v.odd) || null;
-          if (v.value === 'Under 4.5') odds.cardsUnder45 = parseFloat(v.odd) || null;
-        }
-      }
-      if (bet.name === 'Goals Both Halves') {
-        odds.goalsBothHalves = parseFloat(bet.values.find(v => v.value === 'Yes')?.odd) || null;
-      }
-    }
-    return Object.keys(odds).length > 0 ? odds : null;
-  } catch { return null; }
-}
-
-// ─── The Odds API — cuotas bulk (1 request/deporte, no por partido) ───────────
-// Free tier: 500 req/mes. Mucho más confiable y disponible desde temprano.
-// Registro gratis: https://the-odds-api.com/
-
-// API-Football leagueId → The Odds API sport key
-const LEAGUE_TO_ODDS_SPORT = {
-  39:  'soccer_england_premier_league',
-  40:  'soccer_efl_champ',
-  140: 'soccer_spain_la_liga',
-  141: 'soccer_spain_segunda_division',
-  135: 'soccer_italy_serie_a',
-  136: 'soccer_italy_serie_b',
-  78:  'soccer_germany_bundesliga',
-  79:  'soccer_germany_2_bundesliga',
-  61:  'soccer_france_ligue_one',
-  62:  'soccer_france_ligue_deux',
-  2:   'soccer_uefa_champs_league',
-  3:   'soccer_uefa_europa_league',
-  848: 'soccer_uefa_europa_conference_league',
-  88:  'soccer_netherlands_eredivisie',
-  89:  'soccer_netherlands_eerste_divisie',
-  94:  'soccer_portugal_primeira_liga',
-  95:  'soccer_portugal_segunda_liga',
-  197: 'soccer_greece_super_league',
-  203: 'soccer_turkey_super_league',
-  144: 'soccer_belgium_first_div',
-  119: 'soccer_denmark_superliga',
-  113: 'soccer_sweden_allsvenskan',
-  103: 'soccer_norway_eliteserien',
-  106: 'soccer_poland_ekstraklasa',
-  283: 'soccer_romania_liga_1',
-  207: 'soccer_switzerland_super_league',
-  179: 'soccer_scotland_premiership',
-  98:  'soccer_japan_j_league',
-  292: 'soccer_south_korea_kleague1',
-  71:  'soccer_brazil_campeonato',
-  72:  'soccer_brazil_campeonato_b',
-  128: 'soccer_argentina_primera_division',
-  239: 'soccer_colombia_primera_a',
-  262: 'soccer_mexico_ligamx',
-  253: 'soccer_usa_mls',
-  307: 'soccer_saudi_professional_league',
-  // Copas CONMEBOL
-  11:  'soccer_conmebol_copa_sudamericana',
-  13:  'soccer_conmebol_copa_libertadores',
-};
-
-// Cache en memoria: key = `${sportKey}_${dateStr}`, valor = { ts, events }
-const _oddsApiCache = new Map();
-
-function _normalizeTeamOdds(name) {
-  return (name || '')
-    .toLowerCase()
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')   // quitar diacríticos (rango Unicode correcto)
-    // quitar sufijos/prefijos de club y preposiciones
-    .replace(/\b(fc|cf|sc|ac|rc|cd|sd|sk|bk|fk|nk|as|ss|sv|vv|vs|if|dk|ik|rb|afc|utd|united|de|del|la|el|los|las|do|da|dos|das|van|den|het)\b/g, '')
-    .replace(/[^a-z0-9 ]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function _teamsMatchOdds(a, b) {
-  const na = _normalizeTeamOdds(a);
-  const nb = _normalizeTeamOdds(b);
-  if (na === nb) return true;
-  if (na.length > 4 && nb.includes(na)) return true;
-  if (nb.length > 4 && na.includes(nb)) return true;
-  // coincidencia por palabras significativas (≥5 chars) — cubre "Atletico Madrid" vs "Atletico de Madrid"
-  const sigWords = (s) => s.split(' ').filter(w => w.length >= 5);
-  const wa = sigWords(na), wb = sigWords(nb);
-  const shared = wa.filter(w => wb.includes(w));
-  if (shared.length >= 2) return true;                 // al menos 2 palabras clave comunes
-  if (shared.length === 1 && wa.length <= 2 && wb.length <= 2) return true; // equipos de 1 palabra
-  return false;
-}
-
-async function _fetchOddsApiBulk(sportKey, dateStr) {
-  const cacheKey = `${sportKey}_${dateStr}`;
-  const cached = _oddsApiCache.get(cacheKey);
-  // TTL: 2 horas (cuotas no cambian drásticamente en ese tiempo)
-  if (cached && (Date.now() - cached.ts) < 2 * 60 * 60 * 1000) return cached.events;
-
-  const apiKey = process.env.THE_ODDS_API_KEY;
-  if (!apiKey) return [];
-
-  try {
-    // Ventana de tiempo: día solicitado + día siguiente (cubre zonas horarias)
-    const from = `${dateStr}T00:00:00Z`;
-    const nextDay = new Date(new Date(dateStr + 'T12:00:00Z').getTime() + 24 * 60 * 60 * 1000)
-      .toISOString().split('T')[0];
-    const to = `${nextDay}T23:59:59Z`;
-
-    const { data, headers } = await axios.get(
-      `https://api.the-odds-api.com/v4/sports/${sportKey}/odds/`,
-      {
-        params: {
-          apiKey,
-          regions: 'eu',
-          markets: 'h2h,totals,btts',
-          oddsFormat: 'decimal',
-          dateFormat: 'iso',
-          commenceTimeFrom: from,
-          commenceTimeTo: to,
-        },
-        timeout: 12000,
-      }
-    );
-    const remaining = headers['x-requests-remaining'];
-    console.log(`🎰 OddsAPI [${sportKey}] → ${(data||[]).length} eventos | Requests restantes: ${remaining ?? '?'}`);
-    _oddsApiCache.set(cacheKey, { ts: Date.now(), events: data || [] });
-    return data || [];
-  } catch (err) {
-    console.warn(`⚠️ OddsAPI error [${sportKey}]: ${err.message}`);
-    _oddsApiCache.set(cacheKey, { ts: Date.now(), events: [] }); // caché vacío para no reintentar
-    return [];
-  }
-}
-
-function _parseOddsApiEvent(event) {
-  // Bookmaker priority: bet365 > pinnacle > betfair > unibet > cualquiera
-  const PRIO = ['bet365', 'pinnacle', 'betfair', 'unibet', 'williamhill', 'bwin', 'marathonbet'];
-  const bm = PRIO.reduce((best, key) => best || (event.bookmakers || []).find(b => b.key === key), null)
-    || (event.bookmakers || [])[0];
-  if (!bm) return null;
-
-  const odds = {};
-  for (const market of bm.markets || []) {
-    if (market.key === 'h2h') {
-      for (const o of market.outcomes) {
-        if (o.name === 'Draw')             odds.draw    = o.price;
-        else if (o.name === event.home_team) odds.homeWin = o.price;
-        else if (o.name === event.away_team) odds.awayWin = o.price;
-      }
-    }
-    if (market.key === 'totals') {
-      for (const o of market.outcomes) {
-        const pt = o.point;
-        if (o.name === 'Over')  {
-          if (pt === 0.5) odds.over05  = o.price;
-          if (pt === 1.5) odds.over15  = o.price;
-          if (pt === 2.5) odds.over25  = o.price;
-          if (pt === 3.5) odds.over35  = o.price;
-        } else if (o.name === 'Under') {
-          if (pt === 2.5) odds.under25 = o.price;
-          if (pt === 3.5) odds.under35 = o.price;
-        }
-      }
-    }
-    if (market.key === 'btts') {
-      for (const o of market.outcomes) {
-        if (o.name === 'Yes') odds.bttsYes = o.price;
-        if (o.name === 'No')  odds.bttsNo  = o.price;
-      }
-    }
-  }
-  return Object.keys(odds).length >= 2 ? odds : null;
-}
-
-/**
- * Pre-fetches odds from The Odds API for all sport keys relevant to the given fixtures.
- * Returns a Map<fixtureId, odds_object>. Each sport key uses 1 API request (not per fixture).
- */
-async function prefetchOddsApi(fixtures, dateStr) {
-  if (!process.env.THE_ODDS_API_KEY) return new Map();
-
-  // Agrupar fixtures por sport key (solo los que tienen mapping)
-  const bySport = new Map();
-  for (const f of fixtures) {
-    const sportKey = LEAGUE_TO_ODDS_SPORT[f.leagueId];
-    if (!sportKey) continue;
-    if (!bySport.has(sportKey)) bySport.set(sportKey, []);
-    bySport.get(sportKey).push(f);
-  }
-  if (bySport.size === 0) return new Map();
-
-  console.log(`🎰 OddsAPI: pre-fetching ${bySport.size} sports para ${fixtures.length} fixtures...`);
-
-  const sportKeys = [...bySport.keys()];
-  const results = await Promise.allSettled(sportKeys.map(sk => _fetchOddsApiBulk(sk, dateStr)));
-
-  const oddsMap = new Map();
-  for (let i = 0; i < sportKeys.length; i++) {
-    if (results[i].status !== 'fulfilled') continue;
-    const events  = results[i].value;
-    const myFixts = bySport.get(sportKeys[i]);
-
-    for (const fixture of myFixts) {
-      // Buscar el evento que coincide por nombres de equipo
-      const match = events.find(e =>
-        _teamsMatchOdds(e.home_team, fixture.homeTeam) &&
-        _teamsMatchOdds(e.away_team, fixture.awayTeam)
-      );
-      if (!match) continue;
-      const parsedOdds = _parseOddsApiEvent(match);
-      if (parsedOdds) oddsMap.set(fixture.fixtureId, { ...parsedOdds, _source: 'theOddsApi' });
-    }
-  }
-
-  console.log(`🎰 OddsAPI: ${oddsMap.size} / ${fixtures.length} fixtures con cuotas`);
-  return oddsMap;
-}
-
-async function getLiveOdds(fixtureId) {
-  try {
-    const { data } = await API.get('/odds/live', { params: { fixture: fixtureId } });
-    const bets = data.response?.[0]?.odds || [];
-    const odds = {};
-    for (const bet of bets) {
-      if (bet.name === 'Match Winner') {
-        odds.homeWin = parseFloat(bet.values.find(v => v.value === 'Home')?.odd) || null;
-        odds.draw    = parseFloat(bet.values.find(v => v.value === 'Draw')?.odd) || null;
-        odds.awayWin = parseFloat(bet.values.find(v => v.value === 'Away')?.odd) || null;
-      }
-      if (bet.name === 'Both Teams Score') {
-        odds.bttsYes = parseFloat(bet.values.find(v => v.value === 'Yes')?.odd) || null;
-        odds.bttsNo  = parseFloat(bet.values.find(v => v.value === 'No')?.odd) || null;
-      }
-      if (bet.name === 'Goals Over/Under') {
-        odds.over05  = parseFloat(bet.values.find(v => v.value === 'Over 0.5')?.odd)  || null;
-        odds.over15  = parseFloat(bet.values.find(v => v.value === 'Over 1.5')?.odd)  || null;
-        odds.over25  = parseFloat(bet.values.find(v => v.value === 'Over 2.5')?.odd)  || null;
-        odds.over35  = parseFloat(bet.values.find(v => v.value === 'Over 3.5')?.odd)  || null;
-      }
-      if (bet.name === 'Cards Over/Under') {
-        odds.cardsOver35 = parseFloat(bet.values.find(v => v.value === 'Over 3.5')?.odd) || null;
-        odds.cardsOver45 = parseFloat(bet.values.find(v => v.value === 'Over 4.5')?.odd) || null;
-        odds.cardsOver55 = parseFloat(bet.values.find(v => v.value === 'Over 5.5')?.odd) || null;
-      }
-      if (bet.name === 'Corners Over/Under') {
-        odds.cornersOver85  = parseFloat(bet.values.find(v => v.value === 'Over 8.5')?.odd)  || null;
-        odds.cornersOver95  = parseFloat(bet.values.find(v => v.value === 'Over 9.5')?.odd)  || null;
-        odds.cornersOver105 = parseFloat(bet.values.find(v => v.value === 'Over 10.5')?.odd) || null;
-        odds.cornersOver115 = parseFloat(bet.values.find(v => v.value === 'Over 11.5')?.odd) || null;
-        odds.cornersOver125 = parseFloat(bet.values.find(v => v.value === 'Over 12.5')?.odd) || null;
-      }
-    }
-    return Object.keys(odds).length > 0 ? { source: 'live', ...odds } : null;
-  } catch { return null; }
-}
-
-/**
- * Obtiene los últimos N partidos de un equipo para calcular días de descanso.
- * Retorna la fecha del último partido jugado.
- */
-async function getLastMatchDate(teamId) {
-  try {
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    const from = new Date();
-    from.setDate(from.getDate() - 30);
-    const { data } = await API.get('/fixtures', {
-      params: {
-        team: teamId,
-        from: from.toISOString().split('T')[0],
-        to:   yesterday.toISOString().split('T')[0],
-        last: 1,
-      },
-    });
-    const last = data.response?.[0];
-    return last?.fixture?.date ? new Date(last.fixture.date) : null;
-  } catch { return null; }
-}
-
-/**
- * Construye contexto rico del partido: ronda/competición, lo que se juega,
- * cansancio, sede, urgencia táctica. Todo extraído de datos ya disponibles.
- * NO hace llamadas extra — usa los datos del fixture y standings ya fetcheados.
- */
-function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTeams, leagueId, homeLastMatch, awayLastMatch }) {
-  const ctx = {};
-
-  // ── 1. Días de descanso (cansancio) ─────────────────────────────────────────
-  const today = new Date();
-  if (homeLastMatch) {
-    const days = Math.round((today - homeLastMatch) / 86400000);
-    ctx.cansancioLocal = days <= 3 ? `⚠️ Solo ${days} días de descanso (posible rotación)` : `${days} días de descanso`;
-    ctx.diasDescansoLocal = days;
-  }
-  if (awayLastMatch) {
-    const days = Math.round((today - awayLastMatch) / 86400000);
-    ctx.cansancioVisitante = days <= 3 ? `⚠️ Solo ${days} días de descanso (posible rotación)` : `${days} días de descanso`;
-    ctx.diasDescansoVisitante = days;
-  }
-
-  // ── 2. Contexto de ronda/competición ─────────────────────────────────────────
-  if (round) {
-    const roundLower = round.toLowerCase();
-
-    // ── PLAYOFFS y formatos especiales — SIEMPRE tienen prioridad ───────────────
-    if (/relegat/i.test(round)) {
-      // Playoff de descenso/ascenso (ej: Bundesliga vs 2.Bundesliga)
-      const leg = /1st|first|ida/i.test(round) ? ' — Partido de IDA' : /2nd|second|vuelta/i.test(round) ? ' — Partido de VUELTA' : '';
-      ctx.contextoCopa     = `⚠️ PLAYOFF DE DESCENSO/ASCENSO${leg} — eliminación directa. El perdedor baja de categoría o pierde el ascenso. Máxima presión en ambos equipos.`;
-      ctx.formatoEspecial  = 'playoff_relegacion';
-      ctx.advertenciaStats = '⚠️ Las estadísticas de temporada son de ligas DISTINTAS — comparación directa no es válida. Analizar por separado.';
-      ctx.urgencia         = 'maxima';
-    } else if (/promotion.?play.?off|play.?off.*promot|ascenso.*play/i.test(round)) {
-      ctx.contextoCopa    = '🚀 PLAYOFF DE ASCENSO — eliminación directa, el ganador sube de categoría';
-      ctx.formatoEspecial = 'playoff_ascenso';
-      ctx.urgencia        = 'maxima';
-    } else if (/championship.?play.?off|championship.?group|championship.?round|play.?off.*championship/i.test(round)) {
-      // Belgica, Noruega, etc. — grupos de playoff al final de temporada
-      ctx.contextoCopa    = `🏆 CHAMPIONSHIP PLAYOFFS — fase final post-temporada regular. Las estadísticas de liga regular NO reflejan la forma actual del equipo en esta fase. Los puntos se redistribuyen al inicio del playoff.`;
-      ctx.formatoEspecial = 'championship_playoffs';
-      ctx.advertenciaStats = '⚠️ IMPORTANTE: Estadísticas son de temporada regular completa. En Championship Playoffs los equipos pueden tener rendimiento diferente — contextualizar con forma reciente.';
-      ctx.urgencia        = 'alta';
-    } else if (/europa.?play.?off|european.?play.?off/i.test(round)) {
-      ctx.contextoCopa    = '🌍 PLAYOFF EUROPEO — partido decisivo para clasificación a competiciones europeas';
-      ctx.formatoEspecial = 'playoff_europeo';
-      ctx.urgencia        = 'alta';
-    } else if (/group stage/i.test(round)) {
-      const match = round.match(/(\d+)/);
-      const matchday = match ? parseInt(match[1]) : null;
-      const totalGroupGames = [11, 13].includes(leagueId) ? 6 : 6;
-      if (matchday) {
-        if (matchday === totalGroupGames) {
-          ctx.contextoCopa = `🔥 ÚLTIMA JORNADA de fase de grupos — cada punto puede cambiar la clasificación`;
-          ctx.urgencia     = 'maxima';
-        } else if (matchday === totalGroupGames - 1) {
-          ctx.contextoCopa = `⚡ Penúltima jornada de grupos — partido decisivo para la clasificación`;
-          ctx.urgencia     = 'alta';
-        }
-      }
-    } else if (/round of 16|octavos/i.test(round)) {
-      ctx.contextoCopa = '🏆 Octavos de final — eliminación directa';
-    } else if (/quarter.?final|cuartos/i.test(round)) {
-      ctx.contextoCopa = '🏆 Cuartos de final — eliminación directa';
-    } else if (/semi.?final|semis/i.test(round)) {
-      ctx.contextoCopa = '🏆 Semifinal — a un partido de la final';
-    } else if (/\bfinal\b/i.test(round) && !/semi/i.test(round)) {
-      ctx.contextoCopa  = '🏆 FINAL — partido único en cancha neutral, todo en juego';
-      ctx.urgencia      = 'maxima';
-      ctx.cancha_neutral = true; // finales se juegan en sede neutral — las stats de local/visitante no aplican directamente
-    } else if (/2nd.?leg|vuelta|segundo.?partido/i.test(round)) {
-      ctx.contextoCopa = '⚽ PARTIDO DE VUELTA — el análisis debe incluir el marcador del partido de ida';
-      ctx.urgencia     = 'alta';
-    }
-
-    // Cuadrangular colombiano
-    if (/cuadrangular|cuadrang/i.test(round)) {
-      const matchday = round.match(/(\d+)/)?.[1];
-      ctx.contextoCopa    = `🇨🇴 CUADRANGULAR — fase semifinal del torneo colombiano${matchday ? ` (Fecha ${matchday})` : ''}. Las estadísticas de la temporada regular NO aplican directamente — lo que importa es el rendimiento en el cuadrangular.`;
-      ctx.formatoEspecial = 'cuadrangular_colombia';
-      ctx.urgencia        = 'alta';
-    }
-
-    // Temporada regular: detectar jornada y urgencia
-    const jornada = round.match(/(?:regular season|matchday|jornada|semana|fecha)\s*[-–]?\s*(\d+)/i);
-    if (jornada) {
-      const n = parseInt(jornada[1]);
-      ctx.jornadaNumero = n;
-      const totalesLiga = {
-        39: 38, 140: 38, 135: 38, 78: 34, 61: 34,
-        88: 34, 71: 38, 239: 20, 262: 17, 253: 34,
-        144: 30, 94: 34, 11: 6, 13: 6,  // 11=Sudamericana, 13=Libertadores
-      };
-      const total     = totalesLiga[leagueId] || 38;
-      const restantes = total - n;
-      ctx.jornadasRestantes = restantes;
-      if (restantes <= 0)      ctx.contextoJornada = '🏁 ÚLTIMA JORNADA de la temporada regular';
-      else if (restantes <= 3) ctx.contextoJornada = `🔥 Últimas ${restantes} jornadas — definición de temporada en juego`;
-      else if (restantes <= 6) ctx.contextoJornada = `Recta final: quedan ${restantes} jornadas`;
-    }
-  }
-
-  // ── 3. Urgencia táctica por posición en tabla ─────────────────────────────────
-  const stakeTexts = [];
-  if (homeStanding && totalTeams) {
-    const pos = homeStanding.rank;
-    const pts = homeStanding.points;
-    const motiv = getTeamMotivation(homeStanding, totalTeams);
-
-    if (motiv.estado === 'titulo') stakeTexts.push(`🥇 ${homeStanding.team || 'Local'} PELEA EL TÍTULO (${pos}º, ${pts} pts)`);
-    else if (motiv.estado === 'champions') stakeTexts.push(`🔵 ${homeStanding.team || 'Local'} lucha por zona Champions/Libertadores (${pos}º)`);
-    else if (motiv.estado === 'lucha_descenso') stakeTexts.push(`🔴 ${homeStanding.team || 'Local'} EN ZONA DE DESCENSO (${pos}º) — necesita puntos`);
-    else if (motiv.estado === 'riesgo_descenso') stakeTexts.push(`🟠 ${homeStanding.team || 'Local'} al borde del descenso (${pos}º)`);
-    else if (motiv.estado === 'nada_en_juego') stakeTexts.push(`⚪ ${homeStanding.team || 'Local'} sin nada en juego (${pos}º)`);
-  }
-  if (awayStanding && totalTeams) {
-    const pos = awayStanding.rank;
-    const motiv = getTeamMotivation(awayStanding, totalTeams);
-    if (motiv.estado === 'titulo') stakeTexts.push(`🥇 ${awayStanding.team || 'Visitante'} PELEA EL TÍTULO (${pos}º)`);
-    else if (motiv.estado === 'lucha_descenso') stakeTexts.push(`🔴 ${awayStanding.team || 'Visitante'} EN ZONA DE DESCENSO (${pos}º)`);
-    else if (motiv.estado === 'nada_en_juego') stakeTexts.push(`⚪ ${awayStanding.team || 'Visitante'} sin nada en juego (${pos}º)`);
-  }
-  if (stakeTexts.length > 0) ctx.loQueSeJuega = stakeTexts;
-
-  return ctx;
-}
-
-async function getApiPrediction(fixtureId) {
-  try {
-    const { data } = await API.get('/predictions', { params: { fixture: fixtureId } });
-    const pred = data.response?.[0];
-    if (!pred) return null;
-    // goals_home / goals_away son los xG esperados del partido calculados por la API
-    // (más precisos que el promedio de temporada porque ajustan por rival, forma y contexto)
-    const goalsHome = parseFloat(pred.predictions?.goals?.home);
-    const goalsAway = parseFloat(pred.predictions?.goals?.away);
-    return {
-      winner:        pred.predictions?.winner?.name,
-      winnerComment: pred.predictions?.winner?.comment,
-      under_over:    pred.predictions?.under_over,
-      goals_home:    !isNaN(goalsHome) ? goalsHome : null,
-      goals_away:    !isNaN(goalsAway) ? goalsAway : null,
-      advice:        pred.predictions?.advice,
-      percent:       pred.predictions?.percent,
-      // Comparación directa H2H de fortaleza
-      h2h_home:      pred.h2h,
-    };
-  } catch { return null; }
-}
+async function getRealOdds(fixtureId) { return null; }
+async function getLiveOdds(fixtureId) { return null; }
+async function getLastMatchDate(teamId) { return null; }
+async function getApiPrediction(fixtureId) { return null; }
 
 async function getTeamStats(teamId, leagueId) {
-  const season = LEAGUE_SEASONS[leagueId] || 2026;
+  const season = LEAGUE_SEASONS[leagueId] || 2025;
+  const fromDate = `${season - 1}-06-01`;
+  try {
+    const { data } = await API.get('/teams/statistics/' + teamId, { params: { fromDate } });
+    if (!data || data.length === 0) return null;
 
-  function parseStats(r) {
-    if (!r) return null;
-    const played = r.fixtures?.played?.total || 0;
-    const hasData = played > 0 || r.goals?.for?.total?.total > 0;
-    if (!hasData) return null;
-    // Marcar muestras pequeñas para que Claude no las use como argumento sólido
-    const muestraReducida = played > 0 && played < 5;
-    // ─── Tarjetas: suma por períodos (API devuelve por franja de minutos, no total directo) ───
-    const sumCards = (cardObj) => {
-      if (!cardObj) return 0;
-      return Object.values(cardObj).reduce((acc, v) => acc + (v?.total || 0), 0);
-    };
-    const totalAmarillasSeason = sumCards(r.cards?.yellow);
-    const totalRojasSeason     = sumCards(r.cards?.red);
-    // Promedio por partido (si tenemos datos de partidos jugados)
-    const amarillasPP = played > 0 && totalAmarillasSeason > 0
-      ? +(totalAmarillasSeason / played).toFixed(2) : null;
-    const rojasPP = played > 0 && totalRojasSeason > 0
-      ? +(totalRojasSeason / played).toFixed(2) : null;
+    const leagueStat = data.find(s => s.leagueId === leagueId)
+      || data.sort((a, b) => (b.total?.games?.played || 0) - (a.total?.games?.played || 0))[0];
+    if (!leagueStat) return null;
 
-    // ─── Faltas: la API-Football devuelve en /fixtures/statistics por partido, no en /teams/statistics.
-    //     Aquí estimamos faltas por partido = amarillas * 4.2 (ratio histórico promedio en ligas top).
-    //     Marcamos como estimación para que Claude no lo cite como dato oficial.
-    const faltasPP_est = amarillasPP != null ? +(amarillasPP * 4.2).toFixed(1) : null;
-
-    // ─── Corners: también en /teams/statistics → campo "fixtures.goals" NO, pero sí en algunos planes.
-    //     Si la API los devuelve en r.goals.for.minute o similar, los leemos; si no, null.
-    //     La API-Football NO devuelve corners en /teams/statistics estándar — solo en /fixtures/statistics.
+    const { home, away, total } = leagueStat;
+    const hP = home.games.played || 1;
+    const aP = away.games.played || 1;
 
     return {
-      equipo:             r.team?.name,
-      liga:               r.league?.name,
-      temporada:          r.league?.season,
-      partidosJugados:    played,
-      ...(muestraReducida && { advertencia: `Muestra reducida (${played} partido${played>1?'s':''}) — promedios poco confiables` }),
-      forma:              r.form?.replace(/W/g,'G').replace(/L/g,'P').replace(/D/g,'E').slice(-6).split('').join('-'),
-      forma5:             (() => {
-        const f5 = r.form?.replace(/W/g,'G').replace(/L/g,'P').replace(/D/g,'E').slice(-5) || '';
-        const wins = (f5.match(/G/g) || []).length;
-        const losses = (f5.match(/P/g) || []).length;
-        const draws = (f5.match(/E/g) || []).length;
-        const pts = wins * 3 + draws;
-        return { forma: f5.split('').join('-'), victorias: wins, empates: draws, derrotas: losses, puntos: pts, nota: pts >= 12 ? 'Forma excelente' : pts >= 9 ? 'Forma buena' : pts >= 6 ? 'Forma regular' : 'Forma mala' };
-      })(),
-      golesAnotadosHome:  r.goals?.for?.average?.home,
-      golesAnotadosAway:  r.goals?.for?.average?.away,
-      golesRecibidosHome: r.goals?.against?.average?.home,
-      golesRecibidosAway: r.goals?.against?.average?.away,
-      cleanSheetsHome:    r.clean_sheet?.home,
-      cleanSheetsAway:    r.clean_sheet?.away,
-      failedToScoreHome:  r.failed_to_score?.home,
-      failedToScoreAway:  r.failed_to_score?.away,
-      victorias:          r.fixtures?.wins,
-      empates:            r.fixtures?.draws,
-      derrotas:           r.fixtures?.loses,
-      // ── Tarjetas históricas ──────────────────────────────────────────────────
-      ...(amarillasPP != null && { amarillasPorPartido: amarillasPP }),
-      ...(rojasPP     != null && { rojasPorPartido:     rojasPP }),
-      ...(totalAmarillasSeason > 0 && { amarillasTemporada: totalAmarillasSeason }),
-      // ── Faltas estimadas (derivada de tarjetas) ──────────────────────────────
-      ...(faltasPP_est != null && { faltasCometidasPorPartido_est: faltasPP_est, _nota_faltas: 'Estimación (amarillas × 4.2) — no es dato directo de API' }),
+      equipo:             null,
+      liga:               leagueStat.leagueName,
+      temporada:          leagueStat.season,
+      forma:              null,
+      golesAnotadosHome:  +(home.goals.scored  / hP).toFixed(2),
+      golesAnotadosAway:  +(away.goals.scored  / aP).toFixed(2),
+      golesRecibidosHome: +(home.goals.received / hP).toFixed(2),
+      golesRecibidosAway: +(away.goals.received / aP).toFixed(2),
+      cleanSheetsHome:    null,
+      cleanSheetsAway:    null,
+      failedToScoreHome:  null,
+      failedToScoreAway:  null,
+      victorias: { total: total.games.wins,  home: home.games.wins,  away: away.games.wins  },
+      empates:   { total: total.games.draws, home: home.games.draws, away: away.games.draws },
+      derrotas:  { total: total.games.loses, home: home.games.loses, away: away.games.loses },
     };
-  }
-
-  // 1. Intentar con la liga y temporada del partido
-  try {
-    const { data } = await API.get('/teams/statistics', { params: { team: teamId, league: leagueId, season } });
-    const stats = parseStats(data.response);
-    if (stats) return stats;
-    console.warn(`⚠️  getTeamStats(team=${teamId}, liga=${leagueId}): respuesta OK pero sin juegos registrados (season=${season})`);
   } catch (e) {
-    console.error(`❌ getTeamStats(team=${teamId}, liga=${leagueId}, season=${season}): ${e?.response?.status ?? e.message}`);
+    console.error(`getTeamStats(${teamId}, ${leagueId}): ${e.message}`);
+    return null;
   }
-
-  // 2. Fallback — estrategia según tipo de liga
-  const prevSeason = season - 1;
-
-  // Ligas de selecciones nacionales — WC, Euros, Nations League, qualifiers, friendlies
-  const NATIONAL_LEAGUES = new Set([1, 4, 5, 6, 7, 8, 10, 29, 32]);
-  const isNationalLeague = NATIONAL_LEAGUES.has(leagueId);
-
-  const FALLBACK_LEAGUES = [11, 13].includes(leagueId)
-    ? [
-        { league: leagueId, season: prevSeason },
-        { league: 71,  season: 2026 },
-        { league: 128, season: 2026 },
-        { league: 239, season: 2026 },
-      ]
-    : isNationalLeague
-    ? [
-        // Para selecciones nacionales: rastrear todas las competiciones recientes
-        { league: 1,  season: 2026 },  // Copa del Mundo 2026
-        { league: 6,  season: 2026 },  // Clasificatorias WC 2026
-        { league: 6,  season: 2025 },  // Clasificatorias WC 2025
-        { league: 10, season: 2026 },  // Amistosos int. 2026
-        { league: 10, season: 2025 },  // Amistosos int. 2025
-        { league: 5,  season: 2024 },  // UEFA Nations League 2024
-        { league: 5,  season: 2025 },  // UEFA Nations League 2025
-        { league: 4,  season: 2024 },  // UEFA Euro 2024
-        { league: 29, season: 2024 },  // Copa América 2024
-        { league: 7,  season: 2025 },  // CONCACAF Nations League
-        { league: 8,  season: 2025 },  // AFC Asian Cup Qualifiers
-      ]
-    : [
-        { league: leagueId, season: prevSeason },
-        { league: 10, season: 2025 },
-        { league: 5,  season: 2024 },
-      ];
-
-  // Delay entre intentos de fallback para selecciones nacionales (muchos intentos → evitar rate limit)
-  const fallbackDelay = isNationalLeague ? 250 : 0;
-
-  for (const fb of FALLBACK_LEAGUES) {
-    if (fb.league === leagueId && fb.season === season) continue;
-    if (fallbackDelay > 0) await new Promise(r => setTimeout(r, fallbackDelay));
-    try {
-      const { data } = await API.get('/teams/statistics', { params: { team: teamId, league: fb.league, season: fb.season } });
-      const stats = parseStats(data.response);
-      if (stats) return { ...stats, nota: `Referencia: ${stats.liga} ${stats.temporada}` };
-    } catch (e) {
-      console.warn(`⚠️  getTeamStats fallback(team=${teamId}, liga=${fb.league}, season=${fb.season}): ${e?.response?.status ?? e.message}`);
-    }
-  }
-
-  // 3. Último recurso para selecciones: construir stats desde últimos 20 partidos
-  if (isNationalLeague) {
-    const recentStats = await getNationalTeamRecentStats(teamId);
-    if (recentStats) {
-      console.log(`✅ getTeamStats: selección nacional ${teamId} — stats derivadas de últimos ${recentStats._partidosAnalizados} partidos`);
-      return recentStats;
-    }
-  }
-
-  console.warn(`🚨 getTeamStats(team=${teamId}, liga=${leagueId}): sin datos en ningún intento`);
-  return null;
 }
 
-/**
- * Obtiene stats de selección nacional compilando sus últimos N partidos
- * de cualquier competición (WC, Qualifiers, Nations League, Friendlies).
- * Útil cuando la WC acaba de empezar y solo hay 1-2 partidos en el torneo.
- */
 async function getNationalTeamRecentStats(teamId, last = 20) {
   try {
-    const { data } = await API.get('/fixtures', {
-      params: { team: teamId, last, status: 'FT' },
-    });
-    const fixtures = data.response || [];
+    const fixtures = await getTeamLastFixtures(teamId, last);
     if (fixtures.length < 3) return null;
 
     let golesAFavor = 0, golesEnContra = 0, partidos = 0;
     let victorias = 0, empates = 0, derrotas = 0;
     let bttsCount = 0, cleanSheets = 0, failedToScore = 0;
     let formStr = '';
-    let totalAmarillasSeason = 0;
 
     for (const f of fixtures) {
-      const isHome = f.teams.home.id === teamId;
-      const gF  = isHome ? (f.goals.home ?? 0) : (f.goals.away ?? 0);
-      const gC  = isHome ? (f.goals.away ?? 0) : (f.goals.home ?? 0);
+      const isHome = f.homeId === teamId;
+      const gF  = isHome ? (f.golesHome ?? 0) : (f.golesAway ?? 0);
+      const gC  = isHome ? (f.golesAway ?? 0) : (f.golesHome ?? 0);
       golesAFavor   += gF;
       golesEnContra += gC;
       partidos++;
@@ -4822,12 +4076,18 @@ async function evaluatePendingPicks() {
   const fixtureMap = {};
 
   await Promise.allSettled(fixtureIds.map(async (fid) => {
-    const { data } = await API.get('/fixtures', { params: { id: fid } });
-    const f = data.response?.[0];
-    if (f && ['FT', 'AET', 'PEN'].includes(f.fixture.status.short)) {
-      const stats = await getFixtureStatistics(fid).catch(() => null);
-      fixtureMap[fid] = { fixture: f, stats };
-    }
+    const pick = pending.find(p => p.fixtureId === fid);
+    if (!pick?.fechaPartido) return;
+    const date = pick.fechaPartido.split('T')[0];
+    try {
+      const allMatches = await fetchFixturesByDate(date);
+      const m = allMatches.find(match => match.id === fid);
+      if (m && FINISHED_DESCS.has(m.state?.description)) {
+        const f = hlToApif(m);
+        const stats = await getFixtureStatistics(fid).catch(() => null);
+        fixtureMap[fid] = { fixture: f, stats };
+      }
+    } catch {}
   }));
 
   const actualizados = [];
@@ -4842,7 +4102,6 @@ async function evaluatePendingPicks() {
   }
 
   persistPicks(picks);
-  // Actualizar resultados en Airtable
   for (const pick of actualizados) {
     updatePickInAirtable(pick).catch(() => {});
   }
@@ -5653,7 +4912,7 @@ async function handleSistemaHoy(chatId) {
   for (let i = 0; i < statsPairs.length; i += 4) {
     const batch = await Promise.allSettled(statsPairs.slice(i, i + 4));
     statsResults.push(...batch);
-    if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 5000));
+    if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 1000));
   }
 
   // 4. Enriquecer con Poisson + cuotas reales + H2H para partidos sin stats
@@ -5726,44 +4985,17 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
   await bot.sendMessage(chatId, `🔍 Consultando nuestra base de datos — ${displayName}...`);
 
   const today = todayDate();
-  const season = LEAGUE_SEASONS[leagueId] || 2026;
-
-  // Colombia UTC-5: partidos 7PM+ Bogotá se guardan en API-Football como fecha UTC siguiente.
-  // Solución: consultar ambas fechas UTC y filtrar por fecha en Bogotá.
-  const nextUtcDay = (() => {
-    const d = new Date(today + 'T00:00:00Z');
-    d.setUTCDate(d.getUTCDate() + 1);
-    return d.toISOString().split('T')[0];
-  })();
   const SKIP_STATUSES = new Set(['1H','HT','2H','ET','P','BT','LIVE','INT','FT','AET','PEN','AWD','WO']);
 
   let fixtures = [];
-  if (leagueId) {
-    // Consulta directa por liga + ambas fechas UTC (evita filtros genéricos)
-    const [r1, r2] = await Promise.allSettled([
-      API.get('/fixtures', { params: { league: leagueId, season, date: today } }),
-      API.get('/fixtures', { params: { league: leagueId, season, date: nextUtcDay } }),
-    ]);
-    const raw1 = r1.status === 'fulfilled' ? (r1.value.data.response || []) : [];
-    const raw2 = r2.status === 'fulfilled' ? (r2.value.data.response || []) : [];
-    console.log(`🔎 ${displayName}: ${raw1.length} fixtures UTC ${today} + ${raw2.length} UTC ${nextUtcDay}`);
-    const seen = new Set();
-    fixtures = [...raw1, ...raw2]
-      .filter(f => {
-        if (seen.has(f.fixture.id)) return false;
-        seen.add(f.fixture.id);
-        if (SKIP_STATUSES.has(f.fixture.status.short)) return false;
-        const fxBogota = new Date(f.fixture.date).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
-        return fxBogota === today;
-      })
-      .map(parseFixture);
-  } else {
-    // Sin leagueId: getFixturesByDate + filtro por nombre
+  {
     const allF = await getFixturesByDate(today);
-    fixtures = allF.filter(f =>
-      (f.leagueName || '').toLowerCase().includes(leagueName.toLowerCase()) &&
-      !SKIP_STATUSES.has(f.status)
-    );
+    fixtures = allF.filter(f => {
+      if (SKIP_STATUSES.has(f.status)) return false;
+      if (leagueId) return f.leagueId === leagueId;
+      return (f.leagueName || '').toLowerCase().includes(leagueName.toLowerCase());
+    });
+    console.log(`🔎 ${displayName}: ${fixtures.length} fixtures encontrados`);
   }
 
   console.log(`📊 Partidos encontrados para ${displayName}: ${fixtures.length}`);
@@ -5783,7 +5015,7 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
   for (let i = 0; i < statsPairs.length; i += 4) {
     const batch = await Promise.allSettled(statsPairs.slice(i, i + 4));
     statsResults.push(...batch);
-    if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 6000));
+    if (i + 4 < statsPairs.length) await new Promise(r => setTimeout(r, 1000));
   }
 
   // Enriquecer con probabilidades extendidas
@@ -6407,7 +5639,7 @@ async function handleAlertaGol(chatId) {
   const liveRaw = await fetchLiveRaw();
   // Sin filtro de liga — analiza cualquier partido activo en vivo
   const liveActive = liveRaw.filter(f =>
-    ['1H', '2H', 'ET'].includes(f.fixture.status.short)
+    ['First half', 'Second half', 'Extra time'].includes(f.state?.description)
   );
 
   if (liveActive.length === 0) {
@@ -6419,10 +5651,10 @@ async function handleAlertaGol(chatId) {
   // 2. Obtener stats en vivo + eventos + históricas en paralelo
   const candidates = liveActive.slice(0, 20);
   const [liveStatsResults, liveEventsResults, homeStatsResults, awayStatsResults] = await Promise.all([
-    Promise.allSettled(candidates.map(f => getFixtureStatistics(f.fixture.id))),
-    Promise.allSettled(candidates.map(f => getFixtureEvents(f.fixture.id))),  // ← goles/tarjetas/cambios
-    Promise.allSettled(candidates.map(f => getTeamStats(f.teams.home.id, f.league.id))),
-    Promise.allSettled(candidates.map(f => getTeamStats(f.teams.away.id, f.league.id))),
+    Promise.allSettled(candidates.map(f => getFixtureStatistics(f.id))),
+    Promise.allSettled(candidates.map(f => getFixtureEvents(f.id))),
+    Promise.allSettled(candidates.map(f => getTeamStats(f.homeTeam.id, f.league?.id))),
+    Promise.allSettled(candidates.map(f => getTeamStats(f.awayTeam.id, f.league?.id))),
   ]);
 
   // 3. Calcular alerta de gol para cada partido
@@ -6859,9 +6091,8 @@ async function handleRachasFecha(chatId, dateStr, label) {
 
   const fixtures = allRaw
     .filter(f => {
-      if (!RACHAS_FECHA_LEAGUES.has(f.league.id)) return false;
-      // Key fix: validate that this fixture actually falls on dateStr in Bogotá time
-      const fxBogotaDate = new Date(f.fixture.date)
+      if (!RACHAS_FECHA_LEAGUES.has(f.league?.id)) return false;
+      const fxBogotaDate = new Date(f.date)
         .toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
       return fxBogotaDate === dateStr;
     })
@@ -7085,7 +6316,7 @@ async function runZcodeMarketScrape() {
 
     try {
       await page.goto('https://zcodesystem.com/line_reversals', { waitUntil: 'networkidle2', timeout: 40000 });
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise(r => setTimeout(r, 1000));
 
       if (lrHtml) {
         const signals = _parseZcodeGameTable(lrHtml);
@@ -7122,7 +6353,7 @@ async function runZcodeMarketScrape() {
     // --- Dropping Odds ---
     try {
       await page.goto('https://zcodesystem.com/dropping_odds', { waitUntil: 'networkidle2', timeout: 40000 });
-      await new Promise(r => setTimeout(r, 5000));
+      await new Promise(r => setTimeout(r, 1000));
 
       const dropData = await page.evaluate(() => {
         const rows = [];
@@ -7349,7 +6580,7 @@ async function zbDiscover(chatId) {
     });
 
     // Esperar carga dinámica
-    await new Promise(r => setTimeout(r, 5000));
+    await new Promise(r => setTimeout(r, 1000));
 
     // Screenshot
     const screenshotBuf = await page.screenshot({ fullPage: false, type: 'png' });
@@ -7448,7 +6679,7 @@ async function zbScrapeOnce() {
 
     await page.goto(ZB_URL, { waitUntil: 'networkidle2', timeout: 40000 }).catch(() => {});
     // Esperar que el JS del site cargue las predicciones (polling interno buddy.js)
-    await new Promise(r => setTimeout(r, 5000));
+    await new Promise(r => setTimeout(r, 1000));
 
     const raw = await page.evaluate(() => {
       const PROB_ORDER = ['draw','over15','over25','btts','ht_over05','ht_over15','sh_over05','sh_over15'];
@@ -7741,29 +6972,22 @@ async function handleImage(msg) {
       if (homeTeam && awayTeam) {
         const homeId = homeTeam.team.id;
         const awayId = awayTeam.team.id;
-        const [h2hRes, h2hRawRes] = await Promise.allSettled([
+        const [h2hRes, shRes, saRes] = await Promise.allSettled([
           getH2H(homeId, awayId),
-          API.get('/fixtures/headtohead', { params: { h2h: `${homeId}-${awayId}`, last: 1 } }),
+          getTeamStats(homeId, null),
+          getTeamStats(awayId, null),
         ]);
         const h2h = h2hRes.status === 'fulfilled' ? h2hRes.value : [];
-        let statsHome = null, statsAway = null;
-        if (h2hRawRes.status === 'fulfilled') {
-          const lastMatch = h2hRawRes.value.data.response?.[0];
-          if (lastMatch) {
-            const lid = lastMatch.league.id;
-            const [sh, sa] = await Promise.allSettled([getTeamStats(homeId, lid), getTeamStats(awayId, lid)]);
-            statsHome = sh.status === 'fulfilled' ? sh.value : null;
-            statsAway = sa.status === 'fulfilled' ? sa.value : null;
-          }
-        }
+        const statsHome = shRes.status === 'fulfilled' ? shRes.value : null;
+        const statsAway = saRes.status === 'fulfilled' ? saRes.value : null;
         apiContext = { h2h, bttsEnH2H: h2h.filter(m => m.btts).length, statsLocal: statsHome, statsVisitante: statsAway };
         console.log(`📊 API encontró H2H: ${h2h.length} partidos`);
       }
     } catch (e) { console.log('API lookup falló:', e.message); }
 
     const contextNote = apiContext
-      ? 'Datos históricos de API-Football disponibles.'
-      : 'No se encontraron en API-Football. Analiza SOLO con datos de la imagen. Indica "Análisis basado solo en estadísticas visibles".';
+      ? 'Datos históricos disponibles.'
+      : 'No se encontraron datos históricos. Analiza SOLO con datos de la imagen. Indica "Análisis basado solo en estadísticas visibles".';
 
     await bot.sendMessage(chatId, '⚡ Generando análisis in-play...');
     const analysis = await sonnet(
@@ -8207,7 +7431,7 @@ bot.onText(/\/zcode[-_]?tools/, async (msg) => {
         await page.goto(tool.url, { waitUntil: 'networkidle2', timeout: 35000 });
         // Scroll para activar lazy loading
         await page.evaluate(() => window.scrollBy(0, 600));
-        await new Promise(r => setTimeout(r, 6000));
+        await new Promise(r => setTimeout(r, 1000));
         await page.evaluate(() => window.scrollBy(0, 600));
         await new Promise(r => setTimeout(r, 3000));
 
