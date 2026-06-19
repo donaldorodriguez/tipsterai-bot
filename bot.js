@@ -1954,9 +1954,9 @@ function calcLiveGoalLines(currentGoals, elapsed, homeFor = 1.3, awayFor = 1.0) 
     const needed     = Math.ceil(extra);
     const pOver      = +(probAtLeast(needed) * 100).toFixed(1);
     const pUnder     = +(100 - pOver).toFixed(1);
-    // Cuota mínima 1.50 → prob máxima 66.7% → usamos 67% como límite
-    const overHasValue  = pOver  >= 20 && pOver  <= 67;
-    const underHasValue = pUnder >= 20 && pUnder <= 67;
+    // Límite 55%: por encima el mercado cobra ~1.35-1.48 (con margen) → sin valor real
+    const overHasValue  = pOver  >= 20 && pOver  <= 55;
+    const underHasValue = pUnder >= 20 && pUnder <= 55;
     const cuotaOver  = pOver  > 0 ? +(100 / pOver).toFixed(2)  : null;
     const cuotaUnder = pUnder > 0 ? +(100 / pUnder).toFixed(2) : null;
     lines.push({
@@ -1964,8 +1964,8 @@ function calcLiveGoalLines(currentGoals, elapsed, homeFor = 1.3, awayFor = 1.0) 
       overProb: pOver, underProb: pUnder,
       cuotaOver, cuotaUnder,
       overValor: overHasValue, underValor: underHasValue,
-      nota: pOver > 67
-        ? `Over ${totalLine} muy probable (${pOver}%) — cuota real ~${cuotaOver}, sin valor`
+      nota: pOver > 55
+        ? `Over ${totalLine} muy probable (${pOver}%) — el mercado cobra ~${+(100/(pOver*1.12)).toFixed(2)}, sin valor`
         : pOver < 20
         ? `Over ${totalLine} muy improbable — sin valor`
         : `Over ${totalLine} (${pOver}%, cuota ~${cuotaOver}) | Under ${totalLine} (${pUnder}%, cuota ~${cuotaUnder})`,
@@ -2012,8 +2012,8 @@ function calcLiveCornersLines(currentCorners, elapsed, chaseFactor = 1.08) {
     const needed      = Math.ceil(extra);
     const pOver       = +(probAtLeast(needed) * 100).toFixed(1);
     const pUnder      = +(100 - pOver).toFixed(1);
-    const overHasValue  = pOver  >= 20 && pOver  <= 67;
-    const underHasValue = pUnder >= 20 && pUnder <= 67;
+    const overHasValue  = pOver  >= 20 && pOver  <= 55;
+    const underHasValue = pUnder >= 20 && pUnder <= 55;
     const cuotaOver  = pOver  > 0 ? +(100 / pOver).toFixed(2)  : null;
     const cuotaUnder = pUnder > 0 ? +(100 / pUnder).toFixed(2) : null;
     lines.push({
@@ -2021,11 +2021,11 @@ function calcLiveCornersLines(currentCorners, elapsed, chaseFactor = 1.08) {
       overProb: pOver, underProb: pUnder,
       cuotaOver, cuotaUnder,
       overValor: overHasValue, underValor: underHasValue,
-      nota: pOver > 67
-        ? `Over ${totalLine} muy probable (${pOver}%) — cuota real ~${cuotaOver}, sin valor`
+      nota: pOver > 55
+        ? `Over ${totalLine} muy probable (${pOver}%) — el mercado cobra ~${+(100/(pOver*1.12)).toFixed(2)}, sin valor`
         : pOver < 20
         ? `Over ${totalLine} muy improbable — sin valor`
-        : `Over ${totalLine} (${pOver}%, cuota ~${cuotaOver}) | Under ${totalLine} (${pUnder}%, cuota ~${cuotaUnder})`,
+        : `Over ${totalLine} (${pOver}%, cuota est. ~${cuotaOver}) | Under ${totalLine} (${pUnder}%, cuota est. ~${cuotaUnder})`,
     });
   }
 
@@ -2067,8 +2067,8 @@ function calcLiveCardsLines(currentCards, elapsed, regressionFactor = 0.85) {
     const needed      = Math.ceil(extra);
     const pOver       = +(probAtLeast(needed) * 100).toFixed(1);
     const pUnder      = +(100 - pOver).toFixed(1);
-    const overHasValue  = pOver  >= 20 && pOver  <= 67;
-    const underHasValue = pUnder >= 20 && pUnder <= 67;
+    const overHasValue  = pOver  >= 20 && pOver  <= 55;
+    const underHasValue = pUnder >= 20 && pUnder <= 55;
     const cuotaOver  = pOver  > 0 ? +(100 / pOver).toFixed(2)  : null;
     const cuotaUnder = pUnder > 0 ? +(100 / pUnder).toFixed(2) : null;
     lines.push({
@@ -2076,11 +2076,11 @@ function calcLiveCardsLines(currentCards, elapsed, regressionFactor = 0.85) {
       overProb: pOver, underProb: pUnder,
       cuotaOver, cuotaUnder,
       overValor: overHasValue, underValor: underHasValue,
-      nota: pOver > 67
-        ? `Over ${totalLine} muy probable (${pOver}%) — cuota real ~${cuotaOver}, sin valor`
+      nota: pOver > 55
+        ? `Over ${totalLine} muy probable (${pOver}%) — el mercado cobra ~${+(100/(pOver*1.12)).toFixed(2)}, sin valor`
         : pOver < 20
         ? `Over ${totalLine} muy improbable — sin valor`
-        : `Over ${totalLine} (${pOver}%, cuota ~${cuotaOver}) | Under ${totalLine} (${pUnder}%, cuota ~${cuotaUnder})`,
+        : `Over ${totalLine} (${pOver}%, cuota est. ~${cuotaOver}) | Under ${totalLine} (${pUnder}%, cuota est. ~${cuotaUnder})`,
     });
   }
 
@@ -3071,12 +3071,12 @@ Si el JSON incluye "momentumEnVivo", úsalo para detectar oportunidades en tiemp
 - Si está equilibrado, prioriza mercados de corners o tarjetas sobre resultado.
 - GOLES / CORNERS / TARJETAS EN VIVO — REGLA ÚNICA:
   Usa EXCLUSIVAMENTE los campos "lineasGolesVivo.lineasConValor", "lineasCornersVivo.lineasConValor"
-  y "lineasCardsVivo.lineasConValor". Esos campos SOLO contienen líneas con probabilidad 20-67%
-  (cuota real ≥ 1.50). Si lineasConValor dice "no recomendar" o está vacío → NO hagas ese pick.
-  La cuota mínima del pick ES la "cuotaOver" o "cuotaUnder" del campo — úsala literalmente,
-  nunca inventes una cuota más alta ni más baja que la calculada.
-  Ejemplo: 2 tarjetas al min 45 → Over 2.5 tiene prob 77% → cuota real 1.29 → NO aparece en
-  lineasConValor (>60%) → NO recomendar. Solo aparecería Over 4.5 si tuviera prob 30-60%.
+  y "lineasCardsVivo.lineasConValor". Esos campos SOLO contienen líneas con probabilidad 20-55%
+  (cuota estimada ≥ 1.82). Si lineasConValor dice "no recomendar" o está vacío → NO hagas ese pick.
+  La "cuotaOver"/"cuotaUnder" de esos campos es una CUOTA ESTIMADA POR EL MODELO, no la cuota real del mercado.
+  Muéstrala siempre con el prefijo "est." (ej: "est. ~1.90") para que el usuario sepa que debe verificarla.
+  Ejemplo: 1 tarjeta al min 49 → Over 1.5 total tiene 63% prob → NO aparece en lineasConValor (>55%) → NO recomendar.
+  Solo aparecería Over 2.5 si tuviera prob 25-50%.
 
 TRADUCCIÓN OBLIGATORIA DE TÉRMINOS TÉCNICOS — SIEMPRE en español:
 - failedToScore → "partidos sin marcar"
@@ -3187,21 +3187,21 @@ FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 ┌ Selección: [Qué apostar exactamente]
 ├ Razonamiento: [MÁXIMO 2 líneas — argumento central con los datos clave]
 ├ 🏆 Stake: *[X]/10*
-├ 💡 Cuota mínima: *[X.XX]*
+├ 💡 Cuota estimada: *est. ~[X.XX]* _(verifica en tu bookmaker)_
 └ ⚠️ Riesgo: [1 línea máximo]
 
 🎯 *PICK 2: [Mercado en español]*
 ┌ Selección: [Qué apostar exactamente]
 ├ Razonamiento: [MÁXIMO 2 líneas]
 ├ 🏆 Stake: *[X]/10*
-├ 💡 Cuota mínima: *[X.XX]*
+├ 💡 Cuota estimada: *est. ~[X.XX]* _(verifica en tu bookmaker)_
 └ ⚠️ Riesgo: [1 línea máximo]
 
 🎯 *PICK 3: [Mercado en español]*
 ┌ Selección: [Qué apostar exactamente]
 ├ Razonamiento: [MÁXIMO 2 líneas]
 ├ 🏆 Stake: *[X]/10*
-├ 💡 Cuota mínima: *[X.XX]*
+├ 💡 Cuota estimada: *est. ~[X.XX]* _(verifica en tu bookmaker)_
 └ ⚠️ Riesgo: [1 línea máximo]
 
 ━━━━━━━━━━━━━━━━━━━
@@ -3451,7 +3451,7 @@ FORMATO OBLIGATORIO (Telegram Markdown)
 ├ [MÁXIMO 2 líneas — argumento central: el dato clave + por qué tiene valor AHORA]
 ├ [Si pick de tarjetas → menciona árbitro y sus tarj/partido]
 ├ 🏆 Stake: *[X]/10*
-├ 💡 Cuota mínima: *[X.XX]*
+├ 💡 Cuota estimada: *est. ~[X.XX]* _(verifica en tu bookmaker)_
 └ ⚠️ Riesgo: [1 línea máximo]
 
 ━━━━━━━━━━━━━━━━━━━
@@ -3488,7 +3488,10 @@ CUOTAS EN VIVO:
   ⛔ PROHIBIDO recomendar "gana [equipo]" cuando ese equipo ya va ganando — la cuota cae a 1.10-1.30 y no hay ningún valor.
   ⛔ PROHIBIDO recomendar "siguiente gol [equipo]" a cuota < 1.45 — solo tiene valor si hay argumento muy sólido Y cuota ≥ 1.50.
   Cuota mínima aceptable para cualquier pick en vivo: 1.50.
-- Si cuotasVivo es null → da el pick igual. En el campo "Cuota mínima" escribe la cuota mínima que justificaría la apuesta (ej: "busca > 1.65", "busca > 1.80"). Nunca dejes ese campo vacío. El usuario verifica la cuota en su casa — lo que necesita de ti es la DIRECCIÓN.
+- Si cuotasVivo es null → da el pick igual. En el campo "Cuota estimada":
+  • Para mercados de goles/corners/tarjetas: usa "est. ~X.XX" tomado literalmente de cuotaOver/cuotaUnder del campo lineasXxxVivo. Es una estimación matemática, NO la cuota real del mercado — siempre escribe "est. ~".
+  • Para mercados de resultado (1X2, BTTS, DNB, Double Chance): NO inventes un número. Escribe "verifica en casa" o "n/d — revisa en tu bookmaker".
+  • NUNCA escribas un número específico para mercados de resultado sin cuotasVivo reales.
 
 ANÁLISIS DE MOMENTUM (campo "momentumEnVivo"):
 - score > 15: el local domina → favorece next goal local, AH local
@@ -3580,7 +3583,7 @@ FORMATO IN-PLAY (usa este exacto):
 ┌ Selección: [qué apostar, específico]
 ├ Razonamiento: [1-2 líneas: por qué ahora, qué dato lo justifica — cita stats reales]
 ├ ⏰ Actúa antes del: min [XX]
-├ 💡 Cuota mínima: [número o "busca > X.XX"]
+├ 💡 Cuota estimada: *est. ~[X.XX]* _(modelo — verifica en tu bookmaker)_
 └ 🏆 Stake: [X]/10
 
 [Si hay segundo pick, mismo formato]
