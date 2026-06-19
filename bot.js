@@ -1191,334 +1191,9 @@ function getTeamMotivation(standing, totalTeams) {
   return { estado, texto, rank, puntos: points, jugados: played, forma_api: form, jornadas_restantes: remainingGames };
 }
 
-// ─── SofaScore Unofficial API ─────────────────────────────────────────────────
-const sofaEventCache = new Map();
 
-// Rotación de User-Agents para evitar Cloudflare 403 en Railway
-const SOFA_USER_AGENTS = [
-  // Mobile Android Chrome — suele pasar Cloudflare cuando el desktop falla
-  'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-  // iOS Safari
-  'Mozilla/5.0 (iPhone; CPU iPhone OS 17_4_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Mobile/15E148 Safari/604.1',
-  // Desktop Chrome con sec-ch-ua headers completos
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.6367.82 Safari/537.36',
-  // Firefox
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0',
-];
-let _sofaUaIndex = 0;
 
-function _sofaHeaders() {
-  const ua = SOFA_USER_AGENTS[_sofaUaIndex % SOFA_USER_AGENTS.length];
-  return {
-    'User-Agent': ua,
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-    'Accept-Encoding': 'gzip, deflate, br',
-    'Referer': 'https://www.sofascore.com/',
-    'Origin': 'https://www.sofascore.com',
-    'Cache-Control': 'no-cache',
-    'Sec-Fetch-Dest': 'empty',
-    'Sec-Fetch-Mode': 'cors',
-    'Sec-Fetch-Site': 'same-site',
-    'Connection': 'keep-alive',
-  };
-}
 
-// ── Búsqueda de árbitro via DuckDuckGo ───────────────────────────────────────
-// Fallback cuando API-Football no tiene el árbitro asignado aún.
-// FIFA publica los árbitros días antes — está en miles de sitios públicos.
-const refereeSearchCache = new Map();
-
-async function searchRefereeByWeb(homeTeam, awayTeam, wikiGroup = null, leagueName = '') {
-  const key = `${homeTeam}:${awayTeam}`.toLowerCase();
-  if (refereeSearchCache.has(key)) return refereeSearchCache.get(key);
-
-  // Construir URLs de Wikipedia a intentar
-  const year = new Date().getFullYear();
-  const wikiUrls = [];
-
-  // Copa del Mundo: buscar en la página del grupo
-  if (wikiGroup) {
-    const letter = wikiGroup.replace(/[^A-Z]/gi, '').toUpperCase();
-    wikiUrls.push(`https://en.wikipedia.org/wiki/${year}_FIFA_World_Cup_Group_${letter}`);
-  }
-  // Búsqueda genérica por equipos
-  wikiUrls.push(`https://en.wikipedia.org/wiki/${encodeURIComponent(homeTeam.replace(/ /g,'_'))}_v_${encodeURIComponent(awayTeam.replace(/ /g,'_'))}`);
-
-  for (const url of wikiUrls) {
-    try {
-      const { data } = await axios.get(url, {
-        headers: { 'User-Agent': 'tipster-bot/1.0 (contact: bot@tipster.ai)' },
-        timeout: 8000,
-      });
-
-      // Buscar patrón "Referee: Name" cerca de los equipos del partido
-      const text = data.replace(/<[^>]+>/g, ' ').replace(/&[a-z#0-9]+;/g, ' ').replace(/\s+/g, ' ');
-      const homeNorm = homeTeam.toLowerCase();
-      const awayNorm = awayTeam.toLowerCase();
-      const textNorm = text.toLowerCase();
-
-      // Encontrar zona del partido — buscar ambos equipos dentro de 300 chars entre sí
-      const matchIdx = (() => {
-        const h = textNorm.indexOf(homeNorm);
-        const a = textNorm.indexOf(awayNorm);
-        if (h === -1 || a === -1) return -1;
-        if (Math.abs(h - a) > 500) return -1; // muy separados = no es el mismo partido
-        return Math.min(h, a);
-      })();
-
-      if (matchIdx === -1) continue;
-
-      // Patrón Wikipedia: "Referee: NAME (Country) HomeTeam AwayTeam"
-      // Buscar el árbitro cuyo bloque incluye ambos equipos
-      const refPattern = /[Rr]eferee[:\s]+([A-Z][a-záéíóúñ]+(?: [A-Z][a-záéíóúñ]+){1,3})[^.]{0,200}/g;
-      let refMatch = null;
-      for (const m of text.matchAll(refPattern)) {
-        const block = m[0].toLowerCase();
-        if (block.includes(homeNorm) && block.includes(awayNorm)) {
-          refMatch = m;
-          break;
-        }
-      }
-      // Fallback: árbitro más cercano al bloque del partido
-      if (!refMatch) {
-        const window = text.slice(Math.max(0, matchIdx - 100), matchIdx + 800);
-        const fm = window.match(/[Rr]eferee[:\s]+([A-Z][a-záéíóúñ]+(?: [A-Z][a-záéíóúñ]+){1,3})/);
-        if (fm) refMatch = fm;
-      }
-      if (refMatch) {
-        const name = refMatch[1].trim();
-        console.log(`🔍 Árbitro Wikipedia [${homeTeam}]: "${name}"`);
-        refereeSearchCache.set(key, name);
-        setTimeout(() => refereeSearchCache.delete(key), 3_600_000);
-        return name;
-      }
-    } catch {}
-  }
-
-  refereeSearchCache.set(key, null);
-  return null;
-}
-// ─────────────────────────────────────────────────────────────────────────────
-
-// ── TheSportsDB — estadio, ciudad, grupo, jornada ────────────────────────────
-// API gratuita sin key. Funciona para partidos de ligas grandes + selecciones.
-const tsdbCache = new Map();
-
-function tsdbNormalize(str) {
-  return (str || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').trim();
-}
-
-async function fetchTheSportsDBEvent(homeTeam, awayTeam, fixtureDateStr) {
-  const season = new Date(fixtureDateStr).getFullYear();
-  const key = `${tsdbNormalize(homeTeam)}:${tsdbNormalize(awayTeam)}:${season}`;
-  if (tsdbCache.has(key)) return tsdbCache.get(key);
-
-  try {
-    const query = `${homeTeam} vs ${awayTeam}`;
-    const { data } = await axios.get(
-      'https://www.thesportsdb.com/api/v1/json/3/searchevents.php',
-      { params: { e: query, s: String(season) }, timeout: 8000 }
-    );
-    // TheSportsDB usa "event" (singular) como clave de respuesta
-    const events = data?.event || data?.events || [];
-
-    let ev = events[0];
-    if (!ev && season > 2020) {
-      const { data: d2 } = await axios.get(
-        'https://www.thesportsdb.com/api/v1/json/3/searchevents.php',
-        { params: { e: query, s: String(season - 1) }, timeout: 8000 }
-      );
-      ev = (d2?.event || d2?.events || [])[0];
-    }
-
-    if (!ev) { tsdbCache.set(key, null); return null; }
-
-    const result = {
-      estadio: ev.strVenue   || null,
-      ciudad:  ev.strCity    || null,
-      pais:    ev.strCountry || null,
-      grupo:   ev.strGroup   ? `Grupo ${ev.strGroup}` : null,
-      jornada: ev.intRound   ? `Jornada ${ev.intRound}` : null,
-      liga:    ev.strLeague  || null,
-    };
-    tsdbCache.set(key, result);
-    setTimeout(() => tsdbCache.delete(key), 3_600_000); // 1h caché
-    console.log(`🏟️ TheSportsDB [${homeTeam}]: ${result.estadio}, ${result.ciudad} | ${result.grupo || ''} ${result.jornada || ''}`);
-    return result;
-  } catch (e) {
-    console.warn('TheSportsDB error:', e.message);
-    return null;
-  }
-}
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function fetchSofaScoreEvents(date) {
-  if (sofaEventCache.has(date)) return sofaEventCache.get(date);
-
-  // Intentar con hasta 4 User-Agents distintos antes de rendirse
-  for (let attempt = 0; attempt < SOFA_USER_AGENTS.length; attempt++) {
-    _sofaUaIndex = attempt;
-    try {
-      const { data } = await axios.get(
-        `https://api.sofascore.com/api/v1/sport/football/scheduled-events/${date}`,
-        { headers: _sofaHeaders(), timeout: 12000 }
-      );
-      const events = data.events || [];
-      sofaEventCache.set(date, events);
-      if (attempt > 0) console.log(`🔄 SofaScore OK con UA #${attempt}: ${events.length} eventos`);
-      else console.log(`✅ SofaScore: ${events.length} eventos para ${date}`);
-      return events;
-    } catch (e) {
-      const status = e.response?.status;
-      console.warn(`⚠️ SofaScore intento ${attempt + 1}/4 (UA#${attempt}) → ${status || e.message}`);
-      if (status !== 403 && status !== 429) break; // solo reintentar en bloqueos, no en errores de red
-      await new Promise(r => setTimeout(r, 800 * (attempt + 1))); // backoff: 800ms, 1600ms, 2400ms
-    }
-  }
-  console.warn('❌ SofaScore bloqueado en todos los intentos — sin datos de árbitro');
-  return [];
-}
-
-function sofaNormalize(str) {
-  return (str || '').toLowerCase()
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')  // diacríticos: ü→u, é→e, etc.
-    .replace(/\bfc\b|\baf\b|\bac\b|\bsc\b|\bsk\b|\bcf\b|\bfk\b|\bif\b|\bbk\b|\bcd\b|\bsd\b|\bud\b|\brcd\b|\bas\b|\bss\b|\bus\b|\bsv\b|\bbv\b/g, '')
-    .replace(/[^a-z0-9]/g, '')
-    .trim();
-}
-
-// Nombres equivalentes de selecciones nacionales entre API-Football y SofaScore
-const SOFA_NATIONAL_EQUIV = {
-  'korearepublic':    'southkorea',
-  'republicofkorea':  'southkorea',
-  'koreandpr':        'northkorea',
-  'czechrepublic':    'czechia',
-  'unitedstates':     'usa',
-  'iriran':           'iran',
-  'republicofireland':'ireland',
-  'ivorycoast':       'cotedivoire',
-  'coteivoire':       'cotedivoire',
-  'trinidadandtobago':'trinidadtobago',
-  'bosniaherzegovina':'bosniaherzegovina',
-  'northmacedonia':   'northmacedonia',
-  'capeverde':        'capeverde',
-  'saudiarabia':      'saudiarabia',
-};
-function sofaCanon(n) { return SOFA_NATIONAL_EQUIV[n] || n; }
-
-function sofaTeamMatch(apiName, sofaName) {
-  const a = sofaNormalize(apiName);
-  const b = sofaNormalize(sofaName);
-  if (a === b) return true;
-  if (sofaCanon(a) === sofaCanon(b)) return true;
-  if (sofaCanon(a) === b || a === sofaCanon(b)) return true;
-  const minLen = Math.min(a.length, b.length);
-  if (minLen >= 4) {
-    return a.startsWith(b.substring(0, Math.min(5, b.length))) ||
-           b.startsWith(a.substring(0, Math.min(5, a.length)));
-  }
-  return false;
-}
-
-async function getSofaMatchContext(homeTeam, awayTeam, sofaEvents) {
-  try {
-    const event = sofaEvents.find(e =>
-      sofaTeamMatch(homeTeam, e.homeTeam?.name) && sofaTeamMatch(awayTeam, e.awayTeam?.name)
-    );
-    if (!event) {
-      console.log(`SofaScore: sin match para ${homeTeam} vs ${awayTeam}`);
-      return null;
-    }
-
-    // Headers completos estilo browser — necesarios para pasar Cloudflare en Railway
-    const headers = {
-      'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-      'Accept': 'application/json, text/plain, */*',
-      'Accept-Language': 'es-ES,es;q=0.9,en;q=0.8',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Referer': 'https://www.sofascore.com/',
-      'Origin': 'https://www.sofascore.com',
-      'Cache-Control': 'no-cache',
-      'Sec-Fetch-Dest': 'empty',
-      'Sec-Fetch-Mode': 'cors',
-      'Sec-Fetch-Site': 'same-site',
-    };
-
-    const [detailRes, homeFormRes, awayFormRes] = await Promise.allSettled([
-      axios.get(`https://api.sofascore.com/api/v1/event/${event.id}`, { headers, timeout: 8000 }),
-      axios.get(`https://api.sofascore.com/api/v1/team/${event.homeTeam.id}/last/0`, { headers, timeout: 8000 }),
-      axios.get(`https://api.sofascore.com/api/v1/team/${event.awayTeam.id}/last/0`, { headers, timeout: 8000 }),
-    ]);
-
-    const result = { fuente: 'sofascore' };
-
-    // Árbitro con estadísticas
-    if (detailRes.status === 'fulfilled') {
-      const ev = detailRes.value.data?.event;
-      const ref = ev?.referee;
-      if (ref) {
-        const games = ref.games || ref.gamesCount || 1;
-        const amarPP = (ref.yellowCards && games > 1) ? +(ref.yellowCards / games).toFixed(2) : null;
-        const rojPP  = (ref.redCards    && games > 1) ? +(ref.redCards    / games).toFixed(2) : null;
-        result.arbitro = {
-          nombre:                ref.name,
-          partidos:              games,
-          amarillas_por_partido: (amarPP !== null && amarPP < 15) ? amarPP : null,
-          rojas_por_partido:     (rojPP  !== null && rojPP  < 3)  ? rojPP  : null,
-          penaltis_por_partido:  (ref.penaltyCount && games > 1) ? +(ref.penaltyCount / games).toFixed(2) : null,
-        };
-        console.log(`🃏 Árbitro [${homeTeam}]: ${ref.name} | games=${games} | amarPP=${amarPP}`);
-      } else {
-        console.log(`⚠️ Árbitro sin datos para ${homeTeam} vs ${awayTeam} (ref=${JSON.stringify(ref)})`);
-      }
-
-      // Rankings FIFA (presentes en partidos internacionales)
-      const rankH = ev?.homeTeam?.ranking ?? null;
-      const rankA = ev?.awayTeam?.ranking ?? null;
-      if (rankH != null || rankA != null) {
-        result.rankingsFIFA = {
-          local:     rankH != null ? `#${rankH}` : null,
-          visitante: rankA != null ? `#${rankA}` : null,
-        };
-        console.log(`🌍 Rankings FIFA: local=#${rankH} visitante=#${rankA}`);
-      }
-    } else {
-      console.log(`❌ SofaScore /event/${event.id} falló: ${detailRes.reason?.message || detailRes.status} (status: ${detailRes.reason?.response?.status})`);
-    }
-
-    // Forma reciente del local
-    if (homeFormRes.status === 'fulfilled') {
-      const events = homeFormRes.value.data?.events || [];
-      const homeId  = event.homeTeam.id;
-      result.formaLocal = events.slice(0, 6).map(e => {
-        const esLocal = e.homeTeam?.id === homeId;
-        const mis     = esLocal ? e.homeScore?.current : e.awayScore?.current;
-        const opp     = esLocal ? e.awayScore?.current : e.homeScore?.current;
-        if (mis == null || opp == null) return '?';
-        return mis > opp ? 'G' : mis < opp ? 'P' : 'E';
-      }).join('-');
-    }
-
-    // Forma reciente del visitante
-    if (awayFormRes.status === 'fulfilled') {
-      const events = awayFormRes.value.data?.events || [];
-      const awayId  = event.awayTeam.id;
-      result.formaVisitante = events.slice(0, 6).map(e => {
-        const esLocal = e.homeTeam?.id === awayId;
-        const mis     = esLocal ? e.homeScore?.current : e.awayScore?.current;
-        const opp     = esLocal ? e.awayScore?.current : e.homeScore?.current;
-        if (mis == null || opp == null) return '?';
-        return mis > opp ? 'G' : mis < opp ? 'P' : 'E';
-      }).join('-');
-    }
-
-    return result;
-  } catch (e) {
-    console.warn('getSofaMatchContext error:', e.message);
-    return null;
-  }
-}
 
 async function getH2H(id1, id2) {
   const { data } = await API.get('/head-2-head', { params: { teamIdOne: id1, teamIdTwo: id2, limit: 10 } });
@@ -2542,19 +2217,13 @@ function buildPickCandidates(enrichedFixtures) {
         estadio:             f.estadio             || null,
         ciudad:              f.ciudad              || null,
         arbitro:             f.arbitro             || null,
-        // Si SofaScore está bloqueado (arbitroStats=null) pero tenemos datos de equipo,
-        // derivamos una estimación de tarjetas/partido como sustituto de display.
-        // NOTA: la math (cardsLambda) ya usa homeCardsAvg+awayCardsAvg cuando f.arbitroStats=null,
-        // así que esto solo afecta el display — no cambia los stakes ni el EV calculado.
         arbitroStats: f.arbitroStats || (
           homeCardsAvg != null && awayCardsAvg != null ? {
             amarillas_por_partido: +(homeCardsAvg + awayCardsAvg).toFixed(1),
-            _derivado: true, // estimación por historial de equipos, NO del árbitro real
+            _derivado: true,
           } : null
         ),
         h2h:                 f.h2h                 || null,
-        formaSofaLocal:      f.formaSofaLocal      || null,
-        formaSofaVisitante:  f.formaSofaVisitante  || null,
         // ── Contexto del partido (ronda, playoff, urgencia) ──────────────────
         contextoPartido:     f.contextoPartido     || null,
         cancha_neutral:      f.contextoPartido?.cancha_neutral || false,
@@ -3366,9 +3035,6 @@ ANÁLISIS DE MOTIVACIÓN (CRÍTICO AL FINAL DE TEMPORADA):
 - Si viene arbitroStats → usa las estadísticas concretas para reforzar mercados de tarjetas/penaltis.
 - Si viene solo el campo "arbitro" (nombre) → usa tu conocimiento del árbitro para el razonamiento.
 
-FORMA SOFASCORE:
-- formaSofaLocal / formaSofaVisitante: forma real de los últimos 6 partidos en TODAS las competiciones. Más fiable que forma solo de liga. Úsala como dato principal de forma reciente.
-
 CONTEXTO PARA COMPETICIONES INTERNACIONALES (Libertadores, Sudamericana, Champions, Europa League, Copa del Mundo):
 Cuando el partido es de copa con pocos juegos en esa competición, el razonamiento DEBE basarse en:
 1. Forma de los últimos 10 partidos TOTALES (liga doméstica + copa combinados)
@@ -3537,7 +3203,7 @@ FORMATO OBLIGATORIO (Telegram Markdown)
 ├ [MÁXIMO 2 líneas — argumento central: el dato clave + por qué tiene valor AHORA]
 ├ [Si pick de tarjetas → menciona árbitro y sus tarj/partido]
 ├ 🏆 Stake: *[X]/10*
-├ 💡 Cuota: *[X.XX]* ← el campo `odds` del pick (cuota real de mercado)
+├ 💡 Cuota: *[X.XX]* ← el campo "odds" del pick (cuota real de mercado)
 └ ⚠️ Riesgo: [1 línea máximo]
 
 ━━━━━━━━━━━━━━━━━━━
@@ -4644,33 +4310,6 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     if (Object.keys(matchCtx).length > 0) enriched[i].contextoPartido = matchCtx;
   }
 
-  // Enriquecer con SofaScore (árbitro con stats, forma reciente)
-  try {
-    await bot.sendMessage(chatId, '🔬 Enriqueciendo contexto con datos externos...');
-    const sofaEvents = await Promise.race([
-      fetchSofaScoreEvents(today),
-      new Promise(r => setTimeout(() => r([]), 12000)),  // máx 12s para SofaScore
-    ]);
-    if (sofaEvents.length > 0) {
-      const sofaResults = await Promise.allSettled(
-        enriched.map(e => getSofaMatchContext(e.local, e.visitante, sofaEvents))
-      );
-      sofaResults.forEach((r, i) => {
-        if (r.status === 'fulfilled' && r.value) {
-          const s = r.value;
-          if (s.arbitro)        enriched[i].arbitroStats       = s.arbitro;
-          if (s.rankingsFIFA)   enriched[i].rankingsFIFA       = s.rankingsFIFA;
-          if (s.formaLocal)     enriched[i].formaSofaLocal     = s.formaLocal;
-          if (s.formaVisitante) enriched[i].formaSofaVisitante = s.formaVisitante;
-        }
-      });
-      const conArbitro = enriched.filter(e => e.arbitroStats).length;
-      console.log(`SofaScore: ${sofaEvents.length} eventos, ${conArbitro}/${enriched.length} con datos árbitro`);
-    }
-  } catch (e) {
-    console.warn('SofaScore enrich error:', e.message);
-  }
-
   // ── Soccer Buddy / ZCode signals ────────────────────────────────────────────
   // Si el scraper tiene datos, los agrega como señal externa. No bloquea si no hay.
   if (_zbStore.size > 0) {
@@ -5237,9 +4876,8 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     getInjuries(awayId, leagueId),                             // 5
     getApiPrediction(nextRaw.fixture.id),                      // 6
     getLeagueStandings(leagueId).catch(() => ({ teams: [] })), // 7
-    fetchSofaScoreEvents(fixtureDate).catch(() => []),          // 8
-    getTeamLastFixtures(homeId, 20),                           // 9
-    getTeamLastFixtures(awayId, 20),                           // 10
+    getTeamLastFixtures(homeId, 20),                           // 8
+    getTeamLastFixtures(awayId, 20),                           // 9
   ];
   if (isLive) {
     requests.push(getFixtureStatistics(nextRaw.fixture.id)); // 11
@@ -5266,12 +4904,11 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const injAwayRes         = results[5];
   const predRes            = results[6];
   const standingsRes       = results[7];
-  const sofaEventsRes      = results[8];
-  const homeLastFixturesRes = results[9];
-  const awayLastFixturesRes = results[10];
-  const liveStatsRes       = isLive ? results[11] : null;
-  const liveEventsRes      = isLive ? results[12] : null;
-  const euroBase           = isLive ? 13 : 11;
+  const homeLastFixturesRes = results[8];
+  const awayLastFixturesRes = results[9];
+  const liveStatsRes       = isLive ? results[10] : null;
+  const liveEventsRes      = isLive ? results[11] : null;
+  const euroBase           = isLive ? 12 : 10;
   const homedomRes         = isEuropean ? results[euroBase]     : null;
   const awaydomRes         = isEuropean ? results[euroBase + 1] : null;
 
@@ -5283,7 +4920,6 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const injAwayData     = injAwayRes?.status === 'fulfilled'    ? injAwayRes.value    : [];
   const predData        = predRes?.status === 'fulfilled'       ? predRes.value       : null;
   const standingsData   = standingsRes?.status === 'fulfilled'  ? standingsRes.value  : { teams: [] };
-  const sofaEvents      = sofaEventsRes?.status === 'fulfilled' ? sofaEventsRes.value : [];
   const homeLastFixtures = homeLastFixturesRes?.status === 'fulfilled' ? homeLastFixturesRes.value : [];
   const awayLastFixtures = awayLastFixturesRes?.status === 'fulfilled' ? awayLastFixturesRes.value : [];
   const liveStatsData   = (isLive && liveStatsRes?.status === 'fulfilled') ? liveStatsRes.value : null;
@@ -5296,18 +4932,8 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const homeBaseForNat  = homeStatsData;
   const awayBaseForNat  = awayStatsData;
 
-  // Fase 2: contexto externo en paralelo
   const apiReferee = nextRaw.fixture.referee || null;
-  const [sofaContext, tsdbData] = await Promise.all([
-    getSofaMatchContext(homeTeam, awayTeam, sofaEvents).catch(() => null),
-    fetchTheSportsDBEvent(homeTeam, awayTeam, fixtureDate).catch(() => null),
-  ]);
-  // Árbitro: API-Football → SofaScore → Wikipedia (usa el grupo ya conocido de TSDB)
-  const wikiGroup = tsdbData?.grupo?.replace('Grupo ', '') || null;
-  const webReferee = (!apiReferee && !sofaContext?.arbitro?.nombre)
-    ? await searchRefereeByWeb(homeTeam, awayTeam, wikiGroup).catch(() => null)
-    : null;
-  const referee = sofaContext?.arbitro?.nombre || apiReferee || webReferee || null;
+  const referee = predData?._referee || apiReferee || null;
 
   // Standings: extraer posición y motivación de cada equipo
   const homeStanding = standingsData.teams.find(t => t.teamId === homeId) || null;
@@ -5447,13 +5073,11 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       minuto:    elapsed || null,
       marcador:  isLive ? `${nextRaw.goals?.home ?? 0}-${nextRaw.goals?.away ?? 0}` : null,
       arbitro:   referee,
-      estadio:   tsdbData?.estadio || nextRaw.fixture.venue?.name || null,
-      ciudad:    tsdbData?.ciudad  || nextRaw.fixture.venue?.city  || null,
-      grupo:     tsdbData?.grupo   || null,
-      jornada:   tsdbData?.jornada || round || null,
+      estadio:   predData?._venue || nextRaw.fixture.venue?.name || null,
+      ciudad:    predData?._city  || nextRaw.fixture.venue?.city  || null,
+      grupo:     null,
+      jornada:   round || null,
     },
-    ...(sofaContext?.arbitro      && { arbitroStats:  sofaContext.arbitro }),
-    ...(sofaContext?.rankingsFIFA && { rankingsFIFA:  sofaContext.rankingsFIFA }),
     contextoPorPartido: {
       queSeJuegaLocal:    motivLocal.texto,
       queSeJuegaVisitante: motivVisit.texto,
@@ -5482,8 +5106,6 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     ...(lineupsData && lineupsData.length > 0 && { alineaciones: lineupsData }),
     ...(injHomeData && injHomeData.length > 0 && { lesionadosLocal: injHomeData }),
     ...(injAwayData && injAwayData.length > 0 && { lesionadosVisitante: injAwayData }),
-    ...(sofaContext?.formaLocal     && { formaRecienteLocalSofascore:     sofaContext.formaLocal }),
-    ...(sofaContext?.formaVisitante && { formaRecienteVisitanteSofascore: sofaContext.formaVisitante }),
     ...(contextoEliminatoria && { contextoEliminatoria }),
     ...(probBlock    && { probabilidadesCalculadas: probBlock }),
     ...(momentum     && { momentumEnVivo: momentum }),
@@ -5593,12 +5215,11 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
   // Get live stats + eventos + team stats históricos para todos los partidos en paralelo
   const toAnalyze = liveFixtures.slice(0, 4);
   const today = new Date().toISOString().split('T')[0];
-  const [liveStatsResults, liveEventsResults, homeStatsResults, awayStatsResults, sofaEventsVivo] = await Promise.all([
+  const [liveStatsResults, liveEventsResults, homeStatsResults, awayStatsResults] = await Promise.all([
     Promise.allSettled(toAnalyze.map(f => getFixtureStatistics(f.fixtureId))),
-    Promise.allSettled(toAnalyze.map(f => getFixtureEvents(f.fixtureId))),  // ← NUEVO: goles/tarjetas/cambios
+    Promise.allSettled(toAnalyze.map(f => getFixtureEvents(f.fixtureId))),
     Promise.allSettled(toAnalyze.map(f => getTeamStats(f.homeId, f.leagueId))),
     Promise.allSettled(toAnalyze.map(f => getTeamStats(f.awayId, f.leagueId))),
-    fetchSofaScoreEvents(today).catch(() => []),
   ]);
 
   // Standings por liga única
@@ -5609,17 +5230,11 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
     if (standingsVivo[i].status === 'fulfilled') standingsMapVivo[lid] = standingsVivo[i].value;
   });
 
-  // Sofascore context para cada partido
-  const sofaResultsVivo = await Promise.allSettled(
-    toAnalyze.map(f => getSofaMatchContext(f.homeTeam, f.awayTeam, sofaEventsVivo))
-  );
-
   const enriched = toAnalyze.map((f, i) => {
     const liveStats  = liveStatsResults[i].status  === 'fulfilled' ? liveStatsResults[i].value  : null;
     const rawEvents  = liveEventsResults[i].status === 'fulfilled' ? liveEventsResults[i].value  : [];
     const hStats     = homeStatsResults[i].status  === 'fulfilled' ? homeStatsResults[i].value   : null;
     const aStats     = awayStatsResults[i].status  === 'fulfilled' ? awayStatsResults[i].value   : null;
-    const sofa       = sofaResultsVivo[i].status   === 'fulfilled' ? sofaResultsVivo[i].value    : null;
     const elapsed    = f.elapsed || 0;
     const standingsLeague = standingsMapVivo[f.leagueId] || { teams: [], total: 20 };
     const homeStanding = standingsLeague.teams?.find?.(t => t.teamId === f.homeId) || null;
@@ -5658,9 +5273,7 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
       _competicion: `IMPORTANTE: el nombre de esta competición es "${f.leagueName}" — usa EXACTAMENTE este nombre en el campo [Liga/Copa] del formato. NUNCA lo cambies.`,
       ...f,
       marcador: `${f.homeGoals ?? 0}-${f.awayGoals ?? 0}`,
-      arbitro: sofa?.arbitro?.nombre || f.referee || null,
-      ...(sofa?.arbitro      && { arbitroStats:  sofa.arbitro }),
-      ...(sofa?.rankingsFIFA && { rankingsFIFA:  sofa.rankingsFIFA }),
+      arbitro: f.referee || null,
       contextoPorPartido: {
         queSeJuegaLocal:     getTeamMotivation(homeStanding, totalTeamsV).texto,
         queSeJuegaVisitante: getTeamMotivation(awayStanding, totalTeamsV).texto,
@@ -5669,8 +5282,6 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
       },
       statsLocal:     hStats ? { ...hStats, _fuente: 'promedio temporada completa' } : null,
       statsVisitante: aStats ? { ...aStats, _fuente: 'promedio temporada completa' } : null,
-      ...(sofa?.formaLocal     && { formaRecienteLocalSofascore:     sofa.formaLocal }),
-      ...(sofa?.formaVisitante && { formaRecienteVisitanteSofascore: sofa.formaVisitante }),
       estadisticasVivo:  liveStats,
       eventosPartido:    eventosResumen,   // ← goles con jugador, tarjetas activas, cambios
       ...(momentum      && { momentumEnVivo:       momentum }),
@@ -5707,7 +5318,7 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
   await bot.sendMessage(chatId, '🎯 Identificando picks de valor...');
   const analysis = await sonnet(
     INPLAY_SYSTEM,
-    `DATOS REALES EN VIVO — API-Football + Sofascore:\n\n${JSON.stringify(enriched, null, 2)}\n\nMáximo 3 picks en total. Para cuotasVivo=null usa cuota sugerida mínima ("busca > X.XX"). Siempre da picks concretos.`
+    `DATOS REALES EN VIVO:\n\n${JSON.stringify(enriched, null, 2)}\n\nMáximo 3 picks en total. Para cuotasVivo=null usa cuota sugerida mínima ("busca > X.XX"). Siempre da picks concretos.`
   );
   try {
     await sendLong(chatId, `🔴 *PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}*\n\n${analysis}`, { parse_mode: 'Markdown' });
@@ -5820,7 +5431,7 @@ async function handleEspecifica(chatId, intent) {
   await bot.sendMessage(chatId, `📊 Recopilando datos históricos...`);
 
   const fixtureDate2 = nextRaw.fixture.date.split('T')[0];
-  const [h2hRes, homeStatsRes, awayStatsRes, predRes2, standRes2, lineupsRes2, injHomeRes2, injAwayRes2, sofaEvRes2] = await Promise.allSettled([
+  const [h2hRes, homeStatsRes, awayStatsRes, predRes2, standRes2, lineupsRes2, injHomeRes2, injAwayRes2] = await Promise.allSettled([
     getH2H(homeId, awayId),
     getTeamStats(homeId, leagueId),
     getTeamStats(awayId, leagueId),
@@ -5829,7 +5440,6 @@ async function handleEspecifica(chatId, intent) {
     getLineups(nextRaw.fixture.id),
     getInjuries(homeId, leagueId),
     getInjuries(awayId, leagueId),
-    fetchSofaScoreEvents(fixtureDate2),
   ]);
 
   const h2hData2       = h2hRes.status === 'fulfilled'       ? h2hRes.value       : [];
@@ -5840,17 +5450,8 @@ async function handleEspecifica(chatId, intent) {
   const lineupsData2   = lineupsRes2?.status === 'fulfilled'  ? lineupsRes2.value   : null;
   const injHome2       = injHomeRes2?.status === 'fulfilled'  ? injHomeRes2.value   : [];
   const injAway2       = injAwayRes2?.status === 'fulfilled'  ? injAwayRes2.value   : [];
-  const sofaEv2        = sofaEvRes2?.status === 'fulfilled'   ? sofaEvRes2.value    : [];
   const apiRef2 = nextRaw.fixture.referee || null;
-  const [sofaCtx2, tsdbData2] = await Promise.all([
-    getSofaMatchContext(homeTeam, awayTeam, sofaEv2).catch(() => null),
-    fetchTheSportsDBEvent(homeTeam, awayTeam, fixtureDate2).catch(() => null),
-  ]);
-  const wikiGroup2 = tsdbData2?.grupo?.replace('Grupo ', '') || null;
-  const webRef2 = (!apiRef2 && !sofaCtx2?.arbitro?.nombre)
-    ? await searchRefereeByWeb(homeTeam, awayTeam, wikiGroup2).catch(() => null)
-    : null;
-  const referee2 = sofaCtx2?.arbitro?.nombre || apiRef2 || webRef2 || null;
+  const referee2 = predData2?._referee || apiRef2 || null;
 
   const homeStanding2  = standData2.teams?.find(t => t.teamId === homeId) || null;
   const awayStanding2  = standData2.teams?.find(t => t.teamId === awayId) || null;
@@ -5867,13 +5468,11 @@ async function handleEspecifica(chatId, intent) {
       local:     homeTeam,
       visitante: awayTeam,
       arbitro:   referee2,
-      estadio:   tsdbData2?.estadio || nextRaw.fixture.venue?.name || null,
-      ciudad:    tsdbData2?.ciudad  || nextRaw.fixture.venue?.city  || null,
-      grupo:     tsdbData2?.grupo   || null,
-      jornada:   tsdbData2?.jornada || nextRaw.league?.round || null,
+      estadio:   predData2?._venue || nextRaw.fixture.venue?.name || null,
+      ciudad:    predData2?._city  || nextRaw.fixture.venue?.city  || null,
+      grupo:     null,
+      jornada:   nextRaw.league?.round || null,
     },
-    ...(sofaCtx2?.arbitro      && { arbitroStats:  sofaCtx2.arbitro }),
-    ...(sofaCtx2?.rankingsFIFA && { rankingsFIFA:  sofaCtx2.rankingsFIFA }),
     contextoPorPartido: {
       queSeJuegaLocal:     getTeamMotivation(homeStanding2, totalTeams2).texto,
       queSeJuegaVisitante: getTeamMotivation(awayStanding2, totalTeams2).texto,
@@ -5890,8 +5489,6 @@ async function handleEspecifica(chatId, intent) {
     ...(lineupsData2 && lineupsData2.length > 0 && { alineaciones: lineupsData2 }),
     ...(injHome2     && injHome2.length > 0 && { lesionadosLocal: injHome2 }),
     ...(injAway2     && injAway2.length > 0 && { lesionadosVisitante: injAway2 }),
-    ...(sofaCtx2?.formaLocal     && { formaRecienteLocalSofascore:     sofaCtx2.formaLocal }),
-    ...(sofaCtx2?.formaVisitante && { formaRecienteVisitanteSofascore: sofaCtx2.formaVisitante }),
     ...(probBlock2 && { probabilidadesCalculadas: probBlock2 }),
   };
 
@@ -6525,7 +6122,6 @@ async function _zbBrowser() {
   });
 }
 
-// Normaliza nombre de equipo igual que sofaNormalize pero más agresivo
 function _zbNorm(name) {
   return (name || '').toLowerCase()
     .normalize('NFD').replace(/[̀-ͯ]/g, '')
