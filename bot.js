@@ -1555,8 +1555,86 @@ function summarizeEvents(events, homeTeam, awayTeam) {
 async function getInjuries(teamId, leagueId) { return []; }
 async function getFixtureInjuries(fixtureId) { return []; }
 
-async function getRealOdds(fixtureId) { return null; }
-async function getLiveOdds(fixtureId) { return null; }
+async function getRealOdds(fixtureId) {
+  try {
+    const { data } = await API.get('/odds/' + fixtureId);
+    const bookmakers = Array.isArray(data) ? data : (data.data || []);
+    if (!bookmakers.length) return null;
+
+    // Preferir Bet365, si no el primero disponible
+    const bk = bookmakers.find(b => /bet365/i.test(b.bookmaker || b.bookmakerName || b.name || ''))
+            || bookmakers[0];
+    const markets = bk.markets || bk.odds || [];
+    const result = {};
+
+    for (const mkt of markets) {
+      const mktName = (mkt.name || mkt.marketName || '').toLowerCase();
+      const outcomes = mkt.outcomes || mkt.selections || [];
+
+      if (/match winner|1x2|full.?time result/i.test(mktName)) {
+        for (const o of outcomes) {
+          const n = (o.name || o.outcomeName || '').toLowerCase();
+          const p = parseFloat(o.price || o.odd || o.value || 0);
+          if (!p) continue;
+          if (/^home$|^1$|^local/.test(n))   result.homeWin = p;
+          else if (/^draw$|^x$|empate/.test(n)) result.draw = p;
+          else if (/^away$|^2$|visit/.test(n))  result.awayWin = p;
+        }
+      }
+      if (/goals.*(over|under)|over.*under.*2\.5/i.test(mktName)) {
+        for (const o of outcomes) {
+          const n = (o.name || '').toLowerCase();
+          const p = parseFloat(o.price || o.odd || 0);
+          if (!p) continue;
+          if (/over.*2\.5|2\.5.*over/.test(n))  result.over25 = p;
+          if (/under.*2\.5|2\.5.*under/.test(n)) result.under25 = p;
+          if (/over.*3\.5|3\.5.*over/.test(n))  result.over35 = p;
+        }
+      }
+      if (/both teams.*score|btts|gg/i.test(mktName)) {
+        for (const o of outcomes) {
+          const n = (o.name || '').toLowerCase();
+          const p = parseFloat(o.price || o.odd || 0);
+          if (!p) continue;
+          if (/yes|si$|sí/.test(n)) result.btts = p;
+          if (/^no/.test(n))         result.noBtts = p;
+        }
+      }
+      if (/double chance/i.test(mktName)) {
+        for (const o of outcomes) {
+          const n = (o.name || '').toLowerCase();
+          const p = parseFloat(o.price || o.odd || 0);
+          if (!p) continue;
+          if (/1x|home.*draw/.test(n))  result.dc_1X = p;
+          if (/x2|draw.*away/.test(n))  result.dc_X2 = p;
+          if (/12|home.*away/.test(n))  result.dc_12 = p;
+        }
+      }
+    }
+
+    if (!result.homeWin && !result.over25) return null;
+    result._source = 'highlightly';
+    return result;
+  } catch (e) {
+    console.warn(`getRealOdds(${fixtureId}): ${e.message}`);
+    return null;
+  }
+}
+
+async function getLiveOdds(fixtureId) {
+  return getRealOdds(fixtureId);
+}
+
+async function prefetchOddsApi(fixtures, _date) {
+  const map = new Map();
+  const top = fixtures.slice(0, 30);
+  await Promise.allSettled(top.map(async f => {
+    const odds = await getRealOdds(f.fixtureId);
+    if (odds) map.set(f.fixtureId, odds);
+  }));
+  console.log(`📊 Highlightly odds: ${map.size}/${top.length} partidos`);
+  return map;
+}
 async function getLastMatchDate(teamId) { return null; }
 async function getApiPrediction(fixtureId) { return null; }
 
@@ -4334,39 +4412,14 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   await bot.sendMessage(chatId, `📊 ${fixtures.length} partidos en ligas monitoreadas. Consultando cuotas...`);
 
-  // Paso 1a: The Odds API — 1 request por deporte, cubre múltiples partidos de golpe
-  const theOddsApiMap = await prefetchOddsApi(oddsPool, today);
-  const countFromOddsApi = theOddsApiMap.size;
+  // Cuotas desde Highlightly (todas las casas disponibles por partido)
+  const oddsMap = await prefetchOddsApi(oddsPool, today);
 
-  // Paso 1b: Para partidos SIN cuota de The Odds API, intentar API-Football (per fixture)
-  const missingFromOddsApi = oddsPool.filter(f => !theOddsApiMap.has(f.fixtureId));
-  const apiFbOddsMap = new Map();
-
-  if (missingFromOddsApi.length > 0) {
-    const oddsStage1 = [];
-    for (let i = 0; i < missingFromOddsApi.length; i += 20) {
-      const batch = await Promise.allSettled(
-        missingFromOddsApi.slice(i, i + 20).map(f => getRealOdds(f.fixtureId))
-      );
-      oddsStage1.push(...batch);
-      if (i + 20 < missingFromOddsApi.length) await new Promise(r => setTimeout(r, 2000));
-    }
-    missingFromOddsApi.forEach((f, i) => {
-      const odds = oddsStage1[i].status === 'fulfilled' ? oddsStage1[i].value : null;
-      if (odds) apiFbOddsMap.set(f.fixtureId, odds);
-    });
-    console.log(`📊 API-Football cubrió ${apiFbOddsMap.size}/${missingFromOddsApi.length} partidos restantes`);
-  }
-
-  // Combinar ambas fuentes (The Odds API tiene prioridad)
   const withOdds = oddsPool
-    .map(f => {
-      const odds = theOddsApiMap.get(f.fixtureId) || apiFbOddsMap.get(f.fixtureId) || null;
-      return { fixture: f, odds };
-    })
+    .map(f => ({ fixture: f, odds: oddsMap.get(f.fixtureId) || null }))
     .filter(x => x.odds !== null);
 
-  console.log(`✅ Cuotas totales: ${withOdds.length}/${oddsPool.length} (${countFromOddsApi} OddsAPI + ${apiFbOddsMap.size} API-Football)`);
+  console.log(`✅ Cuotas Highlightly: ${withOdds.length}/${oddsPool.length} partidos`);
 
   // Si hay pocos partidos con cuotas (<3), derivar cuotas implícitas desde predicciones de la API
   let selected, oddsPreFetched;
@@ -5044,19 +5097,11 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
     };
   });
 
-  // Cuotas reales — The Odds API bulk (prioridad) + API-Football por fixture (fallback)
-  await bot.sendMessage(chatId, `📈 Consultando cuotas (goles, corners, tarjetas, HT)...`);
-  const theOddsApiMapL = await prefetchOddsApi(fixtures, today);
-  const missingOddsL = fixtures.filter(f => !theOddsApiMapL.has(f.fixtureId));
-  const apiFbOddsMapL = new Map();
-  if (missingOddsL.length > 0) {
-    const oddsRes = await Promise.allSettled(missingOddsL.map(f => getRealOdds(f.fixtureId)));
-    oddsRes.forEach((r, i) => {
-      if (r.status === 'fulfilled' && r.value) apiFbOddsMapL.set(missingOddsL[i].fixtureId, r.value);
-    });
-  }
+  // Cuotas reales desde Highlightly
+  await bot.sendMessage(chatId, `📈 Consultando cuotas...`);
+  const oddsMapL = await prefetchOddsApi(fixtures, today);
   for (const e of enriched) {
-    const odds = theOddsApiMapL.get(e.fixtureId) || apiFbOddsMapL.get(e.fixtureId) || null;
+    const odds = oddsMapL.get(e.fixtureId) || null;
     if (odds) e.cuotasReales = odds;
   }
 
