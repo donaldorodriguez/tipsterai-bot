@@ -442,6 +442,10 @@ function setPicksCache(scope, picksText, fixtureIds) {
 // Parses a Highlightly match object → internal fixture format
 function parseFixture(m) {
   const score = parseHLScore(m.state?.score?.current);
+  // Debug: log venue/referee raw data for WC matches
+  if (m.league?.id === 1635) {
+    console.log(`🏟️ WC raw[${m.id}] ${m.homeTeam?.name} vs ${m.awayTeam?.name} | venue=${JSON.stringify(m.venue)} | referee=${JSON.stringify(m.referee)} | keys=${Object.keys(m).join(',')}`);
+  }
   return {
     fixtureId:  m.id,
     date:       m.date,
@@ -457,9 +461,9 @@ function parseFixture(m) {
     awayTeam:   m.awayTeam.name,
     homeGoals:  score.home,
     awayGoals:  score.away,
-    referee:    m.referee?.name || null,
-    venue:      m.venue?.name   || null,
-    city:       m.venue?.city   || null,
+    referee:    m.referee?.name || m.refereeName || m.officials?.[0]?.name || null,
+    venue:      m.venue?.name  || m.stadium?.name || m.ground?.name || m.location?.name || null,
+    city:       m.venue?.city  || m.stadium?.city || m.ground?.city || m.location?.city || m.city || null,
   };
 }
 
@@ -1295,19 +1299,24 @@ async function getLastMatchDate(teamId) { return null; }
 async function getApiPrediction(fixtureId) {
   try {
     const { data } = await API.get('/matches/' + fixtureId);
+    // Log raw response shape para debug
+    console.log(`🔍 getApiPrediction(${fixtureId}) tipo=${Array.isArray(data)?'array':'object'} keys=${Object.keys(data||{}).join(',')}`);
     // Highlightly puede devolver: [{...}], { data: [{...}] }, { data: {...} }, o {...}
     const raw = Array.isArray(data)           ? data
       : Array.isArray(data?.data)             ? data.data
       : data?.data && typeof data.data === 'object' ? [data.data]
       : [data];
     const detail = raw[0];
-    if (detail) console.log(`🔍 getApiPrediction(${fixtureId}) raw keys: ${Object.keys(detail).join(', ')}`);
+    if (detail && typeof detail === 'object') {
+      console.log(`🔍 getApiPrediction(${fixtureId}) detail keys: ${Object.keys(detail).join(', ')} | venue=${JSON.stringify(detail.venue)} | referee=${JSON.stringify(detail.referee)}`);
+    }
     if (!detail || typeof detail !== 'object') return null;
 
     const result = {
-      _venue:    detail.venue?.name     || null,
-      _city:     detail.venue?.city     || null,
-      _referee:  detail.referee?.name   || null,
+      // Intentar múltiples nombres de campo por si Highlightly los llama diferente
+      _venue:   detail.venue?.name    || detail.stadium?.name  || detail.ground?.name   || detail.location?.name  || null,
+      _city:    detail.venue?.city    || detail.stadium?.city  || detail.ground?.city   || detail.location?.city  || detail.city || null,
+      _referee: detail.referee?.name  || detail.refereeName    || detail.officials?.[0]?.name || null,
     };
 
     const preds = (detail.predictions || []).filter(p => p.type === 'prematch');
