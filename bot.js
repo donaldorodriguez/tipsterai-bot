@@ -4349,6 +4349,25 @@ async function sendLong(chatId, text, options = {}) {
   if (chunk) await sendChunk(chunk);
 }
 
+function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTeams }) {
+  const ctx = {};
+  if (round) ctx.jornada = round;
+  const n = totalTeams || 20;
+  const hRank = homeStanding?.rank;
+  const aRank = awayStanding?.rank;
+  if (hRank && aRank) {
+    const relZone = n - 2; // bottom 3
+    if (hRank >= relZone || aRank >= relZone)       ctx.stakes = 'Zona de descenso';
+    else if (hRank <= 2   || aRank <= 2)            ctx.stakes = 'Lucha por el título';
+    else if (hRank <= 5   || aRank <= 5)            ctx.stakes = 'Clasificación europea';
+  }
+  if (homeStanding?.points != null && awayStanding?.points != null) {
+    ctx.puntosLocal     = homeStanding.points;
+    ctx.puntosVisitante = awayStanding.points;
+  }
+  return ctx;
+}
+
 // ─── Business flows ───────────────────────────────────────────────────────────
 
 async function handlePicksHoy(chatId, forceRefresh = false) {
@@ -4501,7 +4520,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   });
 
   // ── FASE 3: H2H, standings, predicciones y contexto ─────────────────────────
-  await bot.sendMessage(chatId, `🔢 Consultando H2H, tabla de posiciones y predicciones de la API...`);
+  await bot.sendMessage(chatId, `🔢 Consultando H2H, tabla de posiciones y contexto histórico...`);
   const uniqueLeagueIds = [...new Set(selected.map(f => f.leagueId))];
 
   // Standings en lotes de 5 para evitar rate limit (20+ llamadas simultáneas causan 429)
