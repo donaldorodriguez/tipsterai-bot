@@ -1295,9 +1295,13 @@ async function getLastMatchDate(teamId) { return null; }
 async function getApiPrediction(fixtureId) {
   try {
     const { data } = await API.get('/matches/' + fixtureId);
-    // Highlightly can return either [{...}] or { data: [{...}] } — handle both
-    const raw    = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : [data]);
+    // Highlightly puede devolver: [{...}], { data: [{...}] }, { data: {...} }, o {...}
+    const raw = Array.isArray(data)           ? data
+      : Array.isArray(data?.data)             ? data.data
+      : data?.data && typeof data.data === 'object' ? [data.data]
+      : [data];
     const detail = raw[0];
+    if (detail) console.log(`🔍 getApiPrediction(${fixtureId}) raw keys: ${Object.keys(detail).join(', ')}`);
     if (!detail || typeof detail !== 'object') return null;
 
     const result = {
@@ -3054,21 +3058,21 @@ FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 ┌ Selección: [Qué apostar exactamente]
 ├ Razonamiento: [MÁXIMO 2 líneas — argumento central con los datos clave]
 ├ 🏆 Stake: *[X]/10*
-├ 💡 Cuota estimada: *est. ~[X.XX]* _(verifica en tu bookmaker)_
+├ 💡 Cuota: *[X.XX]*
 └ ⚠️ Riesgo: [1 línea máximo]
 
 🎯 *PICK 2: [Mercado en español]*
 ┌ Selección: [Qué apostar exactamente]
 ├ Razonamiento: [MÁXIMO 2 líneas]
 ├ 🏆 Stake: *[X]/10*
-├ 💡 Cuota estimada: *est. ~[X.XX]* _(verifica en tu bookmaker)_
+├ 💡 Cuota: *[X.XX]*
 └ ⚠️ Riesgo: [1 línea máximo]
 
 🎯 *PICK 3: [Mercado en español]*
 ┌ Selección: [Qué apostar exactamente]
 ├ Razonamiento: [MÁXIMO 2 líneas]
 ├ 🏆 Stake: *[X]/10*
-├ 💡 Cuota estimada: *est. ~[X.XX]* _(verifica en tu bookmaker)_
+├ 💡 Cuota: *[X.XX]*
 └ ⚠️ Riesgo: [1 línea máximo]
 
 ━━━━━━━━━━━━━━━━━━━
@@ -3337,6 +3341,7 @@ REGLAS IRROMPIBLES:
 - La línea 📍 Estadio | 🃏 Árbitro es OBLIGATORIA — si no hay datos, escribe "No disponible"
 - La sección 📊 ANÁLISIS siempre muestra AMBOS equipos (▸ Local y ▸ Visitante) — nunca solo uno
 - Si motivacionLocal.estado o motivacionVisitante.estado es "desconocido" → no escribas "Sin datos de posición" — usa posicionLocal/posicionVisitante directamente o infiere del contexto
+- LA CUOTA ES EXACTAMENTE EL NÚMERO DEL CAMPO "odds" — escríbelo solo, sin paréntesis, sin "(estimada...)", sin "(verifica...)", sin "~", sin "est.", sin NINGÚN texto adicional después del número. Si odds es null → escribe "n/d". NUNCA inventes un número ni añadas comentarios.
 - NO cambies el stake ni la cuota que viene en los datos
 - Si recibes 3 picks → publícalos todos. Si recibes 2 → añade un TERCER pick de un mercado distinto (corners, tarjetas equipo, portería a cero, DNB, doble oportunidad, goles 2T, etc.) usando los datos disponibles. SIEMPRE 3 picks.
 - El razonamiento debe conectar los números con la situación real del partido
