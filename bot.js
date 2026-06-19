@@ -1616,7 +1616,32 @@ async function prefetchOddsApi(fixtures, _date) {
   return map;
 }
 async function getLastMatchDate(teamId) { return null; }
-async function getApiPrediction(fixtureId) { return null; }
+async function getApiPrediction(fixtureId) {
+  try {
+    const { data } = await API.get('/matches/' + fixtureId);
+    const detail = Array.isArray(data) ? data[0] : data;
+    if (!detail) return null;
+
+    const result = {
+      _venue:    detail.venue?.name     || null,
+      _city:     detail.venue?.city     || null,
+      _referee:  detail.referee?.name   || null,
+    };
+
+    const preds = (detail.predictions || []).filter(p => p.type === 'prematch');
+    const latest = preds[preds.length - 1];
+    if (latest?.probabilities) {
+      result.percent_home = parseFloat(latest.probabilities.home);
+      result.percent_draw = parseFloat(latest.probabilities.draw);
+      result.percent_away = parseFloat(latest.probabilities.away);
+    }
+
+    return Object.values(result).some(v => v !== null) ? result : null;
+  } catch (e) {
+    console.warn(`getApiPrediction(${fixtureId}): ${e.message}`);
+    return null;
+  }
+}
 
 async function getTeamStats(teamId, leagueId) {
   const season = LEAGUE_SEASONS[leagueId] || 2025;
@@ -2515,6 +2540,7 @@ function buildPickCandidates(enrichedFixtures) {
         posicionVisitante:   f.posicionVisitante   || null,
         jornada:             f.jornada             || null,
         estadio:             f.estadio             || null,
+        ciudad:              f.ciudad              || null,
         arbitro:             f.arbitro             || null,
         // Si SofaScore está bloqueado (arbitroStats=null) pero tenemos datos de equipo,
         // derivamos una estimación de tarjetas/partido como sustituto de display.
@@ -3430,6 +3456,8 @@ PRINCIPIOS DEL ANALISTA DE ÉLITE
 
 5. NO MENCIONES TECNICISMOS — Nunca escribas EV%, lambda, Poisson, xG como términos. Escribe el resultado de los cálculos, no el método.
 
+6. ESTADÍSTICAS SON PROMEDIOS DE TEMPORADA — NUNCA etiquetes una estadística del JSON como "en este torneo", "en su debut", "en jornada X", "en la Champions", "en el Mundial" u otro contexto específico. Son promedios de TEMPORADA COMPLETA en todas las competiciones. Escribe "promedia X goles/partido" no "anotó X en el primer partido del torneo".
+
 ═══════════════════════════════════════
 CÓMO USAR CADA CAMPO DE DATOS
 ═══════════════════════════════════════
@@ -3509,14 +3537,14 @@ FORMATO OBLIGATORIO (Telegram Markdown)
 ├ [MÁXIMO 2 líneas — argumento central: el dato clave + por qué tiene valor AHORA]
 ├ [Si pick de tarjetas → menciona árbitro y sus tarj/partido]
 ├ 🏆 Stake: *[X]/10*
-├ 💡 Cuota estimada: *est. ~[X.XX]* _(verifica en tu bookmaker)_
+├ 💡 Cuota: *[X.XX]* ← el campo `odds` del pick (cuota real de mercado)
 └ ⚠️ Riesgo: [1 línea máximo]
 
 ━━━━━━━━━━━━━━━━━━━
 
 [Solo si hay exactamente 3 picks individuales y son de mercados distintos:]
 🎰 *COMBINADA SUGERIDA*
-[Pick 1] × [Pick 2] × [Pick 3] | Cuota estimada: ~[X.XX] | Stake: [Y]/10
+[Pick 1] × [Pick 2] × [Pick 3] | Cuota: ~[X.XX] | Stake: [Y]/10
 
 ━━━━━━━━━━━━━━━━━━━
 
@@ -4576,9 +4604,12 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     enriched[i].motivacionVisitante = getTeamMotivation(standingVisit, totalEquipos);
     enriched[i].arbitro = f.referee || null;
 
-    // ── Predicción de la API como lambda secundario ────────────────────────────
+    // ── Predicción + venue/árbitro desde /matches/{id} ────────────────────────
     const pred = predResults[i].status === 'fulfilled' ? predResults[i].value : null;
     if (pred) {
+      if (pred._venue)   enriched[i].estadio = pred._venue;
+      if (pred._city)    enriched[i].ciudad  = pred._city;
+      if (pred._referee) enriched[i].arbitro = pred._referee;
       enriched[i].prediccionAPI = pred;
       // Si la API da xG esperados, recalcular probs blending 40% API + 60% nuestro Poisson
       if (pred.goals_home != null && pred.goals_away != null) {
