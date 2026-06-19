@@ -457,8 +457,9 @@ function parseFixture(m) {
     awayTeam:   m.awayTeam.name,
     homeGoals:  score.home,
     awayGoals:  score.away,
-    referee:    null,
-    venue:      null,
+    referee:    m.referee?.name || null,
+    venue:      m.venue?.name   || null,
+    city:       m.venue?.city   || null,
   };
 }
 
@@ -1294,8 +1295,10 @@ async function getLastMatchDate(teamId) { return null; }
 async function getApiPrediction(fixtureId) {
   try {
     const { data } = await API.get('/matches/' + fixtureId);
-    const detail = Array.isArray(data) ? data[0] : data;
-    if (!detail) return null;
+    // Highlightly can return either [{...}] or { data: [{...}] } — handle both
+    const raw    = Array.isArray(data) ? data : (Array.isArray(data?.data) ? data.data : [data]);
+    const detail = raw[0];
+    if (!detail || typeof detail !== 'object') return null;
 
     const result = {
       _venue:    detail.venue?.name     || null,
@@ -1311,12 +1314,123 @@ async function getApiPrediction(fixtureId) {
       result.percent_away = parseFloat(latest.probabilities.away);
     }
 
+    if (result._venue) console.log(`✅ getApiPrediction(${fixtureId}): venue="${result._venue}" referee="${result._referee}"`);
     return Object.values(result).some(v => v !== null) ? result : null;
   } catch (e) {
     console.warn(`getApiPrediction(${fixtureId}): ${e.message}`);
     return null;
   }
 }
+
+// ─── Árbitro: estadísticas de tarjetas desde WorldReferee.com ─────────────────
+const _refereeStatsCache = new Map();
+
+async function getRefereeCardStats(name) {
+  if (!name) return null;
+  if (_refereeStatsCache.has(name)) return _refereeStatsCache.get(name);
+
+  const slug = name
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, '')
+    .trim()
+    .replace(/\s+/g, '_');
+
+  const slugFallaback = (() => {
+    const parts = name.normalize('NFD').replace(/[̀-ͯ]/g, '')
+      .toLowerCase().replace(/[^a-z\s]/g, '').trim().split(/\s+/);
+    if (parts.length < 2) return null;
+    return `${parts[0][0]}-${parts[parts.length - 1]}`;
+  })();
+
+  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
+  const HEADERS = { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml', 'Accept-Language': 'en-US,en;q=0.9' };
+
+  const extractFromHtml = (html) => {
+    const text = html.replace(/<script[\s\S]*?<\/script>/gi, '')
+                     .replace(/<style[\s\S]*?<\/style>/gi, '')
+                     .replace(/<[^>]+>/g, ' ')
+                     .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
+                     .replace(/\s+/g, ' ');
+
+    // Patrones universales: buscar número seguido de etiqueta de stat
+    const num = (pattern) => {
+      const m = text.match(pattern);
+      return m ? parseFloat(m[1]) : null;
+    };
+
+    // Yellow cards per match — varias formas posibles
+    let amarillas = num(/(\d+\.?\d*)\s*(?:yellow\s*cards?\s*per\s*match|yellows?\s*per\s*(?:game|match)|avg\.?\s*yellow)/i)
+      || num(/yellow\s*cards?\s*[:\-–]\s*(\d+\.?\d*)/i);
+
+    // Red cards per match
+    let rojas = num(/(\d+\.?\d*)\s*(?:red\s*cards?\s*per\s*match|reds?\s*per\s*(?:game|match)|avg\.?\s*red)/i)
+      || num(/red\s*cards?\s*[:\-–]\s*(\d+\.?\d*)/i);
+
+    // Total matches / games officiated
+    let partidos = num(/(\d+)\s*(?:matches?\s*officiated|games?\s*officiated|total\s*matches?|appearances?)/i);
+
+    // Si tenemos totales y partidos, calcular promedio
+    if (!amarillas && partidos) {
+      const totalY = num(/(\d+)\s*yellow\s*cards?[^/]/i);
+      if (totalY && partidos > 0) amarillas = +(totalY / partidos).toFixed(2);
+    }
+    if (!rojas && partidos) {
+      const totalR = num(/(\d+)\s*red\s*cards?[^/]/i);
+      if (totalR && partidos > 0) rojas = +(totalR / partidos).toFixed(2);
+    }
+
+    // Penaltis
+    const penaltis = num(/(\d+\.?\d*)\s*(?:penalt(?:ies|y|is)\s*per\s*(?:match|game)|avg\.?\s*penalt)/i);
+
+    if (!amarillas && !rojas && !partidos) return null;
+    return {
+      nombre:                name,
+      partidos:              partidos || null,
+      amarillas_por_partido: amarillas || null,
+      rojas_por_partido:     rojas     || null,
+      ...(penaltis != null && { penaltis_por_partido: penaltis }),
+    };
+  };
+
+  // 1. Intentar WorldReferee.com (URL predecible por nombre)
+  try {
+    const url = `https://worldreferee.com/referee/${slug}`;
+    const { data: html } = await axios.get(url, { headers: HEADERS, timeout: 8000 });
+    if (html && !html.includes('404') && !html.toLowerCase().includes('not found')) {
+      const stats = extractFromHtml(html);
+      if (stats?.amarillas_por_partido != null || stats?.rojas_por_partido != null) {
+        console.log(`🃏 WorldReferee [${name}]: ${stats.amarillas_por_partido} am/p, ${stats.rojas_por_partido} ro/p (${stats.partidos} partidos)`);
+        _refereeStatsCache.set(name, stats);
+        setTimeout(() => _refereeStatsCache.delete(name), 24 * 3_600_000);
+        return stats;
+      }
+    }
+  } catch {}
+
+  // 2. Fallback: Footballan.com (initial-lastname format)
+  if (slugFallaback) {
+    try {
+      const url = `https://footballan.com/referee/${slugFallaback}/`;
+      const { data: html } = await axios.get(url, { headers: HEADERS, timeout: 8000 });
+      if (html && !html.includes('404')) {
+        const stats = extractFromHtml(html);
+        if (stats?.amarillas_por_partido != null || stats?.rojas_por_partido != null) {
+          console.log(`🃏 Footballan [${name}]: ${stats.amarillas_por_partido} am/p, ${stats.rojas_por_partido} ro/p`);
+          _refereeStatsCache.set(name, stats);
+          setTimeout(() => _refereeStatsCache.delete(name), 24 * 3_600_000);
+          return stats;
+        }
+      }
+    } catch {}
+  }
+
+  // 3. Guardar null para no reintentar en la misma sesión
+  console.log(`⚠️ getRefereeCardStats: sin datos para "${name}"`);
+  _refereeStatsCache.set(name, null);
+  return null;
+}
+// ─────────────────────────────────────────────────────────────────────────────
 
 async function getTeamStats(teamId, leagueId) {
   const season = LEAGUE_SEASONS[leagueId] || 2025;
@@ -4258,7 +4372,8 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     if (h2h && h2h.length > 0) enriched[i].h2h = h2h.slice(0, 5);
 
     enriched[i].jornada = f.round;
-    enriched[i].estadio = f.venue;
+    enriched[i].estadio = f.venue  || null;
+    enriched[i].ciudad  = f.city   || null;
 
     const standings    = standingsMap[f.leagueId] || [];
     const totalEquipos = standingsTotalMap[f.leagueId] || 20;
@@ -4308,6 +4423,22 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       awayLastMatch: null,
     });
     if (Object.keys(matchCtx).length > 0) enriched[i].contextoPartido = matchCtx;
+  }
+
+  // ── Estadísticas del árbitro (WorldReferee.com) ──────────────────────────────
+  {
+    const refNames = enriched.map(e => e.arbitro || null);
+    const uniqueRefs = [...new Set(refNames.filter(Boolean))];
+    if (uniqueRefs.length > 0) {
+      const refResults = await Promise.allSettled(uniqueRefs.map(n => getRefereeCardStats(n)));
+      const refMap = {};
+      uniqueRefs.forEach((n, i) => {
+        if (refResults[i].status === 'fulfilled' && refResults[i].value) refMap[n] = refResults[i].value;
+      });
+      for (const e of enriched) {
+        if (e.arbitro && refMap[e.arbitro]) e.arbitroStats = refMap[e.arbitro];
+      }
+    }
   }
 
   // ── Soccer Buddy / ZCode signals ────────────────────────────────────────────
@@ -4934,6 +5065,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
 
   const apiReferee = nextRaw.fixture.referee || null;
   const referee = predData?._referee || apiReferee || null;
+  const refereeStats = referee ? await getRefereeCardStats(referee).catch(() => null) : null;
 
   // Standings: extraer posición y motivación de cada equipo
   const homeStanding = standingsData.teams.find(t => t.teamId === homeId) || null;
@@ -5078,6 +5210,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       grupo:     null,
       jornada:   round || null,
     },
+    ...(refereeStats && { arbitroStats: refereeStats }),
     contextoPorPartido: {
       queSeJuegaLocal:    motivLocal.texto,
       queSeJuegaVisitante: motivVisit.texto,
@@ -5293,6 +5426,21 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
     };
   });
 
+  // Estadísticas del árbitro en vivo (WorldReferee.com)
+  {
+    const uniqueRefsVivo = [...new Set(enriched.map(e => e.arbitro).filter(Boolean))];
+    if (uniqueRefsVivo.length > 0) {
+      const refResultsVivo = await Promise.allSettled(uniqueRefsVivo.map(n => getRefereeCardStats(n)));
+      const refMapVivo = {};
+      uniqueRefsVivo.forEach((n, i) => {
+        if (refResultsVivo[i].status === 'fulfilled' && refResultsVivo[i].value) refMapVivo[n] = refResultsVivo[i].value;
+      });
+      for (const e of enriched) {
+        if (e.arbitro && refMapVivo[e.arbitro]) e.arbitroStats = refMapVivo[e.arbitro];
+      }
+    }
+  }
+
   // Cuotas en vivo reales para cada partido
   await bot.sendMessage(chatId, '📈 Consultando cuotas en vivo...');
   const liveOddsResults = await Promise.allSettled(toAnalyze.map(f => getLiveOdds(f.fixtureId)));
@@ -5452,6 +5600,7 @@ async function handleEspecifica(chatId, intent) {
   const injAway2       = injAwayRes2?.status === 'fulfilled'  ? injAwayRes2.value   : [];
   const apiRef2 = nextRaw.fixture.referee || null;
   const referee2 = predData2?._referee || apiRef2 || null;
+  const refereeStats2 = referee2 ? await getRefereeCardStats(referee2).catch(() => null) : null;
 
   const homeStanding2  = standData2.teams?.find(t => t.teamId === homeId) || null;
   const awayStanding2  = standData2.teams?.find(t => t.teamId === awayId) || null;
@@ -5473,6 +5622,7 @@ async function handleEspecifica(chatId, intent) {
       grupo:     null,
       jornada:   nextRaw.league?.round || null,
     },
+    ...(refereeStats2 && { arbitroStats: refereeStats2 }),
     contextoPorPartido: {
       queSeJuegaLocal:     getTeamMotivation(homeStanding2, totalTeams2).texto,
       queSeJuegaVisitante: getTeamMotivation(awayStanding2, totalTeams2).texto,
