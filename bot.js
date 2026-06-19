@@ -4455,7 +4455,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   for (let i = 0; i < statsPairs.length; i += 6) {
     const batch = await Promise.allSettled(statsPairs.slice(i, i + 6));
     statsResults.push(...batch);
-    if (i + 6 < statsPairs.length) await new Promise(r => setTimeout(r, 4000));
+    if (i + 6 < statsPairs.length) await new Promise(r => setTimeout(r, 500));
   }
 
   // Construir enriched con probabilidades extendidas (HT + corners)
@@ -4597,7 +4597,10 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   // Enriquecer con SofaScore (árbitro con stats, forma reciente)
   try {
     await bot.sendMessage(chatId, '🔬 Enriqueciendo contexto con datos externos...');
-    const sofaEvents = await fetchSofaScoreEvents(today);
+    const sofaEvents = await Promise.race([
+      fetchSofaScoreEvents(today),
+      new Promise(r => setTimeout(() => r([]), 12000)),  // máx 12s para SofaScore
+    ]);
     if (sofaEvents.length > 0) {
       const sofaResults = await Promise.allSettled(
         enriched.map(e => getSofaMatchContext(e.local, e.visitante, sofaEvents))
