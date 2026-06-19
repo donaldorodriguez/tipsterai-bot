@@ -2388,6 +2388,7 @@ function buildPickCandidates(enrichedFixtures) {
  */
 function selectDiversePicks(candidates, count = 3) {
   const usedFixtures = new Set();
+  const usedPickKeys = new Set(); // fixtureId:market — evita añadir el mismo pick dos veces
   const catCount     = {};   // por categoría amplia  (goals, result, btts…)
   const marketCount  = {};   // por mercado específico (under25, over25, homeWin…)
   const leagueCount  = {};   // por liga
@@ -2408,6 +2409,8 @@ function selectDiversePicks(candidates, count = 3) {
    * allowSameFixture: si true, permite un 2.º pick del mismo partido (distinto mercado)
    */
   function tryAdd(c, maxPerCat, maxPerMarket, maxPerLeague, allowSameFixture = false) {
+    const pickKey = `${c.fixtureId}:${c.market}`;
+    if (usedPickKeys.has(pickKey)) return false; // nunca añadir el mismo pick dos veces
     if (!allowSameFixture && usedFixtures.has(c.fixtureId)) return false;
     if ((catCount[c.category]   || 0) >= maxPerCat)            return false;
     // REGLA DURA: mercados de goles siempre cap=1
@@ -2415,6 +2418,7 @@ function selectDiversePicks(candidates, count = 3) {
     if ((marketCount[c.market]  || 0) >= effectiveCap)         return false;
     if ((leagueCount[c.liga]    || 0) >= maxPerLeague)         return false;
 
+    usedPickKeys.add(pickKey);
     usedFixtures.add(c.fixtureId);
     catCount[c.category]  = (catCount[c.category]  || 0) + 1;
     marketCount[c.market] = (marketCount[c.market] || 0) + 1;
@@ -3352,7 +3356,7 @@ REGLAS IRROMPIBLES:
 - Si motivacionLocal.estado o motivacionVisitante.estado es "desconocido" → no escribas "Sin datos de posición" — usa posicionLocal/posicionVisitante directamente o infiere del contexto
 - LA CUOTA ES EXACTAMENTE EL NÚMERO DEL CAMPO "odds" — escríbelo solo, sin paréntesis, sin "(estimada...)", sin "(verifica...)", sin "~", sin "est.", sin NINGÚN texto adicional después del número. Si odds es null → escribe "n/d". NUNCA inventes un número ni añadas comentarios.
 - NO cambies el stake ni la cuota que viene en los datos
-- Si recibes 3 picks → publícalos todos. Si recibes 2 → añade un TERCER pick de un mercado distinto (corners, tarjetas equipo, portería a cero, DNB, doble oportunidad, goles 2T, etc.) usando los datos disponibles. SIEMPRE 3 picks.
+- PUBLICA EXACTAMENTE los picks que recibes en el JSON — ni uno más, ni uno menos. PROHIBIDO añadir picks de partidos que NO están en el JSON. PROHIBIDO inventar un tercer pick si solo recibes 2. Si recibes 2 picks, publicas 2. Si recibes 3, publicas 3.
 - El razonamiento debe conectar los números con la situación real del partido
 - Responde en español`;
 
