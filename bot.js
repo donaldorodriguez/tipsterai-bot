@@ -2374,7 +2374,9 @@ function buildPickCandidates(enrichedFixtures) {
     for (const m of markets) {
       const o = m.oddsVal;
       if (!o || o <= 1) continue;                          // sin cuota
-      if (o < (m.minOdds || 1.65)) continue;              // cuota muy baja
+      // Piso global 1.65 — mercados obvios (cuota muy baja = sin valor real)
+      // Un pick con DNB 1.15 al Real Madrid o DC 1X 1.20 no tiene valor
+      if (o < 1.65) continue;
 
       // ── Inyectar prob real de tarjetas ───────────────────────────────────────
       if (m._cardsBlock) {
@@ -3540,6 +3542,8 @@ REGLAS IRROMPIBLES:
 - Si motivacionLocal.estado o motivacionVisitante.estado es "desconocido" → no escribas "Sin datos de posición" — usa posicionLocal/posicionVisitante directamente o infiere del contexto
 - LA CUOTA ES EXACTAMENTE EL NÚMERO DEL CAMPO "odds" — escríbelo solo, sin paréntesis, sin "(estimada...)", sin "(verifica...)", sin "~", sin "est.", sin NINGÚN texto adicional después del número. Si odds es null → escribe "n/d". NUNCA inventes un número ni añadas comentarios.
 - NO cambies el stake ni la cuota que viene en los datos
+- CUOTA MÍNIMA 1.65: NUNCA recomiendes un pick donde la cuota sea < 1.65. Si en el JSON llega un pick con odds < 1.65, omítelo completamente y no lo publiques. Una cuota de 1.15 (ej: DNB Real Madrid), 1.20 o 1.40 no tiene valor real — el motor ya los filtra pero si por error llegan, descártalos en silencio.
+- DNB/DC (Draw No Bet, Doble Oportunidad) son mercados legítimos CUANDO la cuota ≥ 1.65. Explica el valor: "el visitante gana a 2.50 pero el DNB a 1.75 nos da cobertura con buen EV". NUNCA digas que un DNB es "seguro" o "cómodo" — explica por qué el equipo tiene capacidad de ganar Y por qué la cuota tiene valor.
 - PUBLICA EXACTAMENTE los picks que recibes en el JSON — ni uno más, ni uno menos. PROHIBIDO añadir picks de partidos que NO están en el JSON. PROHIBIDO inventar un tercer pick si solo recibes 2. Si recibes 2 picks, publicas 2. Si recibes 3, publicas 3.
 - El razonamiento debe conectar los números con la situación real del partido
 - Responde en español`;
