@@ -1473,31 +1473,36 @@ async function getRefereeCardStats(name) {
       return m ? parseFloat(m[1]) : null;
     };
 
-    // Yellow cards per match — varias formas posibles
+    // ── Formato WorldReferee: "N YELLOW CARDS" / "N MATCHES" / "N RED CARDS" ──
+    // El HTML strip deja el número ANTES del label (ej: "0 YELLOW CARDS 1 MATCHES")
+    const totalY  = num(/(\d+)\s+YELLOW\s+CARDS/i);
+    const totalR  = num(/(\d+)\s+RED\s+CARDS/i);
+    const totalM  = num(/(\d+)\s+MATCHES/i)
+                 || num(/(\d+)\s+(?:matches?\s*officiated|games?\s*officiated|total\s*matches?|appearances?)/i);
+    const totalP  = num(/(\d+)\s+PENALTIES/i);
+
+    // ── Formato texto narrativo: "X yellow cards per match" / "yellow cards: X" ──
     let amarillas = num(/(\d+\.?\d*)\s*(?:yellow\s*cards?\s*per\s*match|yellows?\s*per\s*(?:game|match)|avg\.?\s*yellow)/i)
-      || num(/yellow\s*cards?\s*[:\-–]\s*(\d+\.?\d*)/i);
+                 || num(/yellow\s*cards?\s*[:\-–]\s*(\d+\.?\d*)/i);
+    let rojas     = num(/(\d+\.?\d*)\s*(?:red\s*cards?\s*per\s*match|reds?\s*per\s*(?:game|match)|avg\.?\s*red)/i)
+                 || num(/red\s*cards?\s*[:\-–]\s*(\d+\.?\d*)/i);
+    let partidos  = totalM;
 
-    // Red cards per match
-    let rojas = num(/(\d+\.?\d*)\s*(?:red\s*cards?\s*per\s*match|reds?\s*per\s*(?:game|match)|avg\.?\s*red)/i)
-      || num(/red\s*cards?\s*[:\-–]\s*(\d+\.?\d*)/i);
-
-    // Total matches / games officiated
-    let partidos = num(/(\d+)\s*(?:matches?\s*officiated|games?\s*officiated|total\s*matches?|appearances?)/i);
-
-    // Si tenemos totales y partidos, calcular promedio
-    if (!amarillas && partidos) {
-      const totalY = num(/(\d+)\s*yellow\s*cards?[^/]/i);
-      if (totalY && partidos > 0) amarillas = +(totalY / partidos).toFixed(2);
-    }
-    if (!rojas && partidos) {
-      const totalR = num(/(\d+)\s*red\s*cards?[^/]/i);
-      if (totalR && partidos > 0) rojas = +(totalR / partidos).toFixed(2);
+    // Calcular promedio si tenemos totales + partidos
+    if (totalM && totalM > 0) {
+      if (totalY !== null && amarillas === null) amarillas = +(totalY / totalM).toFixed(2);
+      if (totalR !== null && rojas === null)     rojas     = +(totalR / totalM).toFixed(2);
     }
 
     // Penaltis
-    const penaltis = num(/(\d+\.?\d*)\s*(?:penalt(?:ies|y|is)\s*per\s*(?:match|game)|avg\.?\s*penalt)/i);
+    const penaltis = totalP != null && totalM > 0
+      ? +(totalP / totalM).toFixed(2)
+      : num(/(\d+\.?\d*)\s*(?:penalt(?:ies|y|is)\s*per\s*(?:match|game)|avg\.?\s*penalt)/i);
 
-    if (!amarillas && !rojas && !partidos) return null;
+    // Necesitamos al menos partidos y alguna stat de tarjetas para que sea útil
+    if (!partidos || partidos < 1) return null;
+    // Árbitro con < 3 partidos en la BD: dato insuficiente para ser confiable
+    if (partidos < 3 && amarillas === null && rojas === null) return null;
     return {
       nombre:                name,
       partidos:              partidos || null,
@@ -1519,7 +1524,7 @@ async function getRefereeCardStats(name) {
       const { data: html } = await axios.get(url, { headers: HEADERS, timeout: 8000 });
       if (!html || html.includes('404') || html.toLowerCase().includes('not found')) continue;
       const stats = extractFromHtml(html);
-      if (stats?.amarillas_por_partido != null || stats?.rojas_por_partido != null) {
+      if (stats?.partidos >= 1) {
         console.log(`🃏 ${source} [${name}]: ${stats.amarillas_por_partido} am/p, ${stats.rojas_por_partido} ro/p (${stats.partidos} partidos)`);
         _refereeStatsCache.set(name, stats);
         setTimeout(() => _refereeStatsCache.delete(name), 24 * 3_600_000);
