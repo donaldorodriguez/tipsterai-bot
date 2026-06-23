@@ -1436,19 +1436,26 @@ async function getRefereeCardStats(name) {
   if (!name) return null;
   if (_refereeStatsCache.has(name)) return _refereeStatsCache.get(name);
 
-  const slug = name
-    .normalize('NFD').replace(/[̀-ͯ]/g, '')
-    .toLowerCase()
-    .replace(/[^a-z\s]/g, '')
-    .trim()
-    .replace(/\s+/g, '_');
+  // Highlightly entrega nombre como "Apellido, Nombre" — normalizar a "Nombre Apellido"
+  const normalizedName = name.includes(',')
+    ? name.split(',').map(s => s.trim()).reverse().join(' ')
+    : name;
 
+  const clean = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z\s]/g, '').trim();
+
+  // WorldReferee usa firstname-lastname con guiones
+  const slugHyphen = clean(normalizedName).replace(/\s+/g, '-');
+  // Fallback: initial-lastname (formato footballan)
   const slugFallaback = (() => {
-    const parts = name.normalize('NFD').replace(/[̀-ͯ]/g, '')
-      .toLowerCase().replace(/[^a-z\s]/g, '').trim().split(/\s+/);
+    const parts = clean(normalizedName).split(/\s+/);
     if (parts.length < 2) return null;
     return `${parts[0][0]}-${parts[parts.length - 1]}`;
   })();
+  // También intentar lastname-firstname (algunos sitios usan este orden)
+  const slugReversed = clean(name.includes(',') ? name : normalizedName)
+    .replace(/,/g, '').replace(/\s+/g, '-');
+
+  console.log(`🃏 getRefereeCardStats "${name}" → slugs: ${slugHyphen} | ${slugFallaback} | ${slugReversed}`);
 
   const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
   const HEADERS = { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml', 'Accept-Language': 'en-US,en;q=0.9' };
@@ -1500,34 +1507,23 @@ async function getRefereeCardStats(name) {
     };
   };
 
-  // 1. Intentar WorldReferee.com (URL predecible por nombre)
-  try {
-    const url = `https://worldreferee.com/referee/${slug}`;
-    const { data: html } = await axios.get(url, { headers: HEADERS, timeout: 8000 });
-    if (html && !html.includes('404') && !html.toLowerCase().includes('not found')) {
+  // Intentar múltiples fuentes y formatos de slug
+  const attempts = [
+    { source: 'WorldReferee', url: `https://worldreferee.com/referee/${slugHyphen}` },
+    { source: 'WorldReferee-rev', url: `https://worldreferee.com/referee/${slugReversed}` },
+    ...(slugFallaback ? [{ source: 'Footballan', url: `https://footballan.com/referee/${slugFallaback}/` }] : []),
+  ];
+
+  for (const { source, url } of attempts) {
+    try {
+      const { data: html } = await axios.get(url, { headers: HEADERS, timeout: 8000 });
+      if (!html || html.includes('404') || html.toLowerCase().includes('not found')) continue;
       const stats = extractFromHtml(html);
       if (stats?.amarillas_por_partido != null || stats?.rojas_por_partido != null) {
-        console.log(`🃏 WorldReferee [${name}]: ${stats.amarillas_por_partido} am/p, ${stats.rojas_por_partido} ro/p (${stats.partidos} partidos)`);
+        console.log(`🃏 ${source} [${name}]: ${stats.amarillas_por_partido} am/p, ${stats.rojas_por_partido} ro/p (${stats.partidos} partidos)`);
         _refereeStatsCache.set(name, stats);
         setTimeout(() => _refereeStatsCache.delete(name), 24 * 3_600_000);
         return stats;
-      }
-    }
-  } catch {}
-
-  // 2. Fallback: Footballan.com (initial-lastname format)
-  if (slugFallaback) {
-    try {
-      const url = `https://footballan.com/referee/${slugFallaback}/`;
-      const { data: html } = await axios.get(url, { headers: HEADERS, timeout: 8000 });
-      if (html && !html.includes('404')) {
-        const stats = extractFromHtml(html);
-        if (stats?.amarillas_por_partido != null || stats?.rojas_por_partido != null) {
-          console.log(`🃏 Footballan [${name}]: ${stats.amarillas_por_partido} am/p, ${stats.rojas_por_partido} ro/p`);
-          _refereeStatsCache.set(name, stats);
-          setTimeout(() => _refereeStatsCache.delete(name), 24 * 3_600_000);
-          return stats;
-        }
       }
     } catch {}
   }
