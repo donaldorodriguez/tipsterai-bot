@@ -1443,17 +1443,17 @@ async function getRefereeCardStats(name) {
 
   const clean = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z\s]/g, '').trim();
 
-  // WorldReferee usa firstname-lastname con guiones
-  const slugHyphen = clean(normalizedName).replace(/\s+/g, '-');
+  // WorldReferee usa firstname_lastname con guiones bajos
+  const slugHyphen = clean(normalizedName).replace(/\s+/g, '_');
   // Fallback: initial-lastname (formato footballan)
   const slugFallaback = (() => {
     const parts = clean(normalizedName).split(/\s+/);
     if (parts.length < 2) return null;
     return `${parts[0][0]}-${parts[parts.length - 1]}`;
   })();
-  // También intentar lastname-firstname (algunos sitios usan este orden)
+  // También intentar lastname_firstname (orden invertido con underscore)
   const slugReversed = clean(name.includes(',') ? name : normalizedName)
-    .replace(/,/g, '').replace(/\s+/g, '-');
+    .replace(/,/g, '').replace(/\s+/g, '_');
 
   console.log(`🃏 getRefereeCardStats "${name}" → slugs: ${slugHyphen} | ${slugFallaback} | ${slugReversed}`);
 
@@ -1509,8 +1509,8 @@ async function getRefereeCardStats(name) {
 
   // Intentar múltiples fuentes y formatos de slug
   const attempts = [
-    { source: 'WorldReferee', url: `https://worldreferee.com/referee/${slugHyphen}` },
-    { source: 'WorldReferee-rev', url: `https://worldreferee.com/referee/${slugReversed}` },
+    { source: 'WorldReferee', url: `https://worldreferee.com/referee/${slugHyphen}` },        // jalal_jayed
+    { source: 'WorldReferee-rev', url: `https://worldreferee.com/referee/${slugReversed}` },  // jayed_jalal
     ...(slugFallaback ? [{ source: 'Footballan', url: `https://footballan.com/referee/${slugFallaback}/` }] : []),
   ];
 
