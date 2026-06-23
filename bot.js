@@ -1098,7 +1098,15 @@ async function getTeamLastFixtures(teamId, last = 15, venue = null) {
     .sort((a, b) => new Date(b.date) - new Date(a.date))
     .slice(0, last)
     .map(m => {
-      const score = parseHLScore(m.state?.score?.current || '0 - 0');
+      // No usar '0 - 0' como fallback — score null significa "dato no disponible", no 0-0
+      const scoreStr = m.state?.score?.current ?? m.state?.score?.fulltime ?? null;
+      const score = parseHLScore(scoreStr);
+      // Debug: log primer partido histórico para ver campos disponibles
+      if (!getTeamLastFixtures._loggedFields) {
+        getTeamLastFixtures._loggedFields = true;
+        console.log(`🔍 getTeamLastFixtures sample raw keys: ${Object.keys(m).join(', ')}`);
+        console.log(`🔍 getTeamLastFixtures score fields: current=${m.state?.score?.current} state.keys=${Object.keys(m.state||{}).join(',')}`);
+      }
       return {
         fixtureId:  m.id,
         date:       m.date.split('T')[0],
@@ -1108,8 +1116,8 @@ async function getTeamLastFixtures(teamId, last = 15, venue = null) {
         awayId:     m.awayTeam.id,
         leagueName: m.league.name,
         leagueId:   m.league.id,
-        goalsHome:  score.home ?? 0,
-        goalsAway:  score.away ?? 0,
+        goalsHome:  score.home,   // null si no hay score — NO defaultear a 0
+        goalsAway:  score.away,   // null si no hay score — NO defaultear a 0
         htHome:     null,
         htAway:     null,
       };
@@ -1206,16 +1214,19 @@ async function getH2H(id1, id2) {
   return matches
     .filter(m => FINISHED_DESCS.has(m.state?.description))
     .map(m => {
-      const score = parseHLScore(m.state?.score?.current || '0 - 0');
+      const scoreStr = m.state?.score?.current ?? m.state?.score?.fulltime ?? null;
+      const score = parseHLScore(scoreStr);
+      if (score.home === null) return null;   // sin datos de score — descartar
       return {
         date:      m.date.split('T')[0],
         home:      m.homeTeam.name,
         away:      m.awayTeam.name,
-        golesHome: score.home ?? 0,
-        golesAway: score.away ?? 0,
-        btts:      (score.home ?? 0) > 0 && (score.away ?? 0) > 0,
+        golesHome: score.home,
+        golesAway: score.away,
+        btts:      score.home > 0 && score.away > 0,
       };
-    });
+    })
+    .filter(Boolean);
 }
 
 // Highlightly does not have lineup/events/injuries/odds endpoints — stub safely
@@ -1578,8 +1589,10 @@ async function getNationalTeamRecentStats(teamId, last = 20) {
 
     for (const f of fixtures) {
       const isHome = f.homeId === teamId;
-      const gF  = isHome ? (f.golesHome ?? 0) : (f.golesAway ?? 0);
-      const gC  = isHome ? (f.golesAway ?? 0) : (f.golesHome ?? 0);
+      const gF  = isHome ? f.goalsHome : f.goalsAway;
+      const gC  = isHome ? f.goalsAway : f.goalsHome;
+      // Saltar partidos sin score — no contaminar forma con 0-0 falsos
+      if (gF === null || gF === undefined || gC === null || gC === undefined) continue;
       golesAFavor   += gF;
       golesEnContra += gC;
       partidos++;
@@ -2426,6 +2439,11 @@ function buildPickCandidates(enrichedFixtures) {
 
       // Si el partido tiene stats parciales (solo un equipo), bajar stake 1 nivel por confianza.
       if (partialStats && stake > 4) stake = Math.max(4, stake - 1);
+      // Sin datos reales de ningún equipo: lambdas por defecto → EV inflado artificialmente → cap 6
+      if (f._statsSource === 'fallback' && stake > 6) {
+        stake = 6;
+        console.log(`📉 Stake capped at 6 (sin datos reales — lambdas fallback): ${f.local} vs ${f.visitante}`);
+      }
       // Respetar el tope de stake impuesto antes del motor (ej: _maxStake=5 para datos parciales)
       if (f._maxStake && stake > f._maxStake) stake = f._maxStake;
 
@@ -3491,7 +3509,8 @@ FORMATO OBLIGATORIO (Telegram Markdown)
 📊 *ANÁLISIS*
 ▸ [Local] (local): [golesAnotadosHome]/p | Forma: [forma — ver regla abajo] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
 ▸ [Visitante] (visit): [golesAnotadosAway]/p | Forma: [forma — ver regla abajo] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
-[Regla de forma: si statsLocal.forma5 es un objeto → usa statsLocal.forma5.forma (ej: "G-P-E-G-P"). Si statsLocal.forma5 es string → úsalo directo. Si no existe → usa statsLocal.forma. Si ninguno → "s/d"]
+[Regla de goles/p: si statsLocal es null O statsLocal.partidosJugados === 0 → escribe "s/d". Si golesAnotadosHome existe y es > 0 → escríbelo. Si es "0" o "0.00" y partidosJugados = 0 → escribe "s/d". NUNCA escribas "0 goles/p registrados en bd" — si no hay datos reales escribe "s/d".]
+[Regla de forma: si statsLocal.forma5 es un objeto → usa statsLocal.forma5.forma (ej: "G-P-E-G-P"). Si statsLocal.forma5 es string → úsalo directo. Si no existe → usa statsLocal.forma. Si ninguno → "s/d". NUNCA escribas "E-E-E-E-E" si todos los resultados son empate — eso indica datos corruptos; escribe "s/d".]
 [AMBAS LÍNEAS OBLIGATORIAS siempre]
 [Si baseRatesLiga]: ▸ Liga: [baseRatesLiga.over25]% Over 2.5 | [baseRatesLiga.btts]% BTTS | [baseRatesLiga.cards] tarj/p promedio
 [Si H2H ≥3 partidos]: ▸ H2H: [patrón en 1 línea]
