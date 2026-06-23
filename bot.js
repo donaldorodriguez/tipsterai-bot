@@ -1245,31 +1245,109 @@ async function getRealOdds(fixtureId) {
 
     // Promediar cuotas de todas las casas por mercado+resultado
     const totals = {}, counts = {};
+    const marketNames = new Set();
     for (const entry of oddsArr) {
       const mkt = entry.market;
+      marketNames.add(mkt);
       for (const v of (entry.values || [])) {
         const key = `${mkt}||${v.value}`;
         totals[key] = (totals[key] || 0) + (v.odd || 0);
         counts[key] = (counts[key] || 0) + 1;
       }
     }
+    // Log mercados disponibles para debug (solo primeros fixtures del día)
+    if (!getRealOdds._loggedMarkets) {
+      getRealOdds._loggedMarkets = true;
+      console.log(`📋 Mercados disponibles Highlightly [${fixtureId}]: ${[...marketNames].join(' | ')}`);
+      // Log valores de muestra para los mercados clave
+      const sampleKeys = [...Object.keys(counts)].filter(k => counts[k] > 0).slice(0, 30);
+      console.log(`📋 Muestra valores: ${sampleKeys.map(k => `${k}(${(totals[k]/counts[k]).toFixed(2)})`).join(', ')}`);
+    }
+
     const avg = (mkt, val) => {
       const key = `${mkt}||${val}`;
       return counts[key] ? +(totals[key] / counts[key]).toFixed(2) : null;
     };
+    // También busca el mercado con nombres alternativos
+    const avgAlt = (...pairs) => {
+      for (const [mkt, val] of pairs) {
+        const v = avg(mkt, val);
+        if (v) return v;
+      }
+      return null;
+    };
 
     const result = {};
+    // ── Resultado FT
     result.homeWin = avg('Full Time Result', 'Home');
     result.draw    = avg('Full Time Result', 'Draw');
     result.awayWin = avg('Full Time Result', 'Away');
-    result.over25  = avg('Total Goals 2.5', 'Over');
-    result.under25 = avg('Total Goals 2.5', 'Under');
-    result.over35  = avg('Total Goals 3.5', 'Over');
-    result.under35 = avg('Total Goals 3.5', 'Under');
-    result.over15  = avg('Total Goals 1.5', 'Over');
-    result.under15 = avg('Total Goals 1.5', 'Under');
-    result.btts    = avg('Both Teams To Score', 'Yes');
-    result.noBtts  = avg('Both Teams To Score', 'No');
+    // ── Goles FT
+    result.over05  = avgAlt(['Total Goals 0.5','Over'],  ['Goals Over/Under 0.5','Over']);
+    result.under05 = avgAlt(['Total Goals 0.5','Under'], ['Goals Over/Under 0.5','Under']);
+    result.over15  = avgAlt(['Total Goals 1.5','Over'],  ['Goals Over/Under 1.5','Over']);
+    result.under15 = avgAlt(['Total Goals 1.5','Under'], ['Goals Over/Under 1.5','Under']);
+    result.over25  = avgAlt(['Total Goals 2.5','Over'],  ['Goals Over/Under 2.5','Over'],  ['Total Goals','Over 2.5']);
+    result.under25 = avgAlt(['Total Goals 2.5','Under'], ['Goals Over/Under 2.5','Under'], ['Total Goals','Under 2.5']);
+    result.over35  = avgAlt(['Total Goals 3.5','Over'],  ['Goals Over/Under 3.5','Over']);
+    result.under35 = avgAlt(['Total Goals 3.5','Under'], ['Goals Over/Under 3.5','Under']);
+    result.over45  = avgAlt(['Total Goals 4.5','Over'],  ['Goals Over/Under 4.5','Over']);
+    result.under45 = avgAlt(['Total Goals 4.5','Under'], ['Goals Over/Under 4.5','Under']);
+    // ── BTTS
+    result.bttsYes = avgAlt(['Both Teams To Score','Yes'], ['Both Teams to Score','Yes'], ['BTTS','Yes']);
+    result.bttsNo  = avgAlt(['Both Teams To Score','No'],  ['Both Teams to Score','No'],  ['BTTS','No']);
+    // ── Doble oportunidad
+    result.dc_1X = avgAlt(['Double Chance','1X'], ['Double Chance','Home or Draw']);
+    result.dc_X2 = avgAlt(['Double Chance','X2'], ['Double Chance','Draw or Away']);
+    result.dc_12 = avgAlt(['Double Chance','12'], ['Double Chance','Home or Away']);
+    // ── Draw No Bet
+    result.dnb_home = avgAlt(['Draw No Bet','Home'], ['DNB','Home']);
+    result.dnb_away = avgAlt(['Draw No Bet','Away'], ['DNB','Away']);
+    // ── Hándicap asiático
+    result.ah_home_m05 = avgAlt(['Asian Handicap','Home -0.5'], ['Asian Handicap','-0.5']);
+    result.ah_away_m05 = avgAlt(['Asian Handicap','Away -0.5'], ['Asian Handicap','+0.5']);
+    result.ah_home_m15 = avgAlt(['Asian Handicap','Home -1.5'], ['Asian Handicap','-1.5']);
+    result.ah_away_m15 = avgAlt(['Asian Handicap','Away -1.5'], ['Asian Handicap','+1.5']);
+    // ── HT resultado
+    result.homeWin_1T = avgAlt(['First Half Result','Home'], ['Half Time','Home'], ['1st Half Result','Home']);
+    result.draw_1T    = avgAlt(['First Half Result','Draw'], ['Half Time','Draw'], ['1st Half Result','Draw']);
+    result.awayWin_1T = avgAlt(['First Half Result','Away'], ['Half Time','Away'], ['1st Half Result','Away']);
+    // ── HT goles
+    result.over05_1T = avgAlt(['First Half Goals 0.5','Over'], ['1st Half Total Goals 0.5','Over'], ['HT Over/Under 0.5','Over']);
+    result.under05_1T= avgAlt(['First Half Goals 0.5','Under'],['1st Half Total Goals 0.5','Under'],['HT Over/Under 0.5','Under']);
+    result.over15_1T = avgAlt(['First Half Goals 1.5','Over'], ['1st Half Total Goals 1.5','Over'], ['HT Over/Under 1.5','Over']);
+    result.under15_1T= avgAlt(['First Half Goals 1.5','Under'],['1st Half Total Goals 1.5','Under'],['HT Over/Under 1.5','Under']);
+    // ── Corners totales
+    result.cornersOver65  = avgAlt(['Total Corners 6.5','Over'],  ['Corners Over/Under 6.5','Over'],  ['Corner Kicks 6.5','Over']);
+    result.cornersUnder65 = avgAlt(['Total Corners 6.5','Under'], ['Corners Over/Under 6.5','Under'], ['Corner Kicks 6.5','Under']);
+    result.cornersOver75  = avgAlt(['Total Corners 7.5','Over'],  ['Corners Over/Under 7.5','Over'],  ['Corner Kicks 7.5','Over']);
+    result.cornersUnder75 = avgAlt(['Total Corners 7.5','Under'], ['Corners Over/Under 7.5','Under'], ['Corner Kicks 7.5','Under']);
+    result.cornersOver85  = avgAlt(['Total Corners 8.5','Over'],  ['Corners Over/Under 8.5','Over'],  ['Corner Kicks 8.5','Over']);
+    result.cornersUnder85 = avgAlt(['Total Corners 8.5','Under'], ['Corners Over/Under 8.5','Under'], ['Corner Kicks 8.5','Under']);
+    result.cornersOver95  = avgAlt(['Total Corners 9.5','Over'],  ['Corners Over/Under 9.5','Over'],  ['Corner Kicks 9.5','Over']);
+    result.cornersUnder95 = avgAlt(['Total Corners 9.5','Under'], ['Corners Over/Under 9.5','Under'], ['Corner Kicks 9.5','Under']);
+    result.cornersOver105 = avgAlt(['Total Corners 10.5','Over'], ['Corners Over/Under 10.5','Over'], ['Corner Kicks 10.5','Over']);
+    // ── Corners por equipo
+    result.homeCorners_over35 = avgAlt(['Home Team Corners 3.5','Over'],  ['Team Corners Home 3.5','Over']);
+    result.homeCorners_over45 = avgAlt(['Home Team Corners 4.5','Over'],  ['Team Corners Home 4.5','Over']);
+    result.awayCorners_over25 = avgAlt(['Away Team Corners 2.5','Over'],  ['Team Corners Away 2.5','Over']);
+    result.awayCorners_over35 = avgAlt(['Away Team Corners 3.5','Over'],  ['Team Corners Away 3.5','Over']);
+    // ── Tarjetas totales
+    result.cardsOver25 = avgAlt(['Total Yellow Cards 2.5','Over'], ['Cards Over/Under 2.5','Over'], ['Total Cards 2.5','Over']);
+    result.cardsUnder25= avgAlt(['Total Yellow Cards 2.5','Under'],['Cards Over/Under 2.5','Under'],['Total Cards 2.5','Under']);
+    result.cardsOver35 = avgAlt(['Total Yellow Cards 3.5','Over'], ['Cards Over/Under 3.5','Over'], ['Total Cards 3.5','Over']);
+    result.cardsOver45 = avgAlt(['Total Yellow Cards 4.5','Over'], ['Cards Over/Under 4.5','Over'], ['Total Cards 4.5','Over']);
+    // ── Tarjetas por equipo
+    result.homeCardsOver15 = avgAlt(['Home Team Cards 1.5','Over'], ['Team Cards Home 1.5','Over']);
+    result.awayCardsOver15 = avgAlt(['Away Team Cards 1.5','Over'], ['Team Cards Away 1.5','Over']);
+    // ── Portería a cero
+    result.cleanSheetHome = avgAlt(['Clean Sheet','Home'], ['Home Clean Sheet','Yes']);
+    result.cleanSheetAway = avgAlt(['Clean Sheet','Away'], ['Away Clean Sheet','Yes']);
+    // ── Goles por equipo (anota)
+    result.homeToScore  = avgAlt(['Home Team To Score','Yes'], ['Home to Score','Yes']);
+    result.awayToScore  = avgAlt(['Away Team To Score','Yes'], ['Away to Score','Yes']);
+    // ── Ambas mitades con goles
+    result.goalsBothHalves = avgAlt(['Both Halves','Yes'], ['Goals in Both Halves','Yes'], ['Score in Both Halves','Yes']);
 
     Object.keys(result).forEach(k => { if (!result[k]) delete result[k]; });
     if (!result.homeWin && !result.over25) return null;
@@ -1600,14 +1678,14 @@ function formMultiplier(forma5) {
 }
 
 function calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
-  // Goles esperados (xG implícito)
   const homeLambda = ((homeFor || 1.2) + (awayAgainst || 1.2)) / 2;
   const awayLambda = ((awayFor || 1.0) + (homeAgainst || 1.0)) / 2;
 
-  // Construir matriz de score hasta 6-6
   const MAX = 7;
   let pHomeWin = 0, pDraw = 0, pAwayWin = 0;
-  let pBtts = 0, pOver15 = 0, pOver25 = 0, pOver35 = 0, pUnder25 = 0;
+  let pBtts = 0, pOver05 = 0, pOver15 = 0, pOver25 = 0, pOver35 = 0, pOver45 = 0;
+  let pUnder15 = 0, pUnder25 = 0, pUnder35 = 0;
+  let pHomeScore = 0, pAwayScore = 0;
 
   for (let h = 0; h < MAX; h++) {
     for (let a = 0; a < MAX; a++) {
@@ -1617,30 +1695,47 @@ function calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
       else if (h === a) pDraw += p;
       else pAwayWin += p;
       if (h > 0 && a > 0) pBtts += p;
+      if (h > 0) pHomeScore += p;
+      if (a > 0) pAwayScore += p;
+      if (total >= 1) pOver05 += p;
       if (total >= 2) pOver15 += p;
       if (total >= 3) pOver25 += p;
       if (total >= 4) pOver35 += p;
-      if (total <= 2) pUnder25 += p; // Bajo 2.5 = 0, 1, o 2 goles
+      if (total >= 5) pOver45 += p;
+      if (total <= 1) pUnder15 += p;
+      if (total <= 2) pUnder25 += p;
+      if (total <= 3) pUnder35 += p;
     }
   }
 
-  // DNB: excluye el empate y redistribuye
+  // Portería a cero: P(equipo no recibe goles) = Poisson(lambda, 0) = e^(-lambda)
+  const pCleanSheetHome = poissonPMF(awayLambda, 0);
+  const pCleanSheetAway = poissonPMF(homeLambda, 0);
+
   const pDnbHome = pHomeWin / (pHomeWin + pAwayWin);
   const pDnbAway = pAwayWin / (pHomeWin + pAwayWin);
 
   return {
     homeLambda: +homeLambda.toFixed(2),
     awayLambda: +awayLambda.toFixed(2),
-    homeWin:  +(pHomeWin * 100).toFixed(1),
-    draw:     +(pDraw    * 100).toFixed(1),
-    awayWin:  +(pAwayWin * 100).toFixed(1),
-    btts:     +(pBtts    * 100).toFixed(1),
-    over15:   +(pOver15  * 100).toFixed(1),
-    over25:   +(pOver25  * 100).toFixed(1),
-    over35:   +(pOver35  * 100).toFixed(1),
-    under25:  +(pUnder25 * 100).toFixed(1),
-    dnbHome:  +(pDnbHome * 100).toFixed(1),
-    dnbAway:  +(pDnbAway * 100).toFixed(1),
+    homeWin:       +(pHomeWin       * 100).toFixed(1),
+    draw:          +(pDraw          * 100).toFixed(1),
+    awayWin:       +(pAwayWin       * 100).toFixed(1),
+    btts:          +(pBtts          * 100).toFixed(1),
+    homeToScore:   +(pHomeScore     * 100).toFixed(1),
+    awayToScore:   +(pAwayScore     * 100).toFixed(1),
+    over05:        +(pOver05        * 100).toFixed(1),
+    over15:        +(pOver15        * 100).toFixed(1),
+    over25:        +(pOver25        * 100).toFixed(1),
+    over35:        +(pOver35        * 100).toFixed(1),
+    over45:        +(pOver45        * 100).toFixed(1),
+    under15:       +(pUnder15       * 100).toFixed(1),
+    under25:       +(pUnder25       * 100).toFixed(1),
+    under35:       +(pUnder35       * 100).toFixed(1),
+    under05Home:   +(pCleanSheetAway * 100).toFixed(1),
+    under05Away:   +(pCleanSheetHome * 100).toFixed(1),
+    dnbHome:       +(pDnbHome       * 100).toFixed(1),
+    dnbAway:       +(pDnbAway       * 100).toFixed(1),
   };
 }
 
@@ -1675,6 +1770,10 @@ function calcExtendedProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
   const xGTotal       = base.homeLambda + base.awayLambda;
   const cornersLambda = Math.max(5, Math.min(14, 8 + (xGTotal - 2.0) * 3.0));
 
+  // Corners por equipo: local típicamente saca ~55% de los corners
+  const homeCornersLambda = cornersLambda * 0.55;
+  const awayCornersLambda = cornersLambda * 0.45;
+
   return {
     ...base,
     htHomeWin:      +(htHomeWin * 100).toFixed(1),
@@ -1683,11 +1782,16 @@ function calcExtendedProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
     htOver05:       +(htOver05  * 100).toFixed(1),
     htOver15:       +(htOver15  * 100).toFixed(1),
     cornersLambda:  +cornersLambda.toFixed(1),
+    cornersOver65:  +(poissonCDF_above(cornersLambda,  7) * 100).toFixed(1),
     cornersOver75:  +(poissonCDF_above(cornersLambda,  8) * 100).toFixed(1),
     cornersOver85:  +(poissonCDF_above(cornersLambda,  9) * 100).toFixed(1),
     cornersOver95:  +(poissonCDF_above(cornersLambda, 10) * 100).toFixed(1),
     cornersOver105: +(poissonCDF_above(cornersLambda, 11) * 100).toFixed(1),
     cornersOver115: +(poissonCDF_above(cornersLambda, 12) * 100).toFixed(1),
+    homeCorners35:  +(poissonCDF_above(homeCornersLambda, 4) * 100).toFixed(1),
+    homeCorners45:  +(poissonCDF_above(homeCornersLambda, 5) * 100).toFixed(1),
+    awayCorners25:  +(poissonCDF_above(awayCornersLambda, 3) * 100).toFixed(1),
+    awayCorners35:  +(poissonCDF_above(awayCornersLambda, 4) * 100).toFixed(1),
   };
 }
 
@@ -2159,50 +2263,71 @@ function buildPickCandidates(enrichedFixtures) {
     // Al usuario se muestra cuota real + ODDS_DISPLAY_BUFFER.
     const markets = [
       // ── Resultado FT
-      { key: 'homeWin',     label: 'Victoria Local',       prob: probs.homeWin  / 100, oddsVal: odds.homeWin,  cat: 'result',    minOdds: 1.50, minProb: 0.52 },
-      { key: 'awayWin',     label: 'Victoria Visitante',   prob: probs.awayWin  / 100, oddsVal: odds.awayWin,  cat: 'result',    minOdds: 1.65, minProb: 0.50 },
+      { key: 'homeWin',     label: 'Victoria Local',          prob: probs.homeWin  / 100, oddsVal: odds.homeWin,  cat: 'result',    minOdds: 1.50, minProb: 0.52 },
+      { key: 'awayWin',     label: 'Victoria Visitante',      prob: probs.awayWin  / 100, oddsVal: odds.awayWin,  cat: 'result',    minOdds: 1.65, minProb: 0.50 },
       // ── Goles FT
-      { key: 'over25',      label: 'Más de 2.5 Goles',     prob: probs.over25   / 100, oddsVal: odds.over25,   cat: 'goals',     minOdds: 1.45, minProb: 0.50 },
-      { key: 'over35',      label: 'Más de 3.5 Goles',     prob: probs.over35   / 100, oddsVal: odds.over35,   cat: 'goals',     minOdds: 1.55, minProb: 0.43 },
-      { key: 'under25',     label: 'Menos de 2.5 Goles',   prob: probs.under25  / 100, oddsVal: odds.under25,  cat: 'goals',     minOdds: 1.45, minProb: 0.48 },
+      { key: 'over05',      label: 'Más de 0.5 Goles',        prob: probs.over05   / 100, oddsVal: odds.over05,   cat: 'goals',     minOdds: 1.10, minProb: 0.88 },
+      { key: 'over15',      label: 'Más de 1.5 Goles',        prob: probs.over15   / 100, oddsVal: odds.over15,   cat: 'goals',     minOdds: 1.30, minProb: 0.72 },
+      { key: 'over25',      label: 'Más de 2.5 Goles',        prob: probs.over25   / 100, oddsVal: odds.over25,   cat: 'goals',     minOdds: 1.45, minProb: 0.50 },
+      { key: 'over35',      label: 'Más de 3.5 Goles',        prob: probs.over35   / 100, oddsVal: odds.over35,   cat: 'goals',     minOdds: 1.55, minProb: 0.43 },
+      { key: 'over45',      label: 'Más de 4.5 Goles',        prob: probs.over45   / 100, oddsVal: odds.over45,   cat: 'goals',     minOdds: 1.80, minProb: 0.32 },
+      { key: 'under15',     label: 'Menos de 1.5 Goles',      prob: probs.under15  / 100, oddsVal: odds.under15,  cat: 'goals',     minOdds: 1.55, minProb: 0.60 },
+      { key: 'under25',     label: 'Menos de 2.5 Goles',      prob: probs.under25  / 100, oddsVal: odds.under25,  cat: 'goals',     minOdds: 1.45, minProb: 0.48 },
+      { key: 'under35',     label: 'Menos de 3.5 Goles',      prob: probs.under35  / 100, oddsVal: odds.under35,  cat: 'goals',     minOdds: 1.30, minProb: 0.65 },
       // ── BTTS
-      { key: 'btts',        label: 'Ambos Marcan (Sí)',     prob: probs.btts     / 100, oddsVal: odds.bttsYes,  cat: 'btts',      minOdds: 1.45, minProb: 0.52 },
+      { key: 'btts',        label: 'Ambos Marcan (Sí)',        prob: probs.btts     / 100, oddsVal: odds.bttsYes,  cat: 'btts',      minOdds: 1.45, minProb: 0.52 },
+      { key: 'bttsNo',      label: 'No Ambos Marcan',          prob: 1 - probs.btts / 100, oddsVal: odds.bttsNo,   cat: 'btts',      minOdds: 1.35, minProb: 0.58 },
+      // ── Doble oportunidad (DC)
+      { key: 'dc_1X', label: 'Doble Oportunidad 1X',          prob: (probs.homeWin + probs.draw) / 100, oddsVal: odds.dc_1X, cat: 'dc', minOdds: 1.30, minProb: 0.68 },
+      { key: 'dc_X2', label: 'Doble Oportunidad X2',          prob: (probs.draw + probs.awayWin) / 100, oddsVal: odds.dc_X2, cat: 'dc', minOdds: 1.30, minProb: 0.65 },
+      { key: 'dc_12', label: 'Doble Oportunidad 12 (sin empate)', prob: (probs.homeWin + probs.awayWin) / 100, oddsVal: odds.dc_12, cat: 'dc', minOdds: 1.25, minProb: 0.72 },
+      // ── Draw No Bet
+      { key: 'dnb_home', label: 'Draw No Bet — Local',        prob: probs.dnbHome / 100, oddsVal: odds.dnb_home, cat: 'dnb', minOdds: 1.30, minProb: 0.60 },
+      { key: 'dnb_away', label: 'Draw No Bet — Visitante',    prob: probs.dnbAway / 100, oddsVal: odds.dnb_away, cat: 'dnb', minOdds: 1.40, minProb: 0.58 },
+      // ── Hándicap asiático
+      { key: 'ah_home_m05', label: 'Hándicap Asiático Local -0.5',       prob: probs.homeWin / 100,              oddsVal: odds.ah_home_m05, cat: 'ah', minOdds: 1.50, minProb: 0.60 },
+      { key: 'ah_away_m05', label: 'Hándicap Asiático Visitante -0.5',   prob: probs.awayWin / 100,              oddsVal: odds.ah_away_m05, cat: 'ah', minOdds: 1.50, minProb: 0.58 },
+      { key: 'ah_home_m15', label: 'Hándicap Asiático Local -1.5',       prob: (probs.over15 * probs.homeWin / 10000), oddsVal: odds.ah_home_m15, cat: 'ah', minOdds: 1.60, minProb: 0.45 },
+      { key: 'ah_away_m15', label: 'Hándicap Asiático Visitante -1.5',   prob: (probs.over15 * probs.awayWin / 10000), oddsVal: odds.ah_away_m15, cat: 'ah', minOdds: 1.65, minProb: 0.42 },
+      // ── Portería a cero
+      { key: 'cleanSheetHome', label: 'Portería a Cero — Local',         prob: probs.under05Away / 100,         oddsVal: odds.cleanSheetHome, cat: 'cs', minOdds: 1.60, minProb: 0.45 },
+      { key: 'cleanSheetAway', label: 'Portería a Cero — Visitante',     prob: probs.under05Home / 100,         oddsVal: odds.cleanSheetAway, cat: 'cs', minOdds: 1.80, minProb: 0.40 },
+      // ── Local/Visitante anota
+      { key: 'homeToScore',  label: 'Local Marca',                       prob: probs.homeToScore / 100, oddsVal: odds.homeToScore, cat: 'teamgoal', minOdds: 1.25, minProb: 0.70 },
+      { key: 'awayToScore',  label: 'Visitante Marca',                   prob: probs.awayToScore / 100, oddsVal: odds.awayToScore, cat: 'teamgoal', minOdds: 1.35, minProb: 0.65 },
       // ── 1er tiempo — goles
-      { key: 'ht_over05',   label: 'Gol en el 1er Tiempo', prob: probs.htOver05 / 100, oddsVal: odds.over05_1T, cat: 'ht_goals', minOdds: 1.40, minProb: 0.52 },
-      { key: 'ht_over15',   label: 'Más de 1.5 Goles 1T',  prob: probs.htOver15 / 100, oddsVal: odds.over15_1T, cat: 'ht_goals', minOdds: 1.55, minProb: 0.45 },
+      { key: 'ht_over05',   label: 'Gol en el 1er Tiempo',              prob: probs.htOver05 / 100, oddsVal: odds.over05_1T,   cat: 'ht_goals', minOdds: 1.35, minProb: 0.55 },
+      { key: 'ht_over15',   label: 'Más de 1.5 Goles 1T',              prob: probs.htOver15 / 100, oddsVal: odds.over15_1T,   cat: 'ht_goals', minOdds: 1.55, minProb: 0.42 },
+      { key: 'ht_under05',  label: 'Sin Goles en el 1er Tiempo',        prob: 1 - probs.htOver05 / 100, oddsVal: odds.under05_1T, cat: 'ht_goals', minOdds: 1.40, minProb: 0.55 },
+      { key: 'ht_under15',  label: 'Menos de 1.5 Goles 1T',            prob: 1 - probs.htOver15 / 100, oddsVal: odds.under15_1T, cat: 'ht_goals', minOdds: 1.30, minProb: 0.65 },
       // ── 1er tiempo — resultado
-      { key: 'homeWin_1T',  label: 'Local Gana el 1er Tiempo',      prob: probs.htHomeWin / 100, oddsVal: odds.homeWin_1T, cat: 'ht_result', minOdds: 1.50, minProb: 0.45 },
-      { key: 'awayWin_1T',  label: 'Visitante Gana el 1er Tiempo',  prob: probs.htAwayWin / 100, oddsVal: odds.awayWin_1T, cat: 'ht_result', minOdds: 1.65, minProb: 0.42 },
-      // ── Corners FT
-      { key: 'cornersOver75',  label: 'Corners Over 7.5',   prob: probs.cornersOver75  / 100, oddsVal: odds.cornersOver75,  cat: 'corners', minOdds: 1.45, minProb: 0.54 },
+      { key: 'homeWin_1T',  label: 'Local Gana el 1er Tiempo',          prob: probs.htHomeWin / 100, oddsVal: odds.homeWin_1T, cat: 'ht_result', minOdds: 1.50, minProb: 0.45 },
+      { key: 'draw_1T',     label: 'Empate en el 1er Tiempo',           prob: probs.htDraw    / 100, oddsVal: odds.draw_1T,    cat: 'ht_result', minOdds: 1.55, minProb: 0.42 },
+      { key: 'awayWin_1T',  label: 'Visitante Gana el 1er Tiempo',      prob: probs.htAwayWin / 100, oddsVal: odds.awayWin_1T, cat: 'ht_result', minOdds: 1.65, minProb: 0.38 },
+      // ── Corners FT totales
+      { key: 'cornersOver65',  label: 'Corners Over 6.5',   prob: probs.cornersOver65  / 100, oddsVal: odds.cornersOver65,  cat: 'corners', minOdds: 1.30, minProb: 0.62 },
+      { key: 'cornersOver75',  label: 'Corners Over 7.5',   prob: probs.cornersOver75  / 100, oddsVal: odds.cornersOver75,  cat: 'corners', minOdds: 1.40, minProb: 0.56 },
       { key: 'cornersOver85',  label: 'Corners Over 8.5',   prob: probs.cornersOver85  / 100, oddsVal: odds.cornersOver85,  cat: 'corners', minOdds: 1.45, minProb: 0.52 },
       { key: 'cornersOver95',  label: 'Corners Over 9.5',   prob: probs.cornersOver95  / 100, oddsVal: odds.cornersOver95,  cat: 'corners', minOdds: 1.50, minProb: 0.45 },
       { key: 'cornersOver105', label: 'Corners Over 10.5',  prob: probs.cornersOver105 / 100, oddsVal: odds.cornersOver105, cat: 'corners', minOdds: 1.55, minProb: 0.40 },
-      { key: 'cornersUnder85', label: 'Corners Under 8.5',  prob: 1 - probs.cornersOver75 / 100, oddsVal: odds.cornersUnder85, cat: 'corners', minOdds: 1.45, minProb: 0.50 },
-      { key: 'cornersUnder95', label: 'Corners Under 9.5',  prob: 1 - probs.cornersOver85 / 100, oddsVal: odds.cornersUnder95, cat: 'corners', minOdds: 1.45, minProb: 0.50 },
-      // ── Tarjetas FT — Poisson real basado en datos de equipo + árbitro + liga ──
-      // Lambda: (amarillas_local + amarillas_visitante) ajustado por perfil del árbitro
-      // Si no hay datos de equipo → usar base rate de la liga → más fiable que 0.72 fijo
-      {
-        _cardsBlock: true,  // sentinel para el cálculo dinámico abajo
-        key: 'cardsOver25', label: 'Tarjetas Over 2.5', oddsVal: odds.cardsOver25, cat: 'cards', minOdds: 1.45, minProb: 0.52,
-      },
-      {
-        _cardsBlock: true,
-        key: 'cardsOver35', label: 'Tarjetas Over 3.5', oddsVal: odds.cardsOver35, cat: 'cards', minOdds: 1.45, minProb: 0.42,
-      },
-      {
-        _cardsBlock: true,
-        key: 'cardsOver45', label: 'Tarjetas Over 4.5', oddsVal: odds.cardsOver45, cat: 'cards', minOdds: 1.65, minProb: 0.35,
-      },
-      // ── Doble oportunidad (DC)
-      { key: 'dc_1X', label: 'Doble Oportunidad 1X (Local o Empate)',    prob: (probs.homeWin + probs.draw) / 100, oddsVal: odds.dc_1X, cat: 'dc', minOdds: 1.45, minProb: 0.65 },
-      { key: 'dc_X2', label: 'Doble Oportunidad X2 (Empate o Visitante)', prob: (probs.draw + probs.awayWin) / 100, oddsVal: odds.dc_X2, cat: 'dc', minOdds: 1.45, minProb: 0.65 },
-      // ── Hándicap asiático
-      { key: 'ah_home_m05', label: 'Hándicap Asiático Local -0.5',      prob: probs.homeWin / 100, oddsVal: odds.ah_home_m05, cat: 'ah', minOdds: 1.50, minProb: 0.60 },
-      { key: 'ah_away_m05', label: 'Hándicap Asiático Visitante -0.5',  prob: probs.awayWin / 100, oddsVal: odds.ah_away_m05, cat: 'ah', minOdds: 1.50, minProb: 0.58 },
+      { key: 'cornersUnder75', label: 'Corners Under 7.5',  prob: 1 - probs.cornersOver65 / 100, oddsVal: odds.cornersUnder75, cat: 'corners', minOdds: 1.45, minProb: 0.50 },
+      { key: 'cornersUnder85', label: 'Corners Under 8.5',  prob: 1 - probs.cornersOver75 / 100, oddsVal: odds.cornersUnder85, cat: 'corners', minOdds: 1.40, minProb: 0.52 },
+      { key: 'cornersUnder95', label: 'Corners Under 9.5',  prob: 1 - probs.cornersOver85 / 100, oddsVal: odds.cornersUnder95, cat: 'corners', minOdds: 1.40, minProb: 0.55 },
+      // ── Corners por equipo
+      { key: 'homeCorners_over35', label: 'Corners Local Over 3.5',     prob: probs.homeCorners35 / 100, oddsVal: odds.homeCorners_over35, cat: 'team_corners', minOdds: 1.50, minProb: 0.52 },
+      { key: 'homeCorners_over45', label: 'Corners Local Over 4.5',     prob: probs.homeCorners45 / 100, oddsVal: odds.homeCorners_over45, cat: 'team_corners', minOdds: 1.55, minProb: 0.45 },
+      { key: 'awayCorners_over25', label: 'Corners Visitante Over 2.5', prob: probs.awayCorners25 / 100, oddsVal: odds.awayCorners_over25, cat: 'team_corners', minOdds: 1.50, minProb: 0.52 },
+      { key: 'awayCorners_over35', label: 'Corners Visitante Over 3.5', prob: probs.awayCorners35 / 100, oddsVal: odds.awayCorners_over35, cat: 'team_corners', minOdds: 1.55, minProb: 0.45 },
+      // ── Tarjetas FT — Poisson real basado en datos de equipo + árbitro + liga
+      { _cardsBlock: true, key: 'cardsOver25', label: 'Tarjetas Over 2.5', oddsVal: odds.cardsOver25, cat: 'cards', minOdds: 1.40, minProb: 0.55 },
+      { _cardsBlock: true, key: 'cardsOver35', label: 'Tarjetas Over 3.5', oddsVal: odds.cardsOver35, cat: 'cards', minOdds: 1.45, minProb: 0.42 },
+      { _cardsBlock: true, key: 'cardsOver45', label: 'Tarjetas Over 4.5', oddsVal: odds.cardsOver45, cat: 'cards', minOdds: 1.65, minProb: 0.35 },
+      { _cardsBlock: true, key: 'cardsUnder25', label: 'Tarjetas Under 2.5', oddsVal: odds.cardsUnder25, cat: 'cards', minOdds: 1.50, minProb: 0.48 },
+      // ── Tarjetas por equipo
+      { _cardsBlock: true, key: 'homeCardsOver15', label: 'Tarjetas Local Over 1.5', oddsVal: odds.homeCardsOver15, cat: 'team_cards', minOdds: 1.50, minProb: 0.50 },
+      { _cardsBlock: true, key: 'awayCardsOver15', label: 'Tarjetas Visitante Over 1.5', oddsVal: odds.awayCardsOver15, cat: 'team_cards', minOdds: 1.55, minProb: 0.48 },
       // ── Goals Both Halves
-      { key: 'goalsBothHalves', label: 'Goles en Ambas Mitades', prob: probs.btts * 0.75 / 100, oddsVal: odds.goalsBothHalves, cat: 'both_halves', minOdds: 1.55, minProb: 0.45 },
+      { key: 'goalsBothHalves', label: 'Goles en Ambas Mitades',        prob: probs.btts * 0.75 / 100, oddsVal: odds.goalsBothHalves, cat: 'both_halves', minOdds: 1.55, minProb: 0.45 },
     ];
 
     // ── Cálculo de lambda real para tarjetas (Poisson) ──────────────────────────
@@ -2238,9 +2363,13 @@ function buildPickCandidates(enrichedFixtures) {
       cardsLambda = leagueCardsAvg * Math.max(0.60, Math.min(1.60, refFactor)) * motivFactor;
     }
     // P(X >= N) usando Poisson con lambda = cardsLambda
-    const pCardsOver25 = poissonCDF_above(cardsLambda, 3);  // >= 3 tarjetas
-    const pCardsOver35 = poissonCDF_above(cardsLambda, 4);  // >= 4 tarjetas
-    const pCardsOver45 = poissonCDF_above(cardsLambda, 5);  // >= 5 tarjetas
+    const pCardsOver25   = poissonCDF_above(cardsLambda, 3);
+    const pCardsOver35   = poissonCDF_above(cardsLambda, 4);
+    const pCardsOver45   = poissonCDF_above(cardsLambda, 5);
+    const pCardsUnder25  = 1 - pCardsOver25;
+    // Tarjetas por equipo: cada equipo recibe ~45% de las tarjetas totales
+    const pHomeCardsO15  = poissonCDF_above(cardsLambda * 0.52, 2);
+    const pAwayCardsO15  = poissonCDF_above(cardsLambda * 0.48, 2);
 
     for (const m of markets) {
       const o = m.oddsVal;
@@ -2249,9 +2378,13 @@ function buildPickCandidates(enrichedFixtures) {
 
       // ── Inyectar prob real de tarjetas ───────────────────────────────────────
       if (m._cardsBlock) {
-        m.prob = m.key === 'cardsOver25' ? pCardsOver25
-               : m.key === 'cardsOver35' ? pCardsOver35
-               :                           pCardsOver45;
+        m.prob = m.key === 'cardsOver25'     ? pCardsOver25
+               : m.key === 'cardsOver35'     ? pCardsOver35
+               : m.key === 'cardsOver45'     ? pCardsOver45
+               : m.key === 'cardsUnder25'    ? pCardsUnder25
+               : m.key === 'homeCardsOver15' ? pHomeCardsO15
+               : m.key === 'awayCardsOver15' ? pAwayCardsO15
+               : pCardsOver35;
       }
 
       if (!m.prob || m.prob < (m.minProb || 0.48)) continue; // prob insuficiente
@@ -2262,8 +2395,8 @@ function buildPickCandidates(enrichedFixtures) {
       const evRaw = calcEV(m.prob, o);
       if (evRaw === null || evRaw < -5) continue;
 
-      // DNB absolutamente prohibido
-      if (m.key.includes('dnb')) continue;
+      // DNB solo si hay cuota real (ya filtrado arriba por oddsVal)
+      // Sin restricción adicional — EV y minProb ya lo controlan
 
       // ── Tier multiplier de liga: penaliza ligas de baja cobertura ────────────
       // Impide que un partido de segunda división colombiana con EV "alto"
@@ -2401,9 +2534,15 @@ function selectDiversePicks(candidates, count = 3) {
 
   // Mercados de goles: cap FIJO en 1, sin importar el paso de relajación.
   // Evita que el bot quede "enamorado" del Under 2.5 o el Over 2.5.
+  // Todos los mercados de goles totales: máximo 1 por línea exacta
   const GOALS_MARKET_CAP1 = new Set([
-    'under25', 'over25', 'under35', 'over35',
-    'under15', 'over15', 'under45', 'over45',
+    'over05', 'under05',
+    'over15', 'under15',
+    'over25', 'under25',
+    'over35', 'under35',
+    'over45', 'under45',
+    'ht_over05', 'ht_under05',
+    'ht_over15', 'ht_under15',
   ]);
 
   /**
@@ -3357,9 +3496,27 @@ FORMATO OBLIGATORIO (Telegram Markdown)
 [Si bajas clave]: 🩹 Bajas: [máx 1-2 jugadores por equipo, los más importantes]
 
 🎯 *PICK*
-┌ *[Mercado exacto]*
+┌ *[Mercado exacto — usa marketLabel del JSON exactamente]*
 ├ [MÁXIMO 2 líneas — argumento central: el dato clave + por qué tiene valor AHORA]
+├ [Guía por categoría de mercado:]
+│  • result (homeWin/awayWin): forma reciente + contexto motivación + H2H
+│  • goals (over/under X.5): promedio goles locales y visitantes + H2H + baseRatesLiga
+│  • btts: analiza si AMBOS equipos anotan con frecuencia — usa golesAnotados/golesConcedidos
+│  • dc (1X/X2/12): explica por qué el equipo tiene suficiente valor incluso sin ganar/empatando
+│  • dnb (Draw No Bet): cuota de seguridad — equipo tiene alta prob de ganar, el empate devuelve
+│  • ah (Hándicap Asiático): diferencia de nivel + xG proyectado del partido
+│  • cs (Portería a cero): analiza goles concedidos del equipo defensor + calidad ataque rival
+│  • teamgoal (Local/Visitante Marca): analiza frecuencia de marcar del equipo + defensiva rival
+│  • ht_goals (goles 1er tiempo): ritmo habitual del equipo en primera mitad, H2H 1T si disponible
+│  • ht_result (resultado 1T): considera si el equipo suele salir fuerte o lento
+│  • corners (Over/Under corners): xG alto = más ataques = más corners; analiza estilo de juego
+│  • team_corners: analiza si el equipo presiona y genera corners consistentemente
+│  • cards (tarjetas): árbitro + amarillasPorPartido de ambos equipos + intensidad del partido
+│  • team_cards: equipo agresivo o contexto de partido que genera disputas
+│  • both_halves: ambos equipos deben atacar Y defender — alta bidireccionalidad de xG
 ├ [Si pick de tarjetas → menciona árbitro y sus tarj/partido]
+├ [Si pick de corners → menciona xG total del partido como proxy de ataques]
+├ [Si pick de DNB/DC → explica el argumento de "cobertura sin sacrificar valor"]
 ├ 🏆 Stake: *[X]/10*
 ├ 💡 Cuota: *[X.XX]* ← el campo "odds" del pick (cuota real de mercado)
 └ ⚠️ Riesgo: [1 línea máximo]
