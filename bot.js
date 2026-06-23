@@ -2786,7 +2786,7 @@ function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats) {
   const pGoal = Math.min(pRaw + bonus, 0.94);
   const impliedOdds = pGoal > 0 ? +(1 / pGoal).toFixed(2) : 99;
 
-  if (impliedOdds < 1.45) return null;
+  if (impliedOdds <= 1.50) return null;  // cuota mínima >1.50 para alertas de gol
 
   const { market, impliedOdds: mktOdds, overLine, tipo } = selectGoalMarket(
     fixture.homeTeam, fixture.awayTeam,
@@ -2862,15 +2862,15 @@ FORMATO OBLIGATORIO:
 ━━━━━━━━━━━━━━━━━━━
 
 STAKE (rango 5-10 únicamente):
-- Stake 9-10: prob > 72% con cuota ≥ 1.70
-- Stake 7-8: prob 62-72%
+- Stake 9-10: prob > 68% con cuota ≥ 1.65
+- Stake 7-8: prob 62-68%
 - Stake 5-6: prob 55-62%
-- Omite alertas con prob < 55% o cuota < 1.45
+- Omite alertas con prob < 55% o cuota ≤ 1.50 (sin valor real)
 
 MINUTO LÍMITE: siempre concreto. En 1T apuesta antes del min 30. En HT decide antes de que empiece el 2T. En 2T nunca más allá del min 75.
 
 IMPORTANTE:
-- Si una alerta no cumple criterios (prob < 55% o cuota < 1.45), simplemente NO la incluyas. Nada de "omitida", nada de notas explicativas. Solo las alertas válidas.
+- Si una alerta no cumple criterios (prob < 55% o cuota ≤ 1.50), simplemente NO la incluyas. Nada de "omitida", nada de notas explicativas. Solo las alertas válidas.
 - No añadas notas, aclaraciones ni explicaciones sobre alertas descartadas.
 
 Al final añade únicamente:
@@ -5685,7 +5685,7 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
   await bot.sendMessage(chatId, '🎯 Identificando picks de valor...');
   const analysis = await sonnet(
     INPLAY_SYSTEM,
-    `DATOS REALES EN VIVO:\n\n${JSON.stringify(enriched, null, 2)}\n\nMáximo 3 picks en total. Para cuotasVivo=null usa cuota sugerida mínima ("busca > X.XX"). Siempre da picks concretos.`
+    `DATOS REALES EN VIVO:\n\n${JSON.stringify(enriched, null, 2)}\n\nMáximo 3 picks en total. REGLA IRROMPIBLE DE CUOTA: cuota mínima 1.50 para cualquier pick. Si cuotasVivo es null → solo recomienda mercados cuya cuota estimada (lineasConValor) sea > 1.50; si no hay ninguno → escribe ⛔ Sin picks de valor en este momento. PROHIBIDO dar picks con cuota obvia (< 1.50) aunque el análisis lo favorezca.`
   );
   try {
     await sendLong(chatId, `🔴 *PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}*\n\n${analysis}`, { parse_mode: 'Markdown' });
