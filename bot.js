@@ -3061,8 +3061,9 @@ FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 [Si hay advertenciaStats o contexto de playoff → primera línea con ⚠️]
 
 📊 *ANÁLISIS*
-▸ [Local] (local): [goles anotados casa]/p | Forma: [forma5] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
-▸ [Visitante] (visit): [goles anotados fuera]/p | Forma: [forma5] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
+▸ [Local] (local): [goles anotados casa]/p | Forma: [forma — ver regla] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
+▸ [Visitante] (visit): [goles anotados fuera]/p | Forma: [forma — ver regla] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
+[Regla de forma: si statsLocal.forma5 es objeto → usa statsLocal.forma5.forma. Si es string → directo. Si no existe → statsLocal.forma. Si nada → "s/d"]
 [Ambas líneas SIEMPRE obligatorias]
 [Si H2H ≥3 partidos]: ▸ H2H: [patrón en máx 1 línea]
 [Si hay bajas clave]: 🩹 Bajas: [máximo 1-2 nombres por equipo, solo los más relevantes]
@@ -3322,8 +3323,9 @@ FORMATO OBLIGATORIO (Telegram Markdown)
 [Si hay loQueSeJuega → incorpóralo en esas 2 líneas]
 
 📊 *ANÁLISIS*
-▸ [Local] (local): [golesAnotadosHome]/p | Forma: [forma5] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
-▸ [Visitante] (visit): [golesAnotadosAway]/p | Forma: [forma5] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
+▸ [Local] (local): [golesAnotadosHome]/p | Forma: [forma — ver regla abajo] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
+▸ [Visitante] (visit): [golesAnotadosAway]/p | Forma: [forma — ver regla abajo] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
+[Regla de forma: si statsLocal.forma5 es un objeto → usa statsLocal.forma5.forma (ej: "G-P-E-G-P"). Si statsLocal.forma5 es string → úsalo directo. Si no existe → usa statsLocal.forma. Si ninguno → "s/d"]
 [AMBAS LÍNEAS OBLIGATORIAS siempre]
 [Si baseRatesLiga]: ▸ Liga: [baseRatesLiga.over25]% Over 2.5 | [baseRatesLiga.btts]% BTTS | [baseRatesLiga.cards] tarj/p promedio
 [Si H2H ≥3 partidos]: ▸ H2H: [patrón en 1 línea]
@@ -4292,10 +4294,22 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   await bot.sendMessage(chatId, `📊 ${withOdds.length} cuotas recopiladas | Analizando ${selected.length} partidos con el motor matemático...`);
 
   // ── FASE 2: stats de equipo solo para partidos con cuotas ────────────────────
-  const statsPairs = selected.flatMap(f => [
-    getTeamStats(f.homeId, f.leagueId),
-    getTeamStats(f.awayId, f.leagueId),
-  ]);
+  // Para selecciones nacionales (WC, Nations League, Clasificatorias, etc.):
+  // getTeamStats solo devuelve 1-2 partidos del torneo actual → usamos getNationalTeamRecentStats
+  // que obtiene los últimos 20 partidos en TODAS las competiciones para promedios reales.
+  const NATIONAL_LEAGUES_HOY = new Set([1635, 8443, 4188, 5039, 29718, 14400]);
+  const statsPairs = selected.flatMap(f => {
+    if (NATIONAL_LEAGUES_HOY.has(f.leagueId)) {
+      return [
+        getNationalTeamRecentStats(f.homeId, 20),
+        getNationalTeamRecentStats(f.awayId, 20),
+      ];
+    }
+    return [
+      getTeamStats(f.homeId, f.leagueId),
+      getTeamStats(f.awayId, f.leagueId),
+    ];
+  });
   const statsResults = [];
   for (let i = 0; i < statsPairs.length; i += 6) {
     const batch = await Promise.allSettled(statsPairs.slice(i, i + 6));
@@ -5366,11 +5380,12 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
   // Get live stats + eventos + team stats históricos para todos los partidos en paralelo
   const toAnalyze = liveFixtures.slice(0, 4);
   const today = new Date().toISOString().split('T')[0];
+  const NATIONAL_LEAGUES_VIVO = new Set([1635, 8443, 4188, 5039, 29718, 14400]);
   const [liveStatsResults, liveEventsResults, homeStatsResults, awayStatsResults] = await Promise.all([
     Promise.allSettled(toAnalyze.map(f => getFixtureStatistics(f.fixtureId))),
     Promise.allSettled(toAnalyze.map(f => getFixtureEvents(f.fixtureId))),
-    Promise.allSettled(toAnalyze.map(f => getTeamStats(f.homeId, f.leagueId))),
-    Promise.allSettled(toAnalyze.map(f => getTeamStats(f.awayId, f.leagueId))),
+    Promise.allSettled(toAnalyze.map(f => NATIONAL_LEAGUES_VIVO.has(f.leagueId) ? getNationalTeamRecentStats(f.homeId, 20) : getTeamStats(f.homeId, f.leagueId))),
+    Promise.allSettled(toAnalyze.map(f => NATIONAL_LEAGUES_VIVO.has(f.leagueId) ? getNationalTeamRecentStats(f.awayId, 20) : getTeamStats(f.awayId, f.leagueId))),
   ]);
 
   // Standings por liga única
