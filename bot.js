@@ -1319,8 +1319,13 @@ async function getApiPrediction(fixtureId) {
       _referee: detail.referee?.name  || detail.refereeName    || detail.officials?.[0]?.name || null,
     };
 
-    const preds = (detail.predictions || []).filter(p => p.type === 'prematch');
-    const latest = preds[preds.length - 1];
+    // predictions puede ser array [{...}] o un objeto solo {...} — normalizar a array
+    const predsRaw = detail.predictions;
+    const predsArr = Array.isArray(predsRaw) ? predsRaw
+      : predsRaw && typeof predsRaw === 'object' ? [predsRaw]
+      : [];
+    const preds  = predsArr.filter(p => p?.type === 'prematch' || p?.probabilities);
+    const latest = preds[preds.length - 1] || predsArr[predsArr.length - 1];
     if (latest?.probabilities) {
       result.percent_home = parseFloat(latest.probabilities.home);
       result.percent_draw = parseFloat(latest.probabilities.draw);
@@ -2447,6 +2452,26 @@ function selectDiversePicks(candidates, count = 3) {
     for (const c of candidates) {
       if (selected.length >= count) break;
       tryAdd(c, 3, 2, 3);
+    }
+  }
+
+  // Paso 3b: si aún faltan picks, relaja el cap de goals markets a 2 SOLO si son de fixtures distintas.
+  // Evita saturación when todos los candidatos son del mismo mercado (ej: solo Under 2.5 en día de WC).
+  if (selected.length < count) {
+    for (const c of candidates) {
+      if (selected.length >= count) break;
+      const pickKey = `${c.fixtureId}:${c.market}`;
+      if (usedPickKeys.has(pickKey)) continue;
+      if (usedFixtures.has(c.fixtureId)) continue; // sigue requiriendo fixtures diferentes
+      if ((catCount[c.category]   || 0) >= 4) continue;
+      if ((marketCount[c.market]  || 0) >= 2) continue; // permite 2 under25 si son distintos fixtures
+      if ((leagueCount[c.liga]    || 0) >= 4) continue;
+      usedPickKeys.add(pickKey);
+      usedFixtures.add(c.fixtureId);
+      catCount[c.category]  = (catCount[c.category]  || 0) + 1;
+      marketCount[c.market] = (marketCount[c.market] || 0) + 1;
+      leagueCount[c.liga]   = (leagueCount[c.liga]   || 0) + 1;
+      selected.push(c);
     }
   }
 
