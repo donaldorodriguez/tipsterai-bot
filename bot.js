@@ -1796,22 +1796,59 @@ async function extractPicksFromText(analysisText, matchesCtx) {
   } catch { return []; }
 }
 
-async function recordPicks(analysisText, matchesCtx) {
+// Gate matemático de stake: compara el stake del LLM contra la prob real calculada.
+// Si el LLM infló el stake, lo baja al máximo que los números soportan.
+const STAKE_PROB_THRESHOLDS = { 10: 80, 9: 75, 8: 70, 7: 65, 6: 60 };
+const STAKE_CUOTA_MIN       = { 10: 1.85, 9: 1.75, 8: 1.65, 7: 1.55, 6: 1.50 };
+
+function validateStake(pick, probBlock) {
+  const claimed = pick.stake;
+  if (!claimed || !probBlock) return claimed;
+
+  const probs = probBlock.modeloPoisson || {};
+  const marketProb = {
+    BTTS_YES:    parseFloat(probs.probBTTS_Combinada),
+    OVER_GOALS:  parseFloat(pick.linea >= 3 ? probs.probOver35 : probs.probOver25),
+    UNDER_GOALS: 100 - parseFloat(pick.linea >= 3 ? probs.probOver35 : probs.probOver25),
+    HOME_WIN:    parseFloat(probs.probLocalGana),
+    AWAY_WIN:    parseFloat(probs.probVisitanteGana),
+    DRAW:        parseFloat(probs.probEmpate),
+  }[pick.mercado];
+
+  if (!marketProb || isNaN(marketProb)) return claimed; // sin datos, confiar en LLM
+
+  // Cuota mínima requerida para el stake reclamado
+  const cuotaOk = !pick.cuota || pick.cuota >= (STAKE_CUOTA_MIN[claimed] || 0);
+
+  // Buscar el stake más alto que los números realmente soportan
+  for (const [s, threshold] of Object.entries(STAKE_PROB_THRESHOLDS).sort((a,b) => b[0]-a[0])) {
+    const stk = parseInt(s);
+    if (marketProb >= threshold && cuotaOk) return Math.min(claimed, stk);
+    if (marketProb >= threshold) return Math.min(claimed, stk - 1); // prob ok pero cuota baja
+  }
+  return Math.min(claimed, 6); // mínimo siempre 6 si llegó hasta aquí
+}
+
+async function recordPicks(analysisText, matchesCtx, enrichedFixtures = []) {
   if (!analysisText || !matchesCtx.length) return;
   try {
     const extracted = await extractPicksFromText(analysisText, matchesCtx);
     if (!extracted.length) { console.log('📝 No se extrajeron picks estructurados'); return; }
 
-    const existing = loadPicks();
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
 
     const newPicks = extracted.map(p => {
-      // Match pick to a fixture from context
       const matched = matchesCtx.find(m =>
-        m.local.toLowerCase().includes((p.local || '').toLowerCase().split(' ')[0]) ||
-        m.visitante.toLowerCase().includes((p.visitante || '').toLowerCase().split(' ')[0]) ||
-        (p.local || '').toLowerCase().includes(m.local.toLowerCase().split(' ')[0])
+        m.local?.toLowerCase().includes((p.local || '').toLowerCase().split(' ')[0]) ||
+        m.visitante?.toLowerCase().includes((p.visitante || '').toLowerCase().split(' ')[0]) ||
+        (p.local || '').toLowerCase().includes((m.local || '').toLowerCase().split(' ')[0])
       );
+      // Validar stake contra probabilidades reales si disponibles
+      const enriched = enrichedFixtures.find(f => f.fixtureId === matched?.fixtureId);
+      const stakeValidado = validateStake(p, enriched?.probabilidadesCalculadas);
+      if (stakeValidado !== p.stake) {
+        console.log(`⚠️ Stake ajustado: ${p.mercado} ${p.local} vs ${p.visitante}: ${p.stake} → ${stakeValidado}`);
+      }
       return {
         id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
         emitidoAt: new Date().toISOString(),
@@ -1826,15 +1863,18 @@ async function recordPicks(analysisText, matchesCtx) {
         linea: p.linea ?? null,
         handicap: p.handicap ?? null,
         cuota: p.cuota ?? null,
-        stake: p.stake ?? null,
+        stake: stakeValidado ?? p.stake ?? null,
+        stake_valid: stakeValidado,
         esCombinada: p.esCombinada || false,
         resultado: null,
         scoresFinal: null,
       };
     });
 
-    persistPicks([...existing, ...newPicks]);
-    console.log(`📝 ${newPicks.length} picks guardados en picks.json`);
+    // Guardar en Airtable (persistente) y en picks.json (fallback local)
+    persistPicks([...loadPicks(), ...newPicks]);
+    await savePicksToAirtable(newPicks);
+    console.log(`📝 ${newPicks.length} picks guardados (Airtable + local)`);
   } catch (e) {
     console.error('recordPicks error:', e.message);
   }
@@ -1910,8 +1950,16 @@ async function evaluatePickResult(pick, fixture, stats) {
 }
 
 async function evaluatePendingPicks() {
-  const picks = loadPicks();
-  const pending = picks.filter(p => p.resultado === null && p.fixtureId);
+  // Leer de Airtable si disponible, fallback a picks.json local
+  let picks;
+  let fromAirtable = false;
+  if (process.env.AIRTABLE_API_KEY) {
+    picks = await getPicksFromAirtable('total');
+    fromAirtable = true;
+  } else {
+    picks = loadPicks();
+  }
+  const pending = picks.filter(p => (p.resultado === null || p.resultado === '?') && p.fixtureId);
   if (!pending.length) return picks;
 
   const fixtureIds = [...new Set(pending.map(p => p.fixtureId))];
@@ -1933,39 +1981,44 @@ async function evaluatePendingPicks() {
   }));
 
   for (const pick of picks) {
-    if (pick.resultado !== null || !pick.fixtureId) continue;
+    if (!['?', null].includes(pick.resultado) || !pick.fixtureId) continue;
     const entry = fixtureMap[pick.fixtureId];
     if (!entry) continue;
     pick.resultado = await evaluatePickResult(pick, entry.fixture, entry.stats);
     pick.scoresFinal = { home: entry.fixture.goals?.home, away: entry.fixture.goals?.away };
     console.log(`📊 Pick evaluado: ${pick.local} vs ${pick.visitante} — ${pick.seleccion} → ${pick.resultado}`);
+    if (fromAirtable) {
+      await updatePickResultInAirtable(pick._airtableId, pick.resultado, pick.scoresFinal);
+    }
   }
 
-  persistPicks(picks);
+  if (!fromAirtable) persistPicks(picks);
   return picks;
 }
 
 async function handleEstadisticas(chatId, period = 'hoy') {
-  await bot.sendMessage(chatId, '📊 Evaluando resultados de tus picks...');
+  await bot.sendMessage(chatId, '📊 Consultando base de datos de picks...');
 
-  const allPicks = await evaluatePendingPicks();
+  await evaluatePendingPicks(); // actualiza resultados pendientes
+  const allPicks = process.env.AIRTABLE_API_KEY
+    ? await getPicksFromAirtable(period)
+    : (() => {
+        const all = loadPicks();
+        const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+        const ayer = new Date(); ayer.setDate(ayer.getDate()-1);
+        const ayerStr = ayer.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+        const semana = new Date(); semana.setDate(semana.getDate()-7);
+        if (period === 'hoy')   return all.filter(p => p.fecha === today);
+        if (period === 'ayer')  return all.filter(p => p.fecha === ayerStr);
+        if (period === 'semana') return all.filter(p => new Date(p.fecha) >= semana);
+        return all;
+      })();
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
-
-  const ayer = new Date();
-  ayer.setDate(ayer.getDate() - 1);
+  const ayer = new Date(); ayer.setDate(ayer.getDate() - 1);
   const ayerStr = ayer.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
 
-  const filtered = period === 'semana'
-    ? allPicks.filter(p => {
-        const d = new Date(p.fecha);
-        const now = new Date();
-        return (now - d) <= 7 * 24 * 60 * 60 * 1000;
-      })
-    : period === 'total'
-      ? allPicks
-      : period === 'ayer'
-        ? allPicks.filter(p => p.fecha === ayerStr)
-        : allPicks.filter(p => p.fecha === today);
+  // allPicks is already filtered by period (both Airtable and local paths pre-filter)
+  const filtered = allPicks;
 
   const label = period === 'semana' ? 'ESTA SEMANA' : period === 'total' ? 'HISTORIAL TOTAL' : period === 'ayer' ? `AYER (${ayerStr})` : `HOY (${today})`;
 
@@ -2132,16 +2185,21 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   await bot.sendMessage(chatId, `🧠 Calculando picks de valor...`);
 
+  const winRates = process.env.AIRTABLE_API_KEY ? await getHistoricalWinRates().catch(() => null) : null;
+  const winRatesCtx = winRates
+    ? `\n\nCONTEXTO HISTÓRICO DE RENDIMIENTO (aprende de esto para calibrar stakes):\n${JSON.stringify(winRates, null, 2)}\n— Si un mercado tiene winRate < 45%, sé más conservador con el stake.\n— Si un mercado tiene winRate ≥ 60%, puedes ser más agresivo.`
+    : '';
+
   const picksText = await sonnet(
     PICKS_HOY_SYSTEM,
-    `Partidos del día ${today} (hora Colombia). DATOS REALES — HIGHLIGHTLY + SOFASCORE:\n\n${JSON.stringify(enriched, null, 2)}\n\nEmite EXACTAMENTE 3 picks individuales + 1 combinada basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
+    `Partidos del día ${today} (hora Colombia). DATOS REALES — HIGHLIGHTLY + SOFASCORE:\n\n${JSON.stringify(enriched, null, 2)}${winRatesCtx}\n\nEmite EXACTAMENTE 3 picks individuales + 1 combinada basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
   );
 
   // Guardar en caché para evitar re-análisis y picks contradictorios
   setPicksCache('all', picksText, enriched.map(f => f.fixtureId));
 
   await sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
-  recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
+  recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido })), enriched).catch(e => console.error('recordPicks:', e.message));
 }
 
 async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
@@ -2233,16 +2291,21 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
 
   await bot.sendMessage(chatId, `🧠 Calculando picks de valor...`);
 
+  const winRates = process.env.AIRTABLE_API_KEY ? await getHistoricalWinRates().catch(() => null) : null;
+  const winRatesCtx = winRates
+    ? `\n\nCONTEXTO HISTÓRICO DE RENDIMIENTO (aprende de esto para calibrar stakes):\n${JSON.stringify(winRates, null, 2)}\n— Si un mercado tiene winRate < 45%, sé más conservador con el stake.\n— Si un mercado tiene winRate ≥ 60%, puedes ser más agresivo.`
+    : '';
+
   const picksText = await sonnet(
     PICKS_HOY_SYSTEM,
-    `Partidos de ${displayName} del día ${today}. DATOS REALES DE API + SOFASCORE:\n\n${JSON.stringify(enriched, null, 2)}\n\nAnaliza y emite picks de valor basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
+    `Partidos de ${displayName} del día ${today}. DATOS REALES DE API + SOFASCORE:\n\n${JSON.stringify(enriched, null, 2)}${winRatesCtx}\n\nAnaliza y emite picks de valor basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
   );
 
   // Guardar en caché para evitar re-análisis y picks contradictorios
   setPicksCache(cacheScope, picksText, enriched.map(f => f.fixtureId));
 
   await sendLong(chatId, `📅 *${displayName} — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
-  recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
+  recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido })), enriched).catch(e => console.error('recordPicks:', e.message));
 }
 
 async function handlePartido(chatId, teamName, countryHint = '') {
@@ -3338,6 +3401,162 @@ function getAirtableBase() {
   return new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID);
 }
 
+// ── Airtable Picks — tabla persistente de picks ───────────────────────────────
+// Se crea automáticamente si no existe. Sobrevive deploys (a diferencia de picks.json).
+
+const PICKS_TABLE = 'Picks';
+
+async function ensurePicksTable() {
+  const baseId = process.env.AIRTABLE_BASE_ID;
+  const apiKey = process.env.AIRTABLE_API_KEY;
+  if (!baseId || !apiKey) return;
+  try {
+    const res = await axios.get(
+      `https://api.airtable.com/v0/meta/bases/${baseId}/tables`,
+      { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 10000 }
+    );
+    if (res.data.tables.some(t => t.name === PICKS_TABLE)) {
+      console.log('✅ Airtable Picks table ya existe');
+      return;
+    }
+    await axios.post(
+      `https://api.airtable.com/v0/meta/bases/${baseId}/tables`,
+      {
+        name: PICKS_TABLE,
+        fields: [
+          { name: 'pick_id',      type: 'singleLineText' },
+          { name: 'emitidoAt',    type: 'singleLineText' },
+          { name: 'fecha',        type: 'singleLineText' },
+          { name: 'liga',         type: 'singleLineText' },
+          { name: 'local',        type: 'singleLineText' },
+          { name: 'visitante',    type: 'singleLineText' },
+          { name: 'mercado',      type: 'singleLineText' },
+          { name: 'seleccion',    type: 'singleLineText' },
+          { name: 'linea',        type: 'number', options: { precision: 2 } },
+          { name: 'cuota',        type: 'number', options: { precision: 2 } },
+          { name: 'stake',        type: 'number', options: { precision: 0 } },
+          { name: 'stake_valid',  type: 'number', options: { precision: 0 } },
+          { name: 'prob_calc',    type: 'number', options: { precision: 1 } },
+          { name: 'resultado',    type: 'singleLineText' },
+          { name: 'esCombinada',  type: 'checkbox', options: { color: 'yellowBright', icon: 'check' } },
+          { name: 'fixtureId',    type: 'number', options: { precision: 0 } },
+          { name: 'scoresFinal',  type: 'singleLineText' },
+        ],
+      },
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+    );
+    console.log('✅ Airtable Picks table creada automáticamente');
+  } catch (e) {
+    console.warn('⚠️ ensurePicksTable:', e.response?.data?.error?.message || e.message);
+  }
+}
+
+function pickToAirtableFields(p) {
+  return {
+    pick_id:     p.id,
+    emitidoAt:   p.emitidoAt || new Date().toISOString(),
+    fecha:       p.fecha || '',
+    liga:        p.liga || '',
+    local:       p.local || '',
+    visitante:   p.visitante || '',
+    mercado:     p.mercado || '',
+    seleccion:   p.seleccion || '',
+    linea:       p.linea ?? null,
+    cuota:       p.cuota ?? null,
+    stake:       p.stake ?? null,
+    stake_valid: p.stake_valid ?? p.stake ?? null,
+    prob_calc:   p.prob_calc ?? null,
+    resultado:   p.resultado || '?',
+    esCombinada: p.esCombinada || false,
+    fixtureId:   p.fixtureId ?? null,
+    scoresFinal: p.scoresFinal ? JSON.stringify(p.scoresFinal) : '',
+  };
+}
+
+async function savePicksToAirtable(picks) {
+  if (!picks.length || !process.env.AIRTABLE_API_KEY) return;
+  const base = getAirtableBase();
+  // Airtable acepta max 10 records por llamada
+  for (let i = 0; i < picks.length; i += 10) {
+    const batch = picks.slice(i, i + 10).map(p => ({ fields: pickToAirtableFields(p) }));
+    await base(PICKS_TABLE).create(batch).catch(e => console.error('savePicksToAirtable batch:', e.message));
+  }
+}
+
+async function getPicksFromAirtable(period = 'total') {
+  if (!process.env.AIRTABLE_API_KEY) return [];
+  try {
+    const base = getAirtableBase();
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const ayer  = new Date(); ayer.setDate(ayer.getDate() - 1);
+    const ayerStr = ayer.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const semana  = new Date(); semana.setDate(semana.getDate() - 7);
+    const semanaStr = semana.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+
+    let formula = '';
+    if (period === 'hoy')   formula = `{fecha} = '${today}'`;
+    else if (period === 'ayer')   formula = `{fecha} = '${ayerStr}'`;
+    else if (period === 'semana') formula = `{fecha} >= '${semanaStr}'`;
+    else if (period === 'mes')    {
+      const mes = new Date(); mes.setDate(mes.getDate() - 30);
+      formula = `{fecha} >= '${mes.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })}'`;
+    }
+
+    const records = await base(PICKS_TABLE).select({
+      ...(formula && { filterByFormula: formula }),
+      sort: [{ field: 'emitidoAt', direction: 'desc' }],
+      maxRecords: 1000,
+    }).all();
+    return records.map(r => ({ _airtableId: r.id, ...r.fields }));
+  } catch (e) {
+    console.error('getPicksFromAirtable:', e.message);
+    return [];
+  }
+}
+
+async function updatePickResultInAirtable(airtableId, resultado, scoresFinal) {
+  if (!process.env.AIRTABLE_API_KEY || !airtableId) return;
+  try {
+    const base = getAirtableBase();
+    await base(PICKS_TABLE).update(airtableId, {
+      resultado,
+      scoresFinal: scoresFinal ? JSON.stringify(scoresFinal) : '',
+    });
+  } catch (e) {
+    console.error('updatePickResultInAirtable:', e.message);
+  }
+}
+
+async function getHistoricalWinRates() {
+  try {
+    const picks = await getPicksFromAirtable('total');
+    const resolved = picks.filter(p => ['W', 'L', 'V', 'P'].includes(p.resultado));
+    if (!resolved.length) return null;
+
+    const byMercado = {};
+    for (const p of resolved) {
+      const m = p.mercado || 'OTHER';
+      if (!byMercado[m]) byMercado[m] = { w: 0, total: 0 };
+      byMercado[m].total++;
+      if (['W', 'V'].includes(p.resultado)) byMercado[m].w++;
+    }
+
+    const wins = resolved.filter(p => ['W', 'V'].includes(p.resultado)).length;
+    return {
+      total: resolved.length,
+      winRate: +((wins / resolved.length) * 100).toFixed(1),
+      porMercado: Object.fromEntries(
+        Object.entries(byMercado)
+          .filter(([, v]) => v.total >= 5)
+          .map(([k, v]) => [k, { picks: v.total, winRate: +((v.w / v.total) * 100).toFixed(1) }])
+      ),
+    };
+  } catch (e) {
+    console.error('getHistoricalWinRates:', e.message);
+    return null;
+  }
+}
+
 function verifyWhopSignature(rawBody, signatureHeader) {
   if (!WHOP_SECRET || !signatureHeader) return false;
   // Whop sends: "t=<timestamp>,v1=<hmac>"
@@ -3468,3 +3687,4 @@ app.listen(WEBHOOK_PORT, () => {
 // Auto-fetch árbitros de StatsHub al arrancar y cada 6 horas
 fetchStatsHubReferees();
 setInterval(fetchStatsHubReferees, 6 * 60 * 60 * 1000);
+if (process.env.AIRTABLE_API_KEY) ensurePicksTable().catch(e => console.error('ensurePicksTable:', e.message));
