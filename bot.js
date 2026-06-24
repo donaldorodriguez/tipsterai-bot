@@ -1530,6 +1530,18 @@ async function getRefereeCardStats(name) {
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
+function safeNum(obj, ...paths) {
+  for (const path of paths) {
+    const parts = path.split('.');
+    let val = obj;
+    for (const p of parts) val = val?.[p];
+    if (val != null && !isNaN(parseFloat(val))) return parseFloat(val);
+  }
+  return null;
+}
+
+let _teamStatsLogged = false;
+
 async function getTeamStats(teamId, leagueId) {
   const season = LEAGUE_SEASONS[leagueId] || 2025;
   const fromDate = `${season - 1}-06-01`;
@@ -1541,23 +1553,71 @@ async function getTeamStats(teamId, leagueId) {
       || data.sort((a, b) => (b.total?.games?.played || 0) - (a.total?.games?.played || 0))[0];
     if (!leagueStat) return null;
 
+    if (!_teamStatsLogged) {
+      _teamStatsLogged = true;
+      console.log('📊 [DEBUG] TeamStats home keys:', JSON.stringify(Object.keys(leagueStat.home || {})));
+      console.log('📊 [DEBUG] TeamStats home sample:', JSON.stringify(leagueStat.home, null, 2).slice(0, 1500));
+    }
+
     const { home, away, total } = leagueStat;
-    const hP = home.games.played || 1;
-    const aP = away.games.played || 1;
+    const hP = home.games?.played || 1;
+    const aP = away.games?.played || 1;
+    const tP = total.games?.played || (hP + aP) || 1;
+
+    const csH  = safeNum(home,  'goals.cleanSheets', 'cleanSheets', 'goals.clean_sheets', 'clean_sheets');
+    const csA  = safeNum(away,  'goals.cleanSheets', 'cleanSheets', 'goals.clean_sheets', 'clean_sheets');
+    const ftsH = safeNum(home,  'goals.failedToScore', 'failedToScore', 'goals.failed_to_score', 'failed_to_score');
+    const ftsA = safeNum(away,  'goals.failedToScore', 'failedToScore', 'goals.failed_to_score', 'failed_to_score');
+
+    const cornH = safeNum(home,  'corners.total', 'corners.count', 'corners', 'cornerKicks', 'corner_kicks');
+    const cornA = safeNum(away,  'corners.total', 'corners.count', 'corners', 'cornerKicks', 'corner_kicks');
+    const cornT = safeNum(total, 'corners.total', 'corners.count', 'corners', 'cornerKicks', 'corner_kicks');
+
+    const yelH = safeNum(home, 'cards.yellow', 'yellowCards', 'yellow_cards', 'cards.yellowCards');
+    const yelA = safeNum(away, 'cards.yellow', 'yellowCards', 'yellow_cards', 'cards.yellowCards');
+    const redH = safeNum(home, 'cards.red',    'redCards',    'red_cards',    'cards.redCards');
+    const redA = safeNum(away, 'cards.red',    'redCards',    'red_cards',    'cards.redCards');
+
+    const shotsH   = safeNum(home, 'shots.total', 'shots', 'totalShots', 'shots.on_target');
+    const shotsA   = safeNum(away, 'shots.total', 'shots', 'totalShots', 'shots.on_target');
+    const shotsOnH = safeNum(home, 'shots.on_target', 'shotsOnTarget', 'shots_on_target');
+    const shotsOnA = safeNum(away, 'shots.on_target', 'shotsOnTarget', 'shots_on_target');
+
+    const posH = safeNum(home, 'possession', 'ballPossession', 'ball_possession');
+    const posA = safeNum(away, 'possession', 'ballPossession', 'ball_possession');
 
     return {
-      equipo:             null,
-      liga:               leagueStat.leagueName,
-      temporada:          leagueStat.season,
-      forma:              null,
-      golesAnotadosHome:  +(home.goals.scored  / hP).toFixed(2),
-      golesAnotadosAway:  +(away.goals.scored  / aP).toFixed(2),
+      liga:      leagueStat.leagueName,
+      temporada: leagueStat.season,
+      partidos:  { home: hP, away: aP, total: tP },
+
+      golesAnotadosHome:  +(home.goals.scored   / hP).toFixed(2),
+      golesAnotadosAway:  +(away.goals.scored   / aP).toFixed(2),
       golesRecibidosHome: +(home.goals.received / hP).toFixed(2),
       golesRecibidosAway: +(away.goals.received / aP).toFixed(2),
-      cleanSheetsHome:    null,
-      cleanSheetsAway:    null,
-      failedToScoreHome:  null,
-      failedToScoreAway:  null,
+
+      cleanSheetsHome:   csH,
+      cleanSheetsAway:   csA,
+      failedToScoreHome: ftsH,
+      failedToScoreAway: ftsA,
+
+      ...(cornH != null && { cornersPerGameHome: +(cornH / hP).toFixed(2) }),
+      ...(cornA != null && { cornersPerGameAway: +(cornA / aP).toFixed(2) }),
+      ...(cornT != null && { cornersPerGame:     +(cornT / tP).toFixed(2) }),
+
+      ...(yelH != null && { tarjetasAmHome: +(yelH / hP).toFixed(2) }),
+      ...(yelA != null && { tarjetasAmAway: +(yelA / aP).toFixed(2) }),
+      ...(redH != null && { tarjetasRoHome: +(redH / hP).toFixed(2) }),
+      ...(redA != null && { tarjetasRoAway: +(redA / aP).toFixed(2) }),
+
+      ...(shotsH   != null && { tirosHome:     +(shotsH   / hP).toFixed(2) }),
+      ...(shotsA   != null && { tirosAway:     +(shotsA   / aP).toFixed(2) }),
+      ...(shotsOnH != null && { tirosArcoHome: +(shotsOnH / hP).toFixed(2) }),
+      ...(shotsOnA != null && { tirosArcoAway: +(shotsOnA / aP).toFixed(2) }),
+
+      ...(posH != null && { posesionHome: posH > 1 ? posH : +(posH * 100).toFixed(1) }),
+      ...(posA != null && { posesionAway: posA > 1 ? posA : +(posA * 100).toFixed(1) }),
+
       victorias: { total: total.games.wins,  home: home.games.wins,  away: away.games.wins  },
       empates:   { total: total.games.draws, home: home.games.draws, away: away.games.draws },
       derrotas:  { total: total.games.loses, home: home.games.loses, away: away.games.loses },
@@ -3955,6 +4015,125 @@ async function loadPicksFromAirtable() {
   }
 }
 
+// ── Airtable Picks — funciones completas de persistencia ─────────────────────
+
+async function ensurePicksTable() {
+  const baseId = process.env.AIRTABLE_BASE_ID;
+  const apiKey = process.env.AIRTABLE_API_KEY;
+  if (!baseId || !apiKey) return;
+  try {
+    const res = await axios.get(
+      `https://api.airtable.com/v0/meta/bases/${baseId}/tables`,
+      { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 10000 }
+    );
+    if (res.data.tables.some(t => t.name === AIRTABLE_PICKS_TABLE)) {
+      console.log('✅ Airtable Picks table ya existe');
+      return;
+    }
+    await axios.post(
+      `https://api.airtable.com/v0/meta/bases/${baseId}/tables`,
+      {
+        name: AIRTABLE_PICKS_TABLE,
+        fields: [
+          { name: 'pick_id',      type: 'singleLineText' },
+          { name: 'emitidoAt',    type: 'singleLineText' },
+          { name: 'fecha',        type: 'singleLineText' },
+          { name: 'liga',         type: 'singleLineText' },
+          { name: 'local',        type: 'singleLineText' },
+          { name: 'visitante',    type: 'singleLineText' },
+          { name: 'mercado',      type: 'singleLineText' },
+          { name: 'seleccion',    type: 'singleLineText' },
+          { name: 'linea',        type: 'number', options: { precision: 2 } },
+          { name: 'cuota',        type: 'number', options: { precision: 2 } },
+          { name: 'stake',        type: 'number', options: { precision: 0 } },
+          { name: 'resultado',    type: 'singleLineText' },
+          { name: 'esCombinada',  type: 'checkbox', options: { color: 'yellowBright', icon: 'check' } },
+          { name: 'fixtureId',    type: 'number', options: { precision: 0 } },
+          { name: 'score_final',  type: 'singleLineText' },
+        ],
+      },
+      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 }
+    );
+    console.log('✅ Airtable Picks table creada automáticamente');
+  } catch (e) {
+    console.warn('⚠️ ensurePicksTable:', e.response?.data?.error?.message || e.message);
+  }
+}
+
+async function getPicksFromAirtable(period = 'total') {
+  if (!process.env.AIRTABLE_API_KEY) return [];
+  try {
+    const base = getAirtableBase();
+    const today   = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const ayer    = new Date(); ayer.setDate(ayer.getDate() - 1);
+    const ayerStr = ayer.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const semana  = new Date(); semana.setDate(semana.getDate() - 7);
+    const semStr  = semana.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+
+    let formula = '';
+    if (period === 'hoy')   formula = `{fecha} = '${today}'`;
+    else if (period === 'ayer')   formula = `{fecha} = '${ayerStr}'`;
+    else if (period === 'semana') formula = `{fecha} >= '${semStr}'`;
+    else if (period === 'mes') {
+      const mes = new Date(); mes.setDate(mes.getDate() - 30);
+      formula = `{fecha} >= '${mes.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })}'`;
+    }
+
+    const records = await base(AIRTABLE_PICKS_TABLE).select({
+      ...(formula && { filterByFormula: formula }),
+      sort: [{ field: 'emitidoAt', direction: 'desc' }],
+      maxRecords: 1000,
+    }).all();
+    return records.map(r => ({ _airtableId: r.id, ...r.fields }));
+  } catch (e) {
+    console.error('getPicksFromAirtable:', e.message);
+    return [];
+  }
+}
+
+async function updatePickResultInAirtable(airtableId, resultado, scoresFinal) {
+  if (!process.env.AIRTABLE_API_KEY || !airtableId) return;
+  try {
+    const base = getAirtableBase();
+    await base(AIRTABLE_PICKS_TABLE).update(airtableId, {
+      resultado,
+      score_final: scoresFinal ? `${scoresFinal.home}-${scoresFinal.away}` : '',
+    });
+  } catch (e) {
+    console.error('updatePickResultInAirtable:', e.message);
+  }
+}
+
+async function getHistoricalWinRates() {
+  try {
+    const picks = await getPicksFromAirtable('total');
+    const resolved = picks.filter(p => ['W', 'L', 'V', 'P'].includes(p.resultado));
+    if (!resolved.length) return null;
+
+    const byMercado = {};
+    for (const p of resolved) {
+      const m = p.mercado || 'OTHER';
+      if (!byMercado[m]) byMercado[m] = { w: 0, total: 0 };
+      byMercado[m].total++;
+      if (['W', 'V'].includes(p.resultado)) byMercado[m].w++;
+    }
+
+    const wins = resolved.filter(p => ['W', 'V'].includes(p.resultado)).length;
+    return {
+      total: resolved.length,
+      winRate: +((wins / resolved.length) * 100).toFixed(1),
+      porMercado: Object.fromEntries(
+        Object.entries(byMercado)
+          .filter(([, v]) => v.total >= 5)
+          .map(([k, v]) => [k, { picks: v.total, winRate: +((v.w / v.total) * 100).toFixed(1) }])
+      ),
+    };
+  } catch (e) {
+    console.error('getHistoricalWinRates:', e.message);
+    return null;
+  }
+}
+
 const EXTRACT_PICKS_SYSTEM = `Eres un extractor de picks de apuestas deportivas. Dado un texto de análisis de tipster, extrae TODOS los picks concretos emitidos.
 Para cada pick devuelve un objeto JSON con estos campos:
 - local: nombre del equipo local (string)
@@ -4190,7 +4369,8 @@ async function evaluatePendingPicks() {
 
   persistPicks(picks);
   for (const pick of actualizados) {
-    updatePickInAirtable(pick).catch(() => {});
+    updatePickResultInAirtable(pick._airtableId, pick.resultado, pick.scoresFinal).catch(() => {});
+    updatePickInAirtable(pick).catch(() => {}); // compatibilidad hacia atrás
   }
   return picks;
 }
@@ -4198,7 +4378,15 @@ async function evaluatePendingPicks() {
 async function handleEstadisticas(chatId, period = 'hoy') {
   await bot.sendMessage(chatId, '📊 Evaluando resultados de tus picks...');
 
-  const allPicks = await evaluatePendingPicks();
+  // Preferir Airtable (sobrevive deploys); fallback a JSON local
+  let allPicks;
+  if (process.env.AIRTABLE_API_KEY) {
+    allPicks = await getPicksFromAirtable(period).catch(() => null);
+    if (!allPicks || !allPicks.length) allPicks = await evaluatePendingPicks();
+  } else {
+    allPicks = await evaluatePendingPicks();
+  }
+
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
 
   const ayer = new Date();
@@ -8223,3 +8411,4 @@ app.listen(WEBHOOK_PORT, '0.0.0.0', () => {
 // Auto-fetch árbitros de StatsHub al arrancar y cada 6 horas
 fetchStatsHubReferees();
 setInterval(fetchStatsHubReferees, 6 * 60 * 60 * 1000);
+if (process.env.AIRTABLE_API_KEY) ensurePicksTable().catch(e => console.error('ensurePicksTable:', e.message));
