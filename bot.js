@@ -659,7 +659,7 @@ function findStatsHubReferee(refereeName) {
     const score = intersection / union;
     if (score > bestScore) { bestScore = score; best = ref; }
   }
-  return bestScore >= 0.5 ? best : null;
+  return bestScore >= 0.35 ? best : null;
 }
 
 // ── SofaScore — árbitro + forma reciente ─────────────────────────────────────
@@ -1514,7 +1514,8 @@ MERCADOS DONDE ESTÁ EL VALOR REAL:
 
 PROCESO DE ANÁLISIS OBLIGATORIO:
 Para BTTS: % local marcó en casa + % visitante marcó fuera + % BTTS en H2H. Solo si los 3 superan 55%. Usa también probBTTS_Combinada del modelo Poisson: si supera 62% es señal fuerte.
-Para Corners: promedio local en casa + visitante fuera. Recomienda Over si total supera línea en +1.5.
+⛔ BTTS VETO DEFENSIVO: Antes de recomendar BTTS, verifica golesRecibidosHome del equipo local y golesRecibidosAway del visitante. Si cualquiera de las dos defensas recibe < 0.6 goles/partido, el equipo atacante tiene < 25% probabilidad real de marcar → BTTS no tiene valor estadístico. Prioriza siempre el dato defensivo sobre el ofensivo del atacante.
+Para Corners pre-partido: PROHIBIDO. Los datos estadísticos actuales no incluyen corners/partido por equipo — no tienes base matemática para proyectar líneas de córners. Los corners SOLO se analizan en partidos EN VIVO donde el JSON incluye "proyeccionCorners" con datos reales del partido.
 Para HT: % local gana 1T en casa. Solo si supera 60%.
 Para Tarjetas: usa estadisticasArbitro del JSON. Si viene fuente_stats='statshub':
   - pct_over35_tarjetas ≥ 70% → considera Over 3.5 tarjetas
@@ -1676,6 +1677,9 @@ MERCADO DE GOLES EN VIVO — CÓMO USARLO:
 ⛔ STAKE MÍNIMO 6 — SIN EXCEPCIONES:
 Picks con stake 5 o menor NO SE PUBLICAN. Nunca. Ni aunque sea "la única línea disponible" ni aunque la cuota sea interesante. Si no hay 3 picks con stake 6+, emite solo los que lleguen a 6+ aunque sean 1 o 2. NUNCA incluyas "Stake: 5/10".
 
+⛔ MÁXIMO 1 PICK CON STAKE 9 o 10 POR SESIÓN:
+Solo UN pick puede ser stake 9 o stake 10 en toda la sesión del día. Los demás tienen tope de stake 8. Para asignar stake 9 o 10 debes citar EXPLÍCITAMENTE la probabilidad del modelo Poisson que lo justifica (ej: "probBTTS_Combinada: 81%") — sin citarla, el máximo es 8. Un stake 10 mal justificado daña la credibilidad del tipster más que no darlo.
+
 ⛔ COHERENCIA NARRATIVA ENTRE PICKS:
 Si el análisis describe un partido que se abrirá tácticamente (ambos equipos atacan, urgencia táctica, pressing), los picks deben ser coherentes con esa narrativa:
 - Partido abierto/atacante → Over corners, Over tarjetas, Over goles (NO Under corners en el mismo análisis)
@@ -1803,13 +1807,22 @@ const STAKE_CUOTA_MIN       = { 10: 1.85, 9: 1.75, 8: 1.65, 7: 1.55, 6: 1.50 };
 
 function validateStake(pick, probBlock) {
   const claimed = pick.stake;
-  if (!claimed || !probBlock) return claimed;
+  if (!claimed) return claimed;
+
+  // Corners no tienen probabilidad calculada pre-partido — cap fijo a 7
+  if (['CORNERS_OVER', 'CORNERS_UNDER', 'OVER_CORNERS', 'UNDER_CORNERS'].includes(pick.mercado)) {
+    return Math.min(claimed, 7);
+  }
+
+  if (!probBlock) return claimed;
 
   const probs = probBlock.modeloPoisson || {};
+  const overProb = pick.linea >= 3 ? parseFloat(probs.probOver35) : parseFloat(probs.probOver25);
   const marketProb = {
     BTTS_YES:    parseFloat(probs.probBTTS_Combinada),
-    OVER_GOALS:  parseFloat(pick.linea >= 3 ? probs.probOver35 : probs.probOver25),
-    UNDER_GOALS: 100 - parseFloat(pick.linea >= 3 ? probs.probOver35 : probs.probOver25),
+    BTTS_NO:     100 - parseFloat(probs.probBTTS_Combinada),
+    OVER_GOALS:  overProb,
+    UNDER_GOALS: 100 - overProb,
     HOME_WIN:    parseFloat(probs.probLocalGana),
     AWAY_WIN:    parseFloat(probs.probVisitanteGana),
     DRAW:        parseFloat(probs.probEmpate),
@@ -1827,6 +1840,47 @@ function validateStake(pick, probBlock) {
     if (marketProb >= threshold) return Math.min(claimed, stk - 1); // prob ok pero cuota baja
   }
   return Math.min(claimed, 6); // mínimo siempre 6 si llegó hasta aquí
+}
+
+// Valida y corrige stakes ANTES de publicar el mensaje.
+// Ejecuta el gate matemático + regla de máximo 1 stake 9+/10 por sesión.
+async function applyStakeGate(picksText, enriched, matchesCtx) {
+  try {
+    const extracted = await extractPicksFromText(picksText, matchesCtx);
+    if (!extracted.length) return picksText;
+
+    let correctedText = picksText;
+    let highStakeCount = 0;
+
+    for (const p of extracted.filter(x => !x.esCombinada)) {
+      const f = enriched.find(e =>
+        e.local?.toLowerCase().includes((p.local || '').toLowerCase().split(' ')[0]) ||
+        e.visitante?.toLowerCase().includes((p.visitante || '').toLowerCase().split(' ')[0])
+      );
+
+      let stakeValidado = validateStake(p, f?.probabilidadesCalculadas);
+
+      // Máximo 1 pick con stake 9 o 10 por sesión
+      if (stakeValidado >= 9) {
+        if (highStakeCount > 0) {
+          console.log(`⚠️ Stake cap: ${p.local} vs ${p.visitante} reducido ${stakeValidado}→8 (ya hay un pick 9+)`);
+          stakeValidado = 8;
+        } else {
+          highStakeCount++;
+        }
+      }
+
+      if (stakeValidado !== p.stake) {
+        console.log(`⚠️ Pre-publish gate: ${p.local} vs ${p.visitante} (${p.mercado}): ${p.stake}→${stakeValidado}`);
+        correctedText = correctedText.replace(`Stake: ${p.stake}/10`, `Stake: ${stakeValidado}/10`);
+      }
+    }
+
+    return correctedText;
+  } catch (e) {
+    console.error('applyStakeGate:', e.message);
+    return picksText; // fail-open: publicar sin corrección antes que crashear
+  }
 }
 
 async function recordPicks(analysisText, matchesCtx, enrichedFixtures = []) {
@@ -2195,11 +2249,14 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     `Partidos del día ${today} (hora Colombia). DATOS REALES — HIGHLIGHTLY + SOFASCORE:\n\n${JSON.stringify(enriched, null, 2)}${winRatesCtx}\n\nEmite EXACTAMENTE 3 picks individuales + 1 combinada basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
   );
 
-  // Guardar en caché para evitar re-análisis y picks contradictorios
-  setPicksCache('all', picksText, enriched.map(f => f.fixtureId));
+  const matchesCtxHoy = enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }));
+  const finalText = await applyStakeGate(picksText, enriched, matchesCtxHoy);
 
-  await sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
-  recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido })), enriched).catch(e => console.error('recordPicks:', e.message));
+  // Guardar en caché para evitar re-análisis y picks contradictorios
+  setPicksCache('all', finalText, enriched.map(f => f.fixtureId));
+
+  await sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${finalText}`, { parse_mode: 'Markdown' });
+  recordPicks(finalText, matchesCtxHoy, enriched).catch(e => console.error('recordPicks:', e.message));
 }
 
 async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
@@ -2301,11 +2358,14 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
     `Partidos de ${displayName} del día ${today}. DATOS REALES DE API + SOFASCORE:\n\n${JSON.stringify(enriched, null, 2)}${winRatesCtx}\n\nAnaliza y emite picks de valor basadas SOLO en estos datos reales. Usa las probabilidadesCalculadas para validar cada pick — solo recomienda si el EV es positivo o cercano a 0 y la prob supera el umbral de stake.`
   );
 
-  // Guardar en caché para evitar re-análisis y picks contradictorios
-  setPicksCache(cacheScope, picksText, enriched.map(f => f.fixtureId));
+  const matchesCtxLiga = enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }));
+  const finalTextLiga = await applyStakeGate(picksText, enriched, matchesCtxLiga);
 
-  await sendLong(chatId, `📅 *${displayName} — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
-  recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido })), enriched).catch(e => console.error('recordPicks:', e.message));
+  // Guardar en caché para evitar re-análisis y picks contradictorios
+  setPicksCache(cacheScope, finalTextLiga, enriched.map(f => f.fixtureId));
+
+  await sendLong(chatId, `📅 *${displayName} — ${today}*\n\n${finalTextLiga}`, { parse_mode: 'Markdown' });
+  recordPicks(finalTextLiga, matchesCtxLiga, enriched).catch(e => console.error('recordPicks:', e.message));
 }
 
 async function handlePartido(chatId, teamName, countryHint = '') {
