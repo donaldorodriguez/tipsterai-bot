@@ -596,6 +596,72 @@ async function getLeagueStandings(leagueId) {
   return group.map(s => ({ teamId: s.team.id, teamName: s.team.name, rank: s.position }));
 }
 
+// ── StatsHub — estadísticas de árbitros (tarjetas, fouls, BTC) ───────────────
+// API pública: https://www.statshub.com/api/referees/list
+// Se fetchea automáticamente al iniciar y se refresca cada 6 horas.
+
+const STATSHUB_API = 'https://www.statshub.com/api/referees/list?page=1&limit=500&upcomingFixturesOnly=false&last20GamesOnly=true&leagueStatsOnly=false&sortField=next_game_timestamp&sortDirection=asc';
+
+let statsHubReferees = []; // array de objetos parseados en memoria
+
+function normalizeRefName(name) {
+  return name
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, ' ')
+    .split(/\s+/).filter(Boolean)
+    .sort()
+    .join(' ');
+}
+
+function parseStatsHubApiData(refs) {
+  return refs.map(r => ({
+    nombre:                  r.name,
+    normalizado:             normalizeRefName(r.name),
+    partidos:                parseInt(r.games) || null,
+    amarillas_por_partido:   parseFloat(r.avg_yellow_cards_per_game) || null,
+    rojas_por_partido:       parseFloat(r.avg_red_cards_per_game) || null,
+    avg_tarjetas:            parseFloat(r.avg_cards_per_game) || null,
+    tarjetas_1T:             parseFloat(r.avg_first_half_cards) || null,
+    tarjetas_2T:             parseFloat(r.avg_second_half_cards) || null,
+    penaltis_por_partido:    (r.total_penalties && r.games)
+                               ? +(parseInt(r.total_penalties) / parseInt(r.games)).toFixed(2)
+                               : null,
+    faltas_por_partido:      parseFloat(r.avg_fouls_per_game) || null,
+    pct_over35_tarjetas:     parseFloat(r.o35_cards_pct) || null,
+    pct_over45_tarjetas:     parseFloat(r.o45_cards_pct) || null,
+    pct_over55_tarjetas:     parseFloat(r.o55_cards_pct) || null,
+    pct_btc:                 parseFloat(r.both_teams_card_pct) || null,
+    pct_btc2:                parseFloat(r.both_teams_o15_card_pct) || null,
+  }));
+}
+
+async function fetchStatsHubReferees() {
+  try {
+    const res = await axios.get(STATSHUB_API, { timeout: 15000 });
+    const refs = res.data?.data || res.data || [];
+    if (!Array.isArray(refs) || refs.length === 0) return;
+    statsHubReferees = parseStatsHubApiData(refs);
+    console.log(`✅ StatsHub: ${statsHubReferees.length} árbitros cargados`);
+  } catch (e) {
+    console.warn(`⚠️ StatsHub fetch error: ${e.message}`);
+  }
+}
+
+function findStatsHubReferee(refereeName) {
+  if (!refereeName || statsHubReferees.length === 0) return null;
+  const needleTokens = new Set(normalizeRefName(refereeName).split(' '));
+  let best = null, bestScore = 0;
+  for (const ref of statsHubReferees) {
+    const hayTokens = new Set(ref.normalizado.split(' '));
+    const intersection = [...needleTokens].filter(t => hayTokens.has(t)).length;
+    const union = new Set([...needleTokens, ...hayTokens]).size;
+    const score = intersection / union;
+    if (score > bestScore) { bestScore = score; best = ref; }
+  }
+  return bestScore >= 0.5 ? best : null;
+}
+
 // ── SofaScore — árbitro + forma reciente ─────────────────────────────────────
 // SofaScore tiene promedios pre-calculados del árbitro (career stats / partidos).
 // 2 llamadas máx por partido (eventos del día + detalle), con caché agresivo.
@@ -691,22 +757,32 @@ async function getSofaMatchContext(homeTeam, awayTeam, sofaEvents) {
 
     const result = { fuente: 'sofascore' };
 
-    // Árbitro con stats pre-calculados + rankings FIFA (desde detalle del evento)
+    // Árbitro (nombre desde SofaScore) + stats desde StatsHub + rankings FIFA
     if (detailRes.status === 'fulfilled') {
       const ev  = detailRes.value.data?.event;
       const ref = ev?.referee;
       if (ref) {
-        const games = ref.games || ref.gamesCount || 1;
-        const amarPP = (ref.yellowCards && games > 1) ? +(ref.yellowCards / games).toFixed(2) : null;
-        const rojPP  = (ref.redCards    && games > 1) ? +(ref.redCards    / games).toFixed(2) : null;
+        const sh = findStatsHubReferee(ref.name);
         result.arbitro = {
-          nombre:                      ref.name,
-          partidos:                    games,
-          amarillas_por_partido:       (amarPP !== null && amarPP < 15) ? amarPP : null,
-          rojas_por_partido:           (rojPP  !== null && rojPP  < 3)  ? rojPP  : null,
-          penaltis_por_partido:        (ref.penaltyCount && games > 1) ? +(ref.penaltyCount / games).toFixed(2) : null,
+          nombre:   ref.name,
+          partidos: sh?.partidos || null,
+          ...(sh ? {
+            amarillas_por_partido: sh.amarillas_por_partido,
+            rojas_por_partido:     sh.rojas_por_partido,
+            avg_tarjetas:          sh.avg_tarjetas,
+            tarjetas_1T:           sh.tarjetas_1T,
+            tarjetas_2T:           sh.tarjetas_2T,
+            penaltis_por_partido:  sh.penaltis_por_partido,
+            faltas_por_partido:    sh.faltas_por_partido,
+            pct_over35_tarjetas:   sh.pct_over35_tarjetas,
+            pct_over45_tarjetas:   sh.pct_over45_tarjetas,
+            pct_over55_tarjetas:   sh.pct_over55_tarjetas,
+            pct_btc:               sh.pct_btc,
+            pct_btc2:              sh.pct_btc2,
+            fuente_stats:          'statshub',
+          } : { fuente_stats: 'sin_datos' }),
         };
-        console.log(`🃏 Árbitro [${homeTeam}]: ${ref.name} | partidos=${games} | amarPP=${amarPP}`);
+        console.log(`🃏 Árbitro [${homeTeam}]: ${ref.name}${sh ? ` | StatsHub ✓ BTC=${sh.pct_btc}% +3.5=${sh.pct_over35_tarjetas}%` : ' | sin datos StatsHub'}`);
       }
 
       // Rankings FIFA (presentes en partidos internacionales)
@@ -972,10 +1048,14 @@ function calcLiveProjection(current, elapsed, total = 90) {
   const projected = pace * total;
   const remaining = (total - elapsed) * pace;
   const confidence = elapsed >= 30 ? 'alta' : elapsed >= 15 ? 'media' : 'baja';
+  // Línea que las casas típicamente ofrecen en vivo: actual + mitad de lo esperado restante + margen 0.5
+  // Ej: 1 córner al min45 → remaining≈1 → lineaVivo≈1+0.5+0.5=2.5 (Over 1.5 o Under 2.5)
+  const lineaVivo = Math.floor(current + remaining * 0.5) + 0.5;
   return {
     projected:  +projected.toFixed(1),
     remaining:  +remaining.toFixed(1),
     pace:       +(pace * 90).toFixed(1), // corners/90 equivalentes
+    lineaVivo,                            // línea estimada que la casa ofrece ahora en vivo
     confidence,
   };
 }
@@ -1038,12 +1118,24 @@ function calcLiveGoalLines(currentGoals, elapsed, homeFor = 1.3, awayFor = 1.0) 
 
   const lineasConValor = lines.filter(l => l.overValor || l.underValor);
 
+  // Probabilidades vivo ajustadas al marcador actual (para que el LLM no use las de pre-partido)
+  const findLine = (extra) => lines.find(l => l.linea === `${currentGoals + extra}`);
+  const l05 = findLine(0.5); const l15 = findLine(1.5);
+  const l25 = findLine(2.5); const l35 = findLine(3.5);
+
   return {
     golesActuales:      currentGoals,
     minutosJugados:     elapsed,
     minutosRestantes:   minutesRemaining,
     golesEsperadosRest: +lambda.toFixed(2),
     proyeccionTotal:    +(currentGoals + lambda).toFixed(1),
+    // Probs ajustadas al vivo — usar ESTAS, no las de probabilidadesCalculadas
+    probsVivo: {
+      [`over${currentGoals + 0.5}`]: l05 ? `${l05.overProb}%` : null,
+      [`over${currentGoals + 1.5}`]: l15 ? `${l15.overProb}%` : null,
+      [`over${currentGoals + 2.5}`]: l25 ? `${l25.overProb}%` : null,
+      [`over${currentGoals + 3.5}`]: l35 ? `${l35.overProb}%` : null,
+    },
     lineas:             lines,
     lineasConValor:     lineasConValor.length > 0
       ? lineasConValor
@@ -1424,7 +1516,11 @@ PROCESO DE ANÁLISIS OBLIGATORIO:
 Para BTTS: % local marcó en casa + % visitante marcó fuera + % BTTS en H2H. Solo si los 3 superan 55%. Usa también probBTTS_Combinada del modelo Poisson: si supera 62% es señal fuerte.
 Para Corners: promedio local en casa + visitante fuera. Recomienda Over si total supera línea en +1.5.
 Para HT: % local gana 1T en casa. Solo si supera 60%.
-Para Tarjetas: suma promedios. Solo si supera línea en +1.
+Para Tarjetas: usa estadisticasArbitro del JSON. Si viene fuente_stats='statshub':
+  - pct_over35_tarjetas ≥ 70% → considera Over 3.5 tarjetas
+  - pct_over45_tarjetas ≥ 60% → considera Over 4.5 tarjetas
+  - pct_btc ≥ 80% → considera BTC (ambos equipos ven tarjeta)
+  Si no hay datos StatsHub: suma avg_tarjetas local+visitante. Solo si supera línea en +1.
 Para Over/Under goles: usa probOver25 y probOver35 del modelo. Si probOver25 > 65% con EV positivo, considera pick.
 Para DNB: usa probDNB_Local o probDNB_Visitante. Solo si supera 72% para stake 7+.
 
@@ -1439,7 +1535,8 @@ INSTRUCCIONES PARA MOMENTUM EN VIVO:
 Si el JSON incluye "momentumEnVivo", úsalo para detectar oportunidades en tiempo real:
 - Si domina un equipo (score > 15) pero el marcador no lo refleja aún, considera apuesta al próximo gol de ese equipo.
 - Si está equilibrado, prioriza mercados de corners o tarjetas sobre resultado.
-- proyeccionCorners.projected > 10: considera Over 9.5 corners si confidence es "alta".
+- proyeccionCorners.lineaVivo: usa esta línea (no 9.5 ni 10.5 de pre-partido) cuando el partido ya comenzó. La casa ajusta la línea al ritmo real del juego.
+- proyeccionCorners.projected y remaining: te dicen si hay valor en Over o Under la lineaVivo.
 - proyeccionTarjetas.projected > 4: considera Over 3.5 tarjetas si confidence es "alta".
 
 TRADUCCIÓN OBLIGATORIA DE TÉRMINOS TÉCNICOS — SIEMPRE en español:
@@ -1477,7 +1574,10 @@ FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 🌍 [País] — [Liga]  ← SOLO el nombre de liga que viene en el JSON. NUNCA añadas "(Amistoso Internacional)" ni etiquetas inventadas. Si la liga es "FIFA World Cup", escríbela tal cual.
 ⚽ [Local] vs [Visitante] | ⏰ [Hora Colombia]
 📍 [Estadio, Ciudad]  ← usa partido.estadio y partido.ciudad del JSON. Si son null escribe "No disponible".
-🃏 Árbitro: [Nombre] — 🟨 [X.XX/partido] 🟥 [X.XX/partido]  ← usa estadisticasArbitro del JSON (amarillas_por_partido y rojas_por_partido). Si es null, escribe "No disponible".
+🃏 Árbitro: [Nombre] — 🟨 [X.XX/pj] 🟥 [X.XX/pj] | Fouls: [X.XX/pj] | +3.5 tarj: [X]% | +4.5 tarj: [X]% | BTC: [X]%
+← usa estadisticasArbitro del JSON. Campos: amarillas_por_partido, rojas_por_partido, faltas_por_partido, pct_over35_tarjetas, pct_over45_tarjetas, pct_btc. Si un campo es null, omítelo. Si fuente_stats='statshub', todos los campos extras vienen de StatsHub.
+← Ejemplo con datos completos: "🃏 César Ramos — 🟨 4.14/pj 🟥 0.44/pj | Fouls: 24.0/pj | +3.5 tarj: 67% | +4.5 tarj: 47% | BTC: 77%"
+← Ejemplo sin StatsHub: "🃏 Árbitro: John Smith — 🟨 3.20/pj 🟥 0.15/pj"
 [Si rankingsFIFA existe en el JSON] 🌐 Ranking FIFA: [Local] [#N] vs [Visitante] [#N]  ← omite esta línea si rankingsFIFA no está en el JSON.
 ━━━━━━━━━━━━━━━━━━━
 
@@ -1551,14 +1651,39 @@ PROYECCIONES EN TIEMPO REAL:
 - proyeccionTarjetas.projected: si > 4.5 con confidence "alta" → considera Over 3.5/4.5
 - Solo usa proyecciones con confidence "alta" (min 30 minutos jugados) para picks de stake 7+
 
-MERCADO DE GOLES EN VIVO — REGLA CRÍTICA:
-NUNCA descartes el mercado de goles completo por "ya hay N goles". Lo que debes hacer:
-1. Usar el campo "proyeccionGolesLineas" (o "lineasGolesVivo") que viene en los datos.
-2. Ese campo ya calcula qué líneas tienen valor real (probabilidad entre 20-80%).
-3. Si hay 2 goles al min 45 → Over 2.5 es trivial (sin valor). Pero Over 3.5 o Under 3.5 PUEDEN tener valor.
-4. Siempre evalúa: Over (golesActuales+1.5), Over (golesActuales+2.5), Under (golesActuales+1.5).
-5. Usa el campo "lineasConValor" para saber cuáles recomendar — solo propón mercados listados ahí.
-6. Si "lineasConValor" está vacío → no fuerces picks de goles, enfócate en corners/tarjetas.
+MERCADO DE CORNERS EN VIVO — CÓMO USAR LAS PROYECCIONES:
+Las casas ajustan la línea de corners en tiempo real. "proyeccionCorners.lineaVivo" es la línea estimada que la casa está ofreciendo ahora mismo (calculada sobre el ritmo actual + córners ya marcados).
+- USA "proyeccionCorners.lineaVivo" como la línea a evaluar (no inventes 9.5 si el ritmo no lo justifica).
+- Ejemplo: 1 córner al min 45 → lineaVivo ≈ 1.5 o 2.5 (Over o Under según el contexto)
+- Si lineaVivo es 2.5 y el contexto del partido (equipo perdiendo, pressing intenso) sugiere que habrá más de 3 córners, entonces tiene valor el Over 2.5.
+- Si el partido fue tranquilo en córners, el Under también puede tener valor.
+- NUNCA uses la línea de pre-partido (9.5, 10.5) si el ritmo del partido en vivo no la soporta.
+- "projected" es la proyección TOTAL al 90' basada en el ritmo actual. "remaining" son los esperados en el tiempo que queda. Ambos te dicen si la línea en vivo tiene valor.
+
+⛔ PROBABILIDADES EN VIVO — REGLA INQUEBRANTABLE:
+El campo "probabilidadesCalculadas.modeloPoisson" (probOver25, probBTTS_Poisson, etc.) son probabilidades PRE-PARTIDO calculadas desde históricos. Ya viene marcado con _ADVERTENCIA_ en el JSON.
+En partidos en vivo IGNORA esas probabilidades para picks de goles. Usa EXCLUSIVAMENTE:
+- "lineasGolesVivo.probsVivo" → probabilidades ajustadas al marcador y minuto actual
+- "lineasGolesVivo.lineasConValor" → líneas que tienen valor real ahora mismo
+Ejemplo del error a evitar: si "probOver25" del Poisson histórico dice 67.7% pero "probsVivo.over2.5" dice 12%, la cifra correcta para el pick es 12% — y con 12% el pick no existe (stake < 6).
+
+MERCADO DE GOLES EN VIVO — CÓMO USARLO:
+1. Leer "lineasGolesVivo.golesEsperadosRest" → goles esperados en el tiempo que queda
+2. Leer "lineasGolesVivo.probsVivo" → ya tienes las probabilidades correctas por línea
+3. Evaluar "lineasGolesVivo.lineasConValor" → solo recomendar líneas listadas ahí (probabilidad 20-80%)
+4. Si "lineasConValor" dice "Sin líneas de goles con valor" → NO fuerces pick de goles; enfócate en corners/tarjetas
+
+⛔ STAKE MÍNIMO 6 — SIN EXCEPCIONES:
+Picks con stake 5 o menor NO SE PUBLICAN. Nunca. Ni aunque sea "la única línea disponible" ni aunque la cuota sea interesante. Si no hay 3 picks con stake 6+, emite solo los que lleguen a 6+ aunque sean 1 o 2. NUNCA incluyas "Stake: 5/10".
+
+⛔ COHERENCIA NARRATIVA ENTRE PICKS:
+Si el análisis describe un partido que se abrirá tácticamente (ambos equipos atacan, urgencia táctica, pressing), los picks deben ser coherentes con esa narrativa:
+- Partido abierto/atacante → Over corners, Over tarjetas, Over goles (NO Under corners en el mismo análisis)
+- Partido cerrado/defensivo → Under corners, Under tarjetas (NO Over goles en el mismo análisis)
+Si un pick contradice la narrativa principal, descártalo. Coherencia > cantidad de picks.
+
+⛔ PROYECCIÓN CORNERS — USA LOS DATOS EXACTOS:
+El campo "proyeccionCorners" ya viene calculado con el ritmo real del partido. Cita los valores exactos: "projected", "remaining", "lineaVivo". NO ajustes ni inventes valores cualitativos ("factor de presión", "urgencia táctica") para justificar una proyección diferente. Si "proyeccionCorners.projected" = 2.0, la proyección es 2.0, no 3.6.
 
 FORMATO ADICIONAL IN-PLAY:
 ⏰ Actúa antes del min: [XX]
@@ -2230,7 +2355,11 @@ async function handlePartido(chatId, teamName, countryHint = '') {
     ultimosPartidosLocal:     homeLastFixtures,
     ultimosPartidosVisitante: awayLastFixtures,
     estadisticasVivo: liveStatsData,
-    ...(probBlock     && { probabilidadesCalculadas: probBlock }),
+    ...(probBlock && {
+      probabilidadesCalculadas: isLive
+        ? { ...probBlock, _ADVERTENCIA_: 'DATOS PRE-PARTIDO basados en históricos. En vivo NO uses probOver25 ni probBTTS_Poisson para picks de goles — usa SOLO lineasGolesVivo.lineasConValor que ya tiene las probabilidades ajustadas al marcador y minuto actual.' }
+        : probBlock,
+    }),
     ...(momentum      && { momentumEnVivo: momentum }),
     ...(cornersProj   && { proyeccionCorners: cornersProj }),
     ...(cardsProj     && { proyeccionTarjetas: cardsProj }),
@@ -3320,7 +3449,22 @@ app.post('/webhook/whop', async (req, res) => {
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
 
+// ── StatsHub — refresh manual de árbitros ────────────────────────────────────
+// Fuerza un re-fetch inmediato desde la API. Protegido con X-Admin-Key.
+app.post('/webhook/arbitros', async (req, res) => {
+  const key = req.headers['x-admin-key'];
+  if (process.env.ADMIN_KEY && key !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ error: 'No autorizado' });
+  }
+  await fetchStatsHubReferees();
+  res.json({ ok: true, arbitros: statsHubReferees.length });
+});
+
 app.listen(WEBHOOK_PORT, () => {
   console.log(`🌐 Webhook server escuchando en puerto ${WEBHOOK_PORT}`);
   console.log(`   POST http://localhost:${WEBHOOK_PORT}/webhook/whop`);
 });
+
+// Auto-fetch árbitros de StatsHub al arrancar y cada 6 horas
+fetchStatsHubReferees();
+setInterval(fetchStatsHubReferees, 6 * 60 * 60 * 1000);
