@@ -849,6 +849,19 @@ async function getH2H(id1, id2) {
     });
 }
 
+// Intenta extraer un valor numérico de múltiples rutas posibles en un objeto.
+function safeNum(obj, ...paths) {
+  for (const path of paths) {
+    const parts = path.split('.');
+    let val = obj;
+    for (const p of parts) val = val?.[p];
+    if (val != null && !isNaN(parseFloat(val))) return parseFloat(val);
+  }
+  return null;
+}
+
+let _teamStatsLogged = false; // log de estructura raw solo una vez por sesión
+
 async function getTeamStats(teamId, leagueId) {
   const season = LEAGUE_SEASONS[leagueId] || 2025;
   const fromDate = `${season - 1}-06-01`;
@@ -860,23 +873,84 @@ async function getTeamStats(teamId, leagueId) {
     || data.sort((a, b) => (b.total?.games?.played || 0) - (a.total?.games?.played || 0))[0];
   if (!leagueStat) return null;
 
+  // Log raw structure ONCE so podemos ver qué campos existen en Highlightly
+  if (!_teamStatsLogged) {
+    _teamStatsLogged = true;
+    const home0 = leagueStat.home || {};
+    console.log('📊 [DEBUG] TeamStats home keys:', JSON.stringify(Object.keys(home0)));
+    console.log('📊 [DEBUG] TeamStats home sample:', JSON.stringify(home0, null, 2).slice(0, 1500));
+  }
+
   const { home, away, total } = leagueStat;
-  const hP = home.games.played || 1;
-  const aP = away.games.played || 1;
+  const hP = home.games?.played || 1;
+  const aP = away.games?.played || 1;
+  const tP = total.games?.played || (hP + aP) || 1;
+
+  // ── Goles (confirmados) ──────────────────────────────────────────────────────
+  const golesAnotadosHome  = +(home.goals.scored   / hP).toFixed(2);
+  const golesAnotadosAway  = +(away.goals.scored   / aP).toFixed(2);
+  const golesRecibidosHome = +(home.goals.received / hP).toFixed(2);
+  const golesRecibidosAway = +(away.goals.received / aP).toFixed(2);
+
+  // ── Porterías a cero / partidos sin marcar ───────────────────────────────────
+  const csH = safeNum(home, 'goals.cleanSheets', 'cleanSheets', 'goals.clean_sheets', 'clean_sheets');
+  const csA = safeNum(away, 'goals.cleanSheets', 'cleanSheets', 'goals.clean_sheets', 'clean_sheets');
+  const ftsH = safeNum(home, 'goals.failedToScore', 'failedToScore', 'goals.failed_to_score', 'failed_to_score');
+  const ftsA = safeNum(away, 'goals.failedToScore', 'failedToScore', 'goals.failed_to_score', 'failed_to_score');
+
+  // ── Corners ──────────────────────────────────────────────────────────────────
+  const cornH = safeNum(home, 'corners.total', 'corners.count', 'corners', 'cornerKicks', 'corner_kicks');
+  const cornA = safeNum(away, 'corners.total', 'corners.count', 'corners', 'cornerKicks', 'corner_kicks');
+  const cornT = safeNum(total, 'corners.total', 'corners.count', 'corners', 'cornerKicks', 'corner_kicks');
+
+  // ── Tarjetas ─────────────────────────────────────────────────────────────────
+  const yelH = safeNum(home, 'cards.yellow', 'yellowCards', 'yellow_cards', 'cards.yellowCards');
+  const yelA = safeNum(away, 'cards.yellow', 'yellowCards', 'yellow_cards', 'cards.yellowCards');
+  const redH = safeNum(home, 'cards.red', 'redCards', 'red_cards', 'cards.redCards');
+  const redA = safeNum(away, 'cards.red', 'redCards', 'red_cards', 'cards.redCards');
+
+  // ── Tiros ────────────────────────────────────────────────────────────────────
+  const shotsH    = safeNum(home, 'shots.total', 'shots', 'totalShots', 'shots.on_target');
+  const shotsA    = safeNum(away, 'shots.total', 'shots', 'totalShots', 'shots.on_target');
+  const shotsOnH  = safeNum(home, 'shots.on_target', 'shotsOnTarget', 'shots_on_target');
+  const shotsOnA  = safeNum(away, 'shots.on_target', 'shotsOnTarget', 'shots_on_target');
+
+  // ── Posesión ─────────────────────────────────────────────────────────────────
+  const posH = safeNum(home, 'possession', 'ballPossession', 'ball_possession');
+  const posA = safeNum(away, 'possession', 'ballPossession', 'ball_possession');
 
   return {
-    equipo:             null,
-    liga:               leagueStat.leagueName,
-    temporada:          leagueStat.season,
-    forma:              null,
-    golesAnotadosHome:  +(home.goals.scored  / hP).toFixed(2),
-    golesAnotadosAway:  +(away.goals.scored  / aP).toFixed(2),
-    golesRecibidosHome: +(home.goals.received / hP).toFixed(2),
-    golesRecibidosAway: +(away.goals.received / aP).toFixed(2),
-    cleanSheetsHome:    null,
-    cleanSheetsAway:    null,
-    failedToScoreHome:  null,
-    failedToScoreAway:  null,
+    liga:      leagueStat.leagueName,
+    temporada: leagueStat.season,
+    partidos:  { home: hP, away: aP, total: tP },
+
+    golesAnotadosHome,
+    golesAnotadosAway,
+    golesRecibidosHome,
+    golesRecibidosAway,
+
+    cleanSheetsHome:   csH,
+    cleanSheetsAway:   csA,
+    failedToScoreHome: ftsH,
+    failedToScoreAway: ftsA,
+
+    ...(cornH != null && { cornersPerGameHome: +(cornH / hP).toFixed(2) }),
+    ...(cornA != null && { cornersPerGameAway: +(cornA / aP).toFixed(2) }),
+    ...(cornT != null && { cornersPerGame:     +(cornT / tP).toFixed(2) }),
+
+    ...(yelH != null && { tarjetasAmHome: +(yelH / hP).toFixed(2) }),
+    ...(yelA != null && { tarjetasAmAway: +(yelA / aP).toFixed(2) }),
+    ...(redH != null && { tarjetasRoHome: +(redH / hP).toFixed(2) }),
+    ...(redA != null && { tarjetasRoAway: +(redA / aP).toFixed(2) }),
+
+    ...(shotsH   != null && { tirosHome:       +(shotsH  / hP).toFixed(2) }),
+    ...(shotsA   != null && { tirosAway:       +(shotsA  / aP).toFixed(2) }),
+    ...(shotsOnH != null && { tirosArcoHome:   +(shotsOnH / hP).toFixed(2) }),
+    ...(shotsOnA != null && { tirosArcoAway:   +(shotsOnA / aP).toFixed(2) }),
+
+    ...(posH != null && { posesionHome: posH > 1 ? posH : +(posH * 100).toFixed(1) }),
+    ...(posA != null && { posesionAway: posA > 1 ? posA : +(posA * 100).toFixed(1) }),
+
     victorias: { total: total.games.wins,  home: home.games.wins,  away: away.games.wins  },
     empates:   { total: total.games.draws, home: home.games.draws, away: away.games.draws },
     derrotas:  { total: total.games.loses, home: home.games.loses, away: away.games.loses },
@@ -1214,6 +1288,62 @@ function buildProbBlock(homeStats, awayStats, h2h = [], homeFallback = null, awa
     ev[k] = calcEV(prob, odds);
   }
 
+  // ── Corners projection ───────────────────────────────────────────────────────
+  // local usa sus corners en casa, visitante usa sus corners fuera
+  const hCorners = hSrc?.cornersPerGameHome ?? hSrc?.cornersPerGame ?? null;
+  const aCorners = aSrc?.cornersPerGameAway ?? aSrc?.cornersPerGame ?? null;
+  const cornersProyectados = (hCorners != null && aCorners != null)
+    ? +(hCorners + aCorners).toFixed(1) : null;
+
+  // Probabilidades de corners via Poisson (lambda = cornersProyectados)
+  let cornersBlock = null;
+  if (cornersProyectados != null) {
+    const lambda = cornersProyectados;
+    const pOver75  = +(poissonCDF_above(lambda, 8)  * 100).toFixed(1);
+    const pOver85  = +(poissonCDF_above(lambda, 9)  * 100).toFixed(1);
+    const pOver95  = +(poissonCDF_above(lambda, 10) * 100).toFixed(1);
+    const pOver105 = +(poissonCDF_above(lambda, 11) * 100).toFixed(1);
+    cornersBlock = {
+      cornersLocal_PG:    hCorners,
+      cornersVisitante_PG: aCorners,
+      cornersProyectados,
+      probOver75:  `${pOver75}%`,
+      probOver85:  `${pOver85}%`,
+      probOver95:  `${pOver95}%`,
+      probOver105: `${pOver105}%`,
+      lineaRecomendada: cornersProyectados >= 10.5 ? 'Over 9.5' :
+                        cornersProyectados >= 9.5  ? 'Over 8.5' :
+                        cornersProyectados >= 8.5  ? 'Over 7.5' : 'Under 7.5',
+    };
+  }
+
+  // ── Cards projection ─────────────────────────────────────────────────────────
+  const hCards = (hSrc?.tarjetasAmHome ?? 0) + (hSrc?.tarjetasRoHome ?? 0);
+  const aCards = (aSrc?.tarjetasAmAway ?? 0) + (aSrc?.tarjetasRoAway ?? 0);
+  const cardsProyectadas = (hSrc?.tarjetasAmHome != null || aSrc?.tarjetasAmAway != null)
+    ? +(hCards + aCards).toFixed(1) : null;
+
+  let cardsBlock = null;
+  if (cardsProyectadas != null) {
+    const lc = cardsProyectadas;
+    cardsBlock = {
+      tarjetasLocal_PG:     hCards > 0 ? +hCards.toFixed(2) : null,
+      tarjetasVisitante_PG: aCards > 0 ? +aCards.toFixed(2) : null,
+      tarjetasProyectadas:  lc,
+      probOver25: `${+(poissonCDF_above(lc, 3) * 100).toFixed(1)}%`,
+      probOver35: `${+(poissonCDF_above(lc, 4) * 100).toFixed(1)}%`,
+      probOver45: `${+(poissonCDF_above(lc, 5) * 100).toFixed(1)}%`,
+    };
+  }
+
+  // ── Clean sheets summary ─────────────────────────────────────────────────────
+  const csBlock = (hSrc?.cleanSheetsHome != null || aSrc?.cleanSheetsAway != null) ? {
+    porteriasACeroLocal_enCasa:       hSrc?.cleanSheetsHome ?? null,
+    partidos_sinMarcarLocal_enCasa:   hSrc?.failedToScoreHome ?? null,
+    porteriasACeroVisitante_fuera:    aSrc?.cleanSheetsAway ?? null,
+    partidos_sinMarcarVisitante_fuera: aSrc?.failedToScoreAway ?? null,
+  } : null;
+
   return {
     modeloPoisson: {
       xGLocal: probs.homeLambda,
@@ -1231,6 +1361,9 @@ function buildProbBlock(homeStats, awayStats, h2h = [], homeFallback = null, awa
       probDNB_Local: `${probs.dnbHome}%`,
       probDNB_Visitante: `${probs.dnbAway}%`,
     },
+    ...(cornersBlock && { proyeccionCorners: cornersBlock }),
+    ...(cardsBlock   && { proyeccionTarjetas: cardsBlock }),
+    ...(csBlock      && { porteriasACero: csBlock }),
     expectedValue_vs_CuotasReferencia: {
       'Over 2.5 @ 1.85': ev.over25 !== null ? `${ev.over25 > 0 ? '+' : ''}${ev.over25}%` : 'N/D',
       'BTTS @ 1.80':     ev.btts   !== null ? `${ev.btts   > 0 ? '+' : ''}${ev.btts}%`   : 'N/D',
@@ -1514,14 +1647,14 @@ MERCADOS DONDE ESTÁ EL VALOR REAL:
 
 PROCESO DE ANÁLISIS OBLIGATORIO:
 Para BTTS: % local marcó en casa + % visitante marcó fuera + % BTTS en H2H. Solo si los 3 superan 55%. Usa también probBTTS_Combinada del modelo Poisson: si supera 62% es señal fuerte.
-⛔ BTTS VETO DEFENSIVO: Antes de recomendar BTTS, verifica golesRecibidosHome del equipo local y golesRecibidosAway del visitante. Si cualquiera de las dos defensas recibe < 0.6 goles/partido, el equipo atacante tiene < 25% probabilidad real de marcar → BTTS no tiene valor estadístico. Prioriza siempre el dato defensivo sobre el ofensivo del atacante.
-Para Corners pre-partido: PROHIBIDO. Los datos estadísticos actuales no incluyen corners/partido por equipo — no tienes base matemática para proyectar líneas de córners. Los corners SOLO se analizan en partidos EN VIVO donde el JSON incluye "proyeccionCorners" con datos reales del partido.
+⛔ BTTS VETO DEFENSIVO: Antes de recomendar BTTS, verifica golesRecibidosHome del equipo local y golesRecibidosAway del visitante. Si cualquiera de las dos defensas recibe < 0.6 goles/partido → BTTS no tiene valor. Si "porteriasACero" existe en el JSON: cleanSheets > 50% de partidos jugados es veto definitivo. Prioriza siempre el dato defensivo sobre el ofensivo del atacante.
+Para Corners pre-partido: Si "probabilidadesCalculadas.proyeccionCorners" existe en el JSON, úsalo — contiene cornersProyectados, probOver75/85/95/105 y lineaRecomendada calculados con Poisson real. Cita "cornersProyectados" y la probabilidad exacta del modelo. Si ese bloque NO existe en los datos, PROHIBIDO recomendar corners pre-partido (sin cornersPerGame no hay base matemática — jamás inventes ese número).
 Para HT: % local gana 1T en casa. Solo si supera 60%.
-Para Tarjetas: usa estadisticasArbitro del JSON. Si viene fuente_stats='statshub':
+Para Tarjetas: Prioridad 1 — estadisticasArbitro del JSON si fuente_stats='statshub': pct_over35_tarjetas, pct_over45_tarjetas, avg_tarjetas. Prioridad 2 — si "probabilidadesCalculadas.proyeccionTarjetas" existe: usa tarjetasProyectadas y probOver25/35/45. Ambos datos son complementarios.
   - pct_over35_tarjetas ≥ 70% → considera Over 3.5 tarjetas
   - pct_over45_tarjetas ≥ 60% → considera Over 4.5 tarjetas
   - pct_btc ≥ 80% → considera BTC (ambos equipos ven tarjeta)
-  Si no hay datos StatsHub: suma avg_tarjetas local+visitante. Solo si supera línea en +1.
+  Si no hay datos StatsHub: usa proyeccionTarjetas.tarjetasProyectadas si existe. Solo recomienda si supera línea en +1.
 Para Over/Under goles: usa probOver25 y probOver35 del modelo. Si probOver25 > 65% con EV positivo, considera pick.
 Para DNB: usa probDNB_Local o probDNB_Visitante. Solo si supera 72% para stake 7+.
 
@@ -3727,6 +3860,32 @@ app.post('/webhook/whop', async (req, res) => {
 });
 
 app.get('/health', (_req, res) => res.json({ status: 'ok', ts: new Date().toISOString() }));
+
+// ── Debug: inspeccionar raw de estadísticas de un equipo en Highlightly ──────
+// GET /admin/debug-team-stats/:teamId   Header: X-Admin-Key
+// Devuelve la estructura raw del endpoint /teams/statistics para ver qué campos existen.
+app.get('/admin/debug-team-stats/:teamId', async (req, res) => {
+  const key = req.headers['x-admin-key'];
+  if (process.env.ADMIN_KEY && key !== process.env.ADMIN_KEY) {
+    return res.status(401).json({ error: 'No autorizado' });
+  }
+  try {
+    const { data } = await API.get('/teams/statistics/' + req.params.teamId, {
+      params: { fromDate: '2024-06-01' },
+    });
+    const first = Array.isArray(data) ? data[0] : data;
+    res.json({
+      leagueName: first?.leagueName,
+      home_keys:  Object.keys(first?.home || {}),
+      away_keys:  Object.keys(first?.away || {}),
+      total_keys: Object.keys(first?.total || {}),
+      home_sample: first?.home,
+      raw_count: Array.isArray(data) ? data.length : 1,
+    });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
 
 // ── StatsHub — refresh manual de árbitros ────────────────────────────────────
 // Fuerza un re-fetch inmediato desde la API. Protegido con X-Admin-Key.
