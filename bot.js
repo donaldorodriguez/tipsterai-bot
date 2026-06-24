@@ -1642,7 +1642,6 @@ async function getNationalTeamRecentStats(teamId, last = 20) {
       const isHome = f.homeId === teamId;
       const gF  = isHome ? f.goalsHome : f.goalsAway;
       const gC  = isHome ? f.goalsAway : f.goalsHome;
-      // Saltar partidos sin score — no contaminar forma con 0-0 falsos
       if (gF === null || gF === undefined || gC === null || gC === undefined) continue;
       golesAFavor   += gF;
       golesEnContra += gC;
@@ -1655,6 +1654,29 @@ async function getNationalTeamRecentStats(teamId, last = 20) {
       if (gF === 0) failedToScore++;
     }
     if (partidos === 0) return null;
+
+    // Corners y tarjetas: últimos 5 partidos vía getFixtureStatistics
+    const recentFive = fixtures.slice(0, 5);
+    const statResults = await Promise.allSettled(
+      recentFive.map(f => getFixtureStatistics(f.id))
+    );
+    let cornersTotal = 0, cornersCount = 0;
+    let yellTotal = 0, redTotal = 0, cardsCount = 0;
+    statResults.forEach((r, idx) => {
+      if (r.status !== 'fulfilled' || !r.value) return;
+      const st = r.value;
+      const isH = recentFive[idx]?.homeId === teamId;
+      const tSt = isH ? homeStats(st) : awayStats(st);
+      const corn = tSt['Corner Kicks'];
+      const yell = tSt['Yellow Cards'];
+      const red  = tSt['Red Cards'];
+      if (corn != null) { cornersTotal += corn; cornersCount++; }
+      if (yell != null || red != null) {
+        yellTotal += yell || 0;
+        redTotal  += red  || 0;
+        cardsCount++;
+      }
+    });
 
     const avgFor     = +(golesAFavor   / partidos).toFixed(2);
     const avgAgainst = +(golesEnContra / partidos).toFixed(2);
@@ -1686,6 +1708,11 @@ async function getNationalTeamRecentStats(teamId, last = 20) {
       empates:             { total: empates },
       derrotas:            { total: derrotas },
       bttsRate:            `${Math.round(bttsCount / partidos * 100)}%`,
+      ...(cornersCount > 0 && { cornersPerGame: +(cornersTotal / cornersCount).toFixed(2) }),
+      ...(cardsCount   > 0 && {
+        tarjetasAmPG: +(yellTotal / cardsCount).toFixed(2),
+        tarjetasRoPG: +(redTotal  / cardsCount).toFixed(2),
+      }),
     };
   } catch (e) {
     console.warn(`⚠️ getNationalTeamRecentStats(${teamId}): ${e.message}`);
@@ -2596,12 +2623,13 @@ function buildPickCandidates(enrichedFixtures) {
  *   Nunca se muestran 2 picks del mismo mercado de goles, sin importar el paso.
  */
 function selectDiversePicks(candidates, count = 3) {
-  const usedFixtures = new Set();
-  const usedPickKeys = new Set(); // fixtureId:market — evita añadir el mismo pick dos veces
-  const catCount     = {};   // por categoría amplia  (goals, result, btts…)
-  const marketCount  = {};   // por mercado específico (under25, over25, homeWin…)
-  const leagueCount  = {};   // por liga
-  const selected     = [];
+  const usedFixtures    = new Set();
+  const usedPickKeys    = new Set(); // fixtureId:market — evita añadir el mismo pick dos veces
+  const usedFixtureCats = new Set(); // fixtureId:category — max 1 por familia por partido (DURA)
+  const catCount        = {};   // por categoría amplia  (goals, result, btts…)
+  const marketCount     = {};   // por mercado específico (under25, over25, homeWin…)
+  const leagueCount     = {};   // por liga
+  const selected        = [];
 
   // Mercados de goles: cap FIJO en 1, sin importar el paso de relajación.
   // Evita que el bot quede "enamorado" del Under 2.5 o el Over 2.5.
@@ -2624,8 +2652,10 @@ function selectDiversePicks(candidates, count = 3) {
    * allowSameFixture: si true, permite un 2.º pick del mismo partido (distinto mercado)
    */
   function tryAdd(c, maxPerCat, maxPerMarket, maxPerLeague, allowSameFixture = false) {
-    const pickKey = `${c.fixtureId}:${c.market}`;
-    if (usedPickKeys.has(pickKey)) return false; // nunca añadir el mismo pick dos veces
+    const pickKey       = `${c.fixtureId}:${c.market}`;
+    const fixtureCatKey = `${c.fixtureId}:${c.category}`;
+    if (usedPickKeys.has(pickKey))    return false; // nunca añadir el mismo pick dos veces
+    if (usedFixtureCats.has(fixtureCatKey)) return false; // REGLA DURA: max 1 por familia por partido
     if (!allowSameFixture && usedFixtures.has(c.fixtureId)) return false;
     if ((catCount[c.category]   || 0) >= maxPerCat)            return false;
     // REGLA DURA: mercados de goles siempre cap=1
@@ -2634,6 +2664,7 @@ function selectDiversePicks(candidates, count = 3) {
     if ((leagueCount[c.liga]    || 0) >= maxPerLeague)         return false;
 
     usedPickKeys.add(pickKey);
+    usedFixtureCats.add(fixtureCatKey);
     usedFixtures.add(c.fixtureId);
     catCount[c.category]  = (catCount[c.category]  || 0) + 1;
     marketCount[c.market] = (marketCount[c.market] || 0) + 1;
@@ -3515,14 +3546,16 @@ BASE RATES DE LIGA (baseRatesLiga) — USO OBLIGATORIO:
 - Si baseRatesLiga es null → no menciones porcentajes de liga.
 
 ÁRBITRO (arbitroStats) — SIEMPRE MOSTRAR:
-- Si arbitroStats tiene datos y arbitroStats._derivado NO es true → "🃏 Árbitro: [nombre] ([X.X] amarillas/p)"
-- Si arbitroStats tiene datos y arbitroStats._derivado = true → "🃏 Árbitro: [nombre] (est. [X.X] amarillas/p — promedio histórico equipos)"
+- Si arbitroStats tiene datos y arbitroStats._derivado NO es true → "🃏 Árbitro: [nombre] | [X.X] 🟡/p · [X.X] 🔴/p · [X.X] total/p ([N] partidos)"
+- Si arbitroStats tiene datos y arbitroStats._derivado = true → "🃏 Árbitro: [nombre] (est. [X.X] tarjetas/p — promedio histórico equipos)"
   • La estimación viene del historial de tarjetas de ambos equipos (sin datos del árbitro real), úsala como referencia aproximada.
 - Si arbitroStats es null y hay nombre de árbitro → "🃏 Árbitro: [nombre] (sin historial disponible)"
 - Si ni arbitroStats ni nombre → "🃏 Árbitro: No disponible"
-- amarillas > 4.5/partido: "tendencia a muchas tarjetas"
-- amarillas < 2.5/partido: "tendencia defensiva/restrictiva"
-- Si el pick ES de tarjetas → el perfil del árbitro + las amarillasPorPartido de ambos equipos son los datos centrales del razonamiento.
+- Campos disponibles: amarillas_por_partido (🟡), rojas_por_partido (🔴), avg_tarjetas (total), partidos, pct_over35_tarjetas, pct_over45_tarjetas, pct_btc
+- avg_tarjetas > 5.0/partido: árbitro muy permisivo → refuerza Over tarjetas
+- avg_tarjetas < 3.0/partido: árbitro estricto/restrictivo → penaliza Over tarjetas
+- rojas_por_partido > 0.15: árbitro con tendencia a expulsiones — menciónalo si el pick es de tarjetas
+- Si el pick ES de tarjetas → cita amarillas_por_partido, rojas_por_partido y avg_tarjetas del árbitro como datos centrales del razonamiento.
 - ⛔ REGLA DURA TARJETAS: Si arbitroStats es null O arbitroStats._derivado=true, el pick de tarjetas tiene MÁXIMO stake 6/10 — nunca 7, 8, 9 o 10. Sin datos reales del árbitro, la incertidumbre es demasiado alta para alta confianza.
 - ⛔ REGLA DURA TARJETAS FIN DE TEMPORADA: Si ambos equipos tienen motivacionLocal/Visitante con estado "nada_en_juego" o "clasifica_champions_posible_asegurado", los partidos relajados producen MENOS tarjetas que el promedio de temporada. En ese contexto, picks de Over tarjetas tienen stake máximo 5/10 y deben mencionarse como "contexto de baja intensidad esperada".
 
