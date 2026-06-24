@@ -3400,6 +3400,55 @@ Dime lo que necesitas en lenguaje natural:
 🎯 Apuesta siempre con responsabilidad.`, { parse_mode: 'Markdown' });
 });
 
+// ── Admin: debug estructura raw de stats de Highlightly ──────────────────────
+// Uso: /debugstats Real Madrid   (solo funciona para ADMIN_IDS)
+bot.onText(/^\/debugstats(?:\s+(.+))?$/i, async (msg, match) => {
+  const chatId     = msg.chat.id;
+  const telegramId = String(msg.from?.id || chatId);
+  if (!ADMIN_IDS.has(telegramId)) return;
+
+  const teamQuery = (match[1] || '').trim();
+  if (!teamQuery) {
+    return bot.sendMessage(chatId, '⚠️ Uso: /debugstats [nombre del equipo]\nEjemplo: /debugstats Real Madrid');
+  }
+
+  await bot.sendMessage(chatId, `🔍 Buscando "${teamQuery}" en Highlightly...`);
+
+  try {
+    const teamData = await searchTeam(teamQuery);
+    if (!teamData) {
+      return bot.sendMessage(chatId, `❌ No encontré el equipo "${teamQuery}".`);
+    }
+
+    const teamId = teamData.team.id;
+    await bot.sendMessage(chatId, `✅ Equipo: *${teamData.team.name}* (ID: ${teamId})\n🔍 Obteniendo stats...`, { parse_mode: 'Markdown' });
+
+    const { data } = await API.get('/teams/statistics/' + teamId, { params: { fromDate: '2024-06-01' } });
+    const first = Array.isArray(data) ? data[0] : data;
+
+    if (!first) return bot.sendMessage(chatId, '❌ Sin datos de stats para ese equipo.');
+
+    const home = first.home || {};
+    const result = [
+      `📊 *Estructura raw — ${teamData.team.name}*`,
+      `Liga: ${first.leagueName || 'N/D'} | Temporada: ${first.season || 'N/D'}`,
+      ``,
+      `*Claves en home:* \`${Object.keys(home).join(', ')}\``,
+      ``,
+      `*home.games:* \`${JSON.stringify(home.games || {})}\``,
+      `*home.goals:* \`${JSON.stringify(home.goals || {})}\``,
+      `*home.corners:* \`${JSON.stringify(home.corners ?? 'N/A')}\``,
+      `*home.cards:* \`${JSON.stringify(home.cards ?? 'N/A')}\``,
+      `*home.shots:* \`${JSON.stringify(home.shots ?? 'N/A')}\``,
+      `*home.possession:* \`${JSON.stringify(home.possession ?? 'N/A')}\``,
+    ].join('\n');
+
+    await sendLong(chatId, result, { parse_mode: 'Markdown' });
+  } catch (e) {
+    bot.sendMessage(chatId, `❌ Error: ${e.message}`);
+  }
+});
+
 // ─── Main message handler ─────────────────────────────────────────────────────
 
 bot.on('message', async (msg) => {
