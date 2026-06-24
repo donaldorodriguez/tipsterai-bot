@@ -1429,112 +1429,102 @@ async function getApiPrediction(fixtureId) {
   }
 }
 
-// ─── Árbitro: estadísticas de tarjetas desde WorldReferee.com ─────────────────
+// ─── StatsHub — estadísticas de árbitros (fuente única y confiable) ──────────
+const STATSHUB_API = 'https://www.statshub.com/api/referees/list?page=1&limit=500&upcomingFixturesOnly=false&last20GamesOnly=true&leagueStatsOnly=false&sortField=next_game_timestamp&sortDirection=asc';
+let statsHubReferees = [];
+
+function normalizeRefName(name) {
+  return name
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z\s]/g, ' ')
+    .split(/\s+/).filter(Boolean)
+    .sort()
+    .join(' ');
+}
+
+function parseStatsHubApiData(refs) {
+  return refs.map(r => ({
+    nombre:                r.name,
+    normalizado:           normalizeRefName(r.name),
+    partidos:              parseInt(r.games) || null,
+    amarillas_por_partido: parseFloat(r.avg_yellow_cards_per_game) || null,
+    rojas_por_partido:     parseFloat(r.avg_red_cards_per_game) || null,
+    avg_tarjetas:          parseFloat(r.avg_cards_per_game) || null,
+    tarjetas_1T:           parseFloat(r.avg_first_half_cards) || null,
+    tarjetas_2T:           parseFloat(r.avg_second_half_cards) || null,
+    penaltis_por_partido:  (r.total_penalties && r.games)
+                             ? +(parseInt(r.total_penalties) / parseInt(r.games)).toFixed(2) : null,
+    faltas_por_partido:    parseFloat(r.avg_fouls_per_game) || null,
+    pct_over35_tarjetas:   parseFloat(r.o35_cards_pct) || null,
+    pct_over45_tarjetas:   parseFloat(r.o45_cards_pct) || null,
+    pct_over55_tarjetas:   parseFloat(r.o55_cards_pct) || null,
+    pct_btc:               parseFloat(r.both_teams_card_pct) || null,
+    pct_btc2:              parseFloat(r.both_teams_o15_card_pct) || null,
+  }));
+}
+
+async function fetchStatsHubReferees() {
+  try {
+    const res = await axios.get(STATSHUB_API, { timeout: 15000 });
+    const refs = res.data?.data || res.data || [];
+    if (!Array.isArray(refs) || refs.length === 0) return;
+    statsHubReferees = parseStatsHubApiData(refs);
+    console.log(`✅ StatsHub: ${statsHubReferees.length} árbitros cargados`);
+  } catch (e) {
+    console.warn(`⚠️ StatsHub fetch error: ${e.message}`);
+  }
+}
+
+function findStatsHubReferee(refereeName) {
+  if (!refereeName || statsHubReferees.length === 0) return null;
+  const needleTokens = new Set(normalizeRefName(refereeName).split(' '));
+  let best = null, bestScore = 0;
+  for (const ref of statsHubReferees) {
+    const hayTokens = new Set(ref.normalizado.split(' '));
+    const intersection = [...needleTokens].filter(t => hayTokens.has(t)).length;
+    const union = new Set([...needleTokens, ...hayTokens]).size;
+    const score = intersection / union;
+    if (score > bestScore) { bestScore = score; best = ref; }
+  }
+  return bestScore >= 0.35 ? best : null;
+}
+
+// Reemplaza WorldReferee: misma interfaz, datos de StatsHub
 const _refereeStatsCache = new Map();
 
+// Busca árbitro en StatsHub (ya cargado en memoria al startup).
+// Mantiene la misma interfaz que antes para no romper callers existentes.
 async function getRefereeCardStats(name) {
   if (!name) return null;
   if (_refereeStatsCache.has(name)) return _refereeStatsCache.get(name);
 
-  // Highlightly entrega nombre como "Apellido, Nombre" — normalizar a "Nombre Apellido"
-  const normalizedName = name.includes(',')
-    ? name.split(',').map(s => s.trim()).reverse().join(' ')
-    : name;
-
-  const clean = (s) => s.normalize('NFD').replace(/[̀-ͯ]/g, '').toLowerCase().replace(/[^a-z\s]/g, '').trim();
-
-  // WorldReferee usa firstname_lastname con guiones bajos
-  const slugHyphen = clean(normalizedName).replace(/\s+/g, '_');
-  // Fallback: initial-lastname (formato footballan)
-  const slugFallaback = (() => {
-    const parts = clean(normalizedName).split(/\s+/);
-    if (parts.length < 2) return null;
-    return `${parts[0][0]}-${parts[parts.length - 1]}`;
-  })();
-  // También intentar lastname_firstname (orden invertido con underscore)
-  const slugReversed = clean(name.includes(',') ? name : normalizedName)
-    .replace(/,/g, '').replace(/\s+/g, '_');
-
-  console.log(`🃏 getRefereeCardStats "${name}" → slugs: ${slugHyphen} | ${slugFallaback} | ${slugReversed}`);
-
-  const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
-  const HEADERS = { 'User-Agent': UA, 'Accept': 'text/html,application/xhtml+xml', 'Accept-Language': 'en-US,en;q=0.9' };
-
-  const extractFromHtml = (html) => {
-    const text = html.replace(/<script[\s\S]*?<\/script>/gi, '')
-                     .replace(/<style[\s\S]*?<\/style>/gi, '')
-                     .replace(/<[^>]+>/g, ' ')
-                     .replace(/&nbsp;/g, ' ').replace(/&amp;/g, '&')
-                     .replace(/\s+/g, ' ');
-
-    // Patrones universales: buscar número seguido de etiqueta de stat
-    const num = (pattern) => {
-      const m = text.match(pattern);
-      return m ? parseFloat(m[1]) : null;
-    };
-
-    // ── Formato WorldReferee: "N YELLOW CARDS" / "N MATCHES" / "N RED CARDS" ──
-    // El HTML strip deja el número ANTES del label (ej: "0 YELLOW CARDS 1 MATCHES")
-    const totalY  = num(/(\d+)\s+YELLOW\s+CARDS/i);
-    const totalR  = num(/(\d+)\s+RED\s+CARDS/i);
-    const totalM  = num(/(\d+)\s+MATCHES/i)
-                 || num(/(\d+)\s+(?:matches?\s*officiated|games?\s*officiated|total\s*matches?|appearances?)/i);
-    const totalP  = num(/(\d+)\s+PENALTIES/i);
-
-    // ── Formato texto narrativo: "X yellow cards per match" / "yellow cards: X" ──
-    let amarillas = num(/(\d+\.?\d*)\s*(?:yellow\s*cards?\s*per\s*match|yellows?\s*per\s*(?:game|match)|avg\.?\s*yellow)/i)
-                 || num(/yellow\s*cards?\s*[:\-–]\s*(\d+\.?\d*)/i);
-    let rojas     = num(/(\d+\.?\d*)\s*(?:red\s*cards?\s*per\s*match|reds?\s*per\s*(?:game|match)|avg\.?\s*red)/i)
-                 || num(/red\s*cards?\s*[:\-–]\s*(\d+\.?\d*)/i);
-    let partidos  = totalM;
-
-    // Calcular promedio si tenemos totales + partidos
-    if (totalM && totalM > 0) {
-      if (totalY !== null && amarillas === null) amarillas = +(totalY / totalM).toFixed(2);
-      if (totalR !== null && rojas === null)     rojas     = +(totalR / totalM).toFixed(2);
-    }
-
-    // Penaltis
-    const penaltis = totalP != null && totalM > 0
-      ? +(totalP / totalM).toFixed(2)
-      : num(/(\d+\.?\d*)\s*(?:penalt(?:ies|y|is)\s*per\s*(?:match|game)|avg\.?\s*penalt)/i);
-
-    // Necesitamos al menos partidos y alguna stat de tarjetas para que sea útil
-    if (!partidos || partidos < 1) return null;
-    // Árbitro con < 3 partidos en la BD: dato insuficiente para ser confiable
-    if (partidos < 3 && amarillas === null && rojas === null) return null;
-    return {
+  const sh = findStatsHubReferee(name);
+  if (sh) {
+    console.log(`🃏 StatsHub [${name} → ${sh.nombre}]: ${sh.amarillas_por_partido} am/p, ${sh.avg_tarjetas} total/p (${sh.partidos} partidos)`);
+    const result = {
       nombre:                name,
-      partidos:              partidos || null,
-      amarillas_por_partido: amarillas || null,
-      rojas_por_partido:     rojas     || null,
-      ...(penaltis != null && { penaltis_por_partido: penaltis }),
+      partidos:              sh.partidos,
+      amarillas_por_partido: sh.amarillas_por_partido,
+      rojas_por_partido:     sh.rojas_por_partido,
+      avg_tarjetas:          sh.avg_tarjetas,
+      tarjetas_1T:           sh.tarjetas_1T,
+      tarjetas_2T:           sh.tarjetas_2T,
+      penaltis_por_partido:  sh.penaltis_por_partido,
+      faltas_por_partido:    sh.faltas_por_partido,
+      pct_over35_tarjetas:   sh.pct_over35_tarjetas,
+      pct_over45_tarjetas:   sh.pct_over45_tarjetas,
+      pct_over55_tarjetas:   sh.pct_over55_tarjetas,
+      pct_btc:               sh.pct_btc,
+      pct_btc2:              sh.pct_btc2,
+      fuente_stats:          'statshub',
     };
-  };
-
-  // Intentar múltiples fuentes y formatos de slug
-  const attempts = [
-    { source: 'WorldReferee', url: `https://worldreferee.com/referee/${slugHyphen}` },        // jalal_jayed
-    { source: 'WorldReferee-rev', url: `https://worldreferee.com/referee/${slugReversed}` },  // jayed_jalal
-    ...(slugFallaback ? [{ source: 'Footballan', url: `https://footballan.com/referee/${slugFallaback}/` }] : []),
-  ];
-
-  for (const { source, url } of attempts) {
-    try {
-      const { data: html } = await axios.get(url, { headers: HEADERS, timeout: 8000 });
-      if (!html || html.includes('404') || html.toLowerCase().includes('not found')) continue;
-      const stats = extractFromHtml(html);
-      if (stats?.partidos >= 1) {
-        console.log(`🃏 ${source} [${name}]: ${stats.amarillas_por_partido} am/p, ${stats.rojas_por_partido} ro/p (${stats.partidos} partidos)`);
-        _refereeStatsCache.set(name, stats);
-        setTimeout(() => _refereeStatsCache.delete(name), 24 * 3_600_000);
-        return stats;
-      }
-    } catch {}
+    _refereeStatsCache.set(name, result);
+    setTimeout(() => _refereeStatsCache.delete(name), 24 * 3_600_000);
+    return result;
   }
 
-  // 3. Guardar null para no reintentar en la misma sesión
-  console.log(`⚠️ getRefereeCardStats: sin datos para "${name}"`);
+  console.log(`⚠️ StatsHub: sin match para "${name}" (${statsHubReferees.length} árbitros cargados)`);
   _refereeStatsCache.set(name, null);
   return null;
 }
@@ -3021,6 +3011,7 @@ REGLA ABSOLUTA — DATOS Y ESTADÍSTICAS:
 - El campo "_aviso" del JSON es una instrucción de sistema: léela y cúmplela.
 - CONTEXTO DEL PARTIDO: usa ÚNICAMENTE los campos contextoPartido, jornada/round, motivacionLocal/Visitante del JSON. NUNCA uses tu conocimiento de entrenamiento para etiquetar un partido como "final de copa", "playoff por Champions" u otro contexto que no esté explícitamente en los datos. Si el campo jornada dice "Relegation Round" → dilo tal cual. Si no hay contexto claro → describe la situación numérica en tabla sin inventar narrativa.
 - MUESTRA PEQUEÑA DE H2H: si el H2H tiene ≤5 partidos, NUNCA des stake 9 o 10 basándote solo en ese patrón. 5 partidos no es muestra suficiente para alta confianza estadística. Stake máximo con solo H2H de 5 partidos = 7/10.
+- MÁXIMO 1 PICK CON STAKE 9 O 10 POR SESIÓN: en todo el día, solo UN pick puede ser stake 9 o 10. Los demás tienen tope de stake 8. Para stake 9 o 10 DEBES citar la probabilidad exacta del modelo que lo justifica (ej: "probBTTS_Combinada: 81%"). Sin citarla, el máximo es 8.
 
 PICKS QUE NUNCA DAS — aplica estos criterios internamente, sin mencionarlos al usuario:
 - Gana el favorito obvio a cuota menor de 1.80 (gana Bayern, gana Madrid, gana City, gana Barcelona, gana PSG etc)
@@ -3094,11 +3085,12 @@ ${LEAGUE_STATS_CONTEXT}
 
 PROCESO DE ANÁLISIS OBLIGATORIO — BUSCA LOS 3 MEJORES MERCADOS:
 Para BTTS Sí: probBTTS_Combinada > 65%. Ambos equipos con failedToScore < 30%.
+⛔ BTTS VETO DEFENSIVO: Si golesRecibidosHome del equipo local < 0.6 por partido, la defensa local es de élite — el visitante tiene < 25% de probabilidad real de marcar. En ese caso BTTS no tiene valor aunque el atacante promedié alto. Aplica el mismo veto si golesRecibidosAway del visitante < 0.6. SIEMPRE verifica el dato defensivo ANTES de recomendar BTTS.
 Para BTTS No: failedToScore de algún equipo > 40% en su contexto (casa/fuera).
 Para Over/Under goles: usa probOver25, probOver35. Over si prob > 65% con EV positivo.
 Para Portería a cero local: golesRecibidosHome < 0.8/p AND cleanSheets > 40% en casa.
 Para Portería a cero visitante: golesRecibidosAway < 0.8/p AND cleanSheets > 35% fuera.
-Para Corners total: suma promedios cornersHome + cornersAway. Over si suma supera línea +1.5.
+Para Corners total: usa "cornersLambda" del bloque probabilidades — es la proyección matemática real basada en xG. Si cornersLambda > 10.5: Over 9.5 con valor. Si cornersOver95 < 55%: stake máximo 7 para corners. NUNCA uses un número de corners que no provenga de cornersLambda en los datos.
 Para Corners equipo específico: si un equipo promedia +5.5 córners en su contexto → Over equipo X.
 Para Tarjetas total: suma amarillasPorPartido ambos equipos. Over si supera línea +1.0.
 Para Tarjetas equipo específico: si un equipo promedia > 2.0 tarjetas en su contexto.
@@ -8227,3 +8219,7 @@ app.listen(WEBHOOK_PORT, '0.0.0.0', () => {
   console.log(`   POST http://localhost:${WEBHOOK_PORT}/webhook/whop`);
   console.log(`   POST http://localhost:${WEBHOOK_PORT}/webhook/wompi`);
 });
+
+// Auto-fetch árbitros de StatsHub al arrancar y cada 6 horas
+fetchStatsHubReferees();
+setInterval(fetchStatsHubReferees, 6 * 60 * 60 * 1000);
