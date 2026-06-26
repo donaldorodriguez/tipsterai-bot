@@ -4466,6 +4466,17 @@ function saveAlertaGolPicks(alerts) {
   }
 }
 
+async function fetchMatchById(fixtureId) {
+  try {
+    const { data } = await API.get('/matches/' + fixtureId);
+    const raw = Array.isArray(data)           ? data
+      : Array.isArray(data?.data)             ? data.data
+      : data?.data && typeof data.data === 'object' ? [data.data]
+      : [data];
+    return raw[0] || null;
+  } catch { return null; }
+}
+
 async function evaluatePendingPicks() {
   // Fuente primaria: Airtable (sobrevive deploys). Fallback: JSON local.
   let picks;
@@ -4482,14 +4493,10 @@ async function evaluatePendingPicks() {
   const fixtureIds = [...new Set(pending.map(p => p.fixtureId))];
   const fixtureMap = {};
 
+  // Usar GET /matches/{id} directo — más confiable que buscar por fecha para historiales
   await Promise.allSettled(fixtureIds.map(async (fid) => {
-    const pick = pending.find(p => p.fixtureId === fid);
-    // fecha es la fecha del partido (el pick se emite el mismo día)
-    const date = pick.fecha || pick.fechaPartido?.split('T')[0];
-    if (!date) return;
     try {
-      const allMatches = await fetchFixturesByDate(date);
-      const m = allMatches.find(match => match.id === Number(fid));
+      const m = await fetchMatchById(fid);
       if (m && FINISHED_DESCS.has(m.state?.description)) {
         const f = hlToApif(m);
         const stats = await getFixtureStatistics(fid).catch(() => null);
@@ -4525,13 +4532,16 @@ async function evaluatePendingPicks() {
 async function handleEstadisticas(chatId, period = 'hoy') {
   await bot.sendMessage(chatId, '📊 Evaluando resultados de tus picks...');
 
-  // Preferir Airtable (sobrevive deploys); fallback a JSON local
+  // Siempre evaluar picks pendientes primero (actualiza Airtable con resultados reales)
+  await evaluatePendingPicks().catch(e => console.error('evaluatePendingPicks:', e.message));
+
+  // Leer picks actualizados desde Airtable (o JSON local si no hay Airtable)
   let allPicks;
   if (process.env.AIRTABLE_API_KEY) {
     allPicks = await getPicksFromAirtable(period).catch(() => null);
-    if (!allPicks || !allPicks.length) allPicks = await evaluatePendingPicks();
-  } else {
-    allPicks = await evaluatePendingPicks();
+  }
+  if (!allPicks || !allPicks.length) {
+    allPicks = loadPicks();
   }
 
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
