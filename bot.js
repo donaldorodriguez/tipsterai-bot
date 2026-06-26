@@ -7885,6 +7885,34 @@ bot.onText(/\/debugevaluar/, async (msg) => {
   }
 });
 
+// ─── Command: /debugstats {fixtureId} — muestra displayNames crudos de Highlightly ─
+bot.onText(/\/debugstats(?:\s+(\d+))?/, async (msg, match) => {
+  const telegramId = String(msg.from.id);
+  if (!ADMIN_IDS.has(telegramId)) return;
+  const chatId = String(msg.chat.id);
+  const fixtureId = match?.[1];
+  if (!fixtureId) {
+    await bot.sendMessage(chatId, '❓ Uso: /debugstats {fixtureId}\nEjemplo: /debugstats 1309699145');
+    return;
+  }
+  try {
+    const { data } = await API.get('/statistics/' + fixtureId);
+    if (!data || data.length === 0) {
+      await bot.sendMessage(chatId, `⚠️ Fixture ${fixtureId}: sin estadísticas`);
+      return;
+    }
+    for (const teamData of data) {
+      const lines = teamData.statistics.map(s => `${s.displayName}: ${s.value}`).join('\n');
+      await bot.sendMessage(chatId,
+        `📊 *${teamData.team.name}*\n\`\`\`\n${lines}\n\`\`\``,
+        { parse_mode: 'Markdown' }
+      );
+    }
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ Error: ${e.message}`);
+  }
+});
+
 // ─── Command: /zcode-status ───────────────────────────────────────────────────
 bot.onText(/\/zcode[-_]?status/, async (msg) => {
   const telegramId = String(msg.from.id);
