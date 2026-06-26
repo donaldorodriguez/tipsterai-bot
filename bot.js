@@ -4473,8 +4473,14 @@ async function fetchMatchById(fixtureId) {
       : Array.isArray(data?.data)             ? data.data
       : data?.data && typeof data.data === 'object' ? [data.data]
       : [data];
-    return raw[0] || null;
-  } catch { return null; }
+    const m = raw[0] || null;
+    if (m) console.log(`🔍 fetchMatchById(${fixtureId}): state="${m.state?.description}" score="${m.state?.score?.current}" home="${m.homeTeam?.name}" away="${m.awayTeam?.name}"`);
+    else    console.log(`🔍 fetchMatchById(${fixtureId}): respuesta vacía o nula`);
+    return m;
+  } catch (e) {
+    console.log(`🔍 fetchMatchById(${fixtureId}): error ${e.message}`);
+    return null;
+  }
 }
 
 async function evaluatePendingPicks() {
@@ -4488,9 +4494,11 @@ async function evaluatePendingPicks() {
   }
 
   const pending = picks.filter(p => (!p.resultado || p.resultado === '?') && p.fixtureId);
+  console.log(`📊 evaluatePendingPicks: ${picks.length} total | ${pending.length} pendientes con fixtureId`);
   if (!pending.length) return picks;
 
   const fixtureIds = [...new Set(pending.map(p => p.fixtureId))];
+  console.log(`📊 Fixtures a evaluar: ${fixtureIds.join(', ')}`);
   const fixtureMap = {};
 
   // Usar GET /matches/{id} directo — más confiable que buscar por fecha para historiales
@@ -4501,8 +4509,13 @@ async function evaluatePendingPicks() {
         const f = hlToApif(m);
         const stats = await getFixtureStatistics(fid).catch(() => null);
         fixtureMap[fid] = { fixture: f, stats };
+        console.log(`✅ Fixture ${fid} terminado: ${f.goals?.home}-${f.goals?.away}`);
+      } else if (m) {
+        console.log(`⏳ Fixture ${fid} aún no terminado: state="${m.state?.description}"`);
       }
-    } catch {}
+    } catch (e) {
+      console.log(`❌ Error fixture ${fid}: ${e.message}`);
+    }
   }));
 
   const actualizados = [];
@@ -7764,6 +7777,43 @@ bot.onText(/\/api[-_]?debug/, async (msg) => {
     const all4 = r4.data.response || [];
     await bot.sendMessage(chatId, `🏆 league=9 (sin season) date=${today} → ${all4.length} fixtures\n${all4.slice(0,5).map(f => `▸ ${f.teams.home.name} vs ${f.teams.away.name} | ${f.league.season}`).join('\n') || '(ninguno)'}`);
 
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ Error: ${e.message}`);
+  }
+});
+
+// ─── Command: /debugevaluar — muestra raw de Highlightly para picks pendientes ─
+bot.onText(/\/debugevaluar/, async (msg) => {
+  const telegramId = String(msg.from.id);
+  if (!ADMIN_IDS.has(telegramId)) return;
+  const chatId = String(msg.chat.id);
+
+  await bot.sendMessage(chatId, '🔍 Revisando picks pendientes en Airtable...');
+  try {
+    const picks = await getPicksFromAirtable('total').catch(() => []);
+    const pending = picks.filter(p => (!p.resultado || p.resultado === '?') && p.fixtureId);
+    const fixtureIds = [...new Set(pending.map(p => p.fixtureId))];
+
+    await bot.sendMessage(chatId,
+      `📊 Total Airtable: ${picks.length} | Pendientes con fixtureId: ${pending.length} | Fixtures únicos: ${fixtureIds.length}\n` +
+      `Sin fixtureId: ${picks.filter(p => (!p.resultado || p.resultado === '?') && !p.fixtureId).length}`
+    );
+
+    // Probar los primeros 5 fixtures
+    for (const fid of fixtureIds.slice(0, 5)) {
+      try {
+        const { data } = await API.get('/matches/' + fid);
+        const raw = Array.isArray(data) ? data : Array.isArray(data?.data) ? data.data : [data?.data || data];
+        const m = raw[0];
+        const info = m
+          ? `state="${m.state?.description}" | score="${m.state?.score?.current}" | ${m.homeTeam?.name} vs ${m.awayTeam?.name}`
+          : `respuesta vacía`;
+        const esTerminado = m && FINISHED_DESCS.has(m.state?.description);
+        await bot.sendMessage(chatId, `${esTerminado ? '✅' : '⏳'} Fixture ${fid}:\n${info}`);
+      } catch (e) {
+        await bot.sendMessage(chatId, `❌ Fixture ${fid}: ${e.message}`);
+      }
+    }
   } catch (e) {
     await bot.sendMessage(chatId, `❌ Error: ${e.message}`);
   }
