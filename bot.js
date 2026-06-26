@@ -4422,6 +4422,64 @@ async function evaluatePickResult(pick, fixture, stats) {
     if (pick.mercado === 'UNDER_CARDS') return totalCards < linea ? 'W' : 'L';
   }
 
+  // ── Fallback texto: cuando mercado=OTHER o linea=null, extraer del campo seleccion ──
+  // Cubre picks donde Claude extractor no mapeó correctamente el mercado o la línea.
+  const lineaRegex = /(\d+[.,]\d+|\d+)/;
+  const parseLinea = (txt) => { const m = txt.match(lineaRegex); return m ? parseFloat(m[1].replace(',', '.')) : null; };
+
+  // Goles over/under
+  const overGoalMatch  = sel.match(/(?:over|más de|mas de)\s+(\d+[.,]\d+)\s*(?:goles?|goals?)/i);
+  const underGoalMatch = sel.match(/(?:under|menos de)\s+(\d+[.,]\d+)\s*(?:goles?|goals?)/i);
+  if (overGoalMatch)  { const l = parseFloat(overGoalMatch[1].replace(',','.')); return total > l ? 'W' : 'L'; }
+  if (underGoalMatch) { const l = parseFloat(underGoalMatch[1].replace(',','.')); return total < l ? 'W' : 'L'; }
+
+  // Segunda mitad goles
+  const ht2OverMatch  = sel.match(/(?:over|más de|mas de)\s+(\d+[.,]\d+)\s*(?:goles?.*(?:2[°º]?|segundo)\s*tiempo|segundo\s*tiempo.*goles?)/i);
+  const ht2UnderMatch = sel.match(/(?:under|menos de)\s+(\d+[.,]\d+)\s*(?:goles?.*(?:2[°º]?|segundo)\s*tiempo|segundo\s*tiempo.*goles?)/i);
+  if (ht2OverMatch || ht2UnderMatch) return '?'; // necesita marcador 2T, no disponible
+
+  // Corners over/under
+  if (stats) {
+    const cornersHome = homeStats(stats)?.['Corner Kicks'] ?? null;
+    const cornersAway = awayStats(stats)?.['Corner Kicks'] ?? null;
+    if (cornersHome != null && cornersAway != null) {
+      const tc = cornersHome + cornersAway;
+      const overCornMatch  = sel.match(/(?:over|más de|mas de)\s+(\d+[.,]\d+)\s*(?:c[oó]rners?|esquinas?)/i);
+      const underCornMatch = sel.match(/(?:under|menos de|bajo)\s+(\d+[.,]\d+)\s*(?:c[oó]rners?|esquinas?)/i);
+      if (overCornMatch)  { const l = parseFloat(overCornMatch[1].replace(',','.')); return tc > l ? 'W' : 'L'; }
+      if (underCornMatch) { const l = parseFloat(underCornMatch[1].replace(',','.')); return tc < l ? 'W' : 'L'; }
+    }
+
+    // Tarjetas over/under
+    const cardsHome = (homeStats(stats)?.['Yellow Cards'] ?? 0) + (homeStats(stats)?.['Red Cards'] ?? 0);
+    const cardsAway = (awayStats(stats)?.['Yellow Cards'] ?? 0) + (awayStats(stats)?.['Red Cards'] ?? 0);
+    const tc2 = cardsHome + cardsAway;
+    const overCardsMatch  = sel.match(/(?:over|más de|mas de)\s+(\d+[.,]\d+)\s*(?:tarjetas?|cards?|amarillas?)/i);
+    const underCardsMatch = sel.match(/(?:under|menos de)\s+(\d+[.,]\d+)\s*(?:tarjetas?|cards?|amarillas?)/i);
+    if (overCardsMatch)  { const l = parseFloat(overCardsMatch[1].replace(',','.')); return tc2 > l ? 'W' : 'L'; }
+    if (underCardsMatch) { const l = parseFloat(underCardsMatch[1].replace(',','.')); return tc2 < l ? 'W' : 'L'; }
+
+    // Tarjeta en 2T
+    const tarj2TMatch = sel.match(/tarjeta.*segundo\s*tiempo|segundo\s*tiempo.*tarjeta/i);
+    if (tarj2TMatch) return '?'; // no hay marcador 2T por partido
+  }
+
+  // DNB inferido del texto
+  if (/dnb|empate\s+devuelve/i.test(sel)) {
+    const esLocal    = /\b(local|home)\b/i.test(sel) || new RegExp(pick.local || 'NADA', 'i').test(sel);
+    const esVisitante = /\b(visitante|away)\b/i.test(sel) || new RegExp(pick.visitante || 'NADA', 'i').test(sel);
+    if (esLocal) {
+      if (goalsHome > goalsAway) return 'W';
+      if (goalsHome === goalsAway) return 'V';
+      return 'L';
+    }
+    if (esVisitante) {
+      if (goalsAway > goalsHome) return 'W';
+      if (goalsHome === goalsAway) return 'V';
+      return 'L';
+    }
+  }
+
   return '?'; // can't determine automatically
 }
 
