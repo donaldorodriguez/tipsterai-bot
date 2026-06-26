@@ -7897,19 +7897,20 @@ bot.onText(/\/debugstats(?:\s+(\d+))?/, async (msg, match) => {
   }
   try {
     const { data } = await API.get('/statistics/' + fixtureId);
-    if (!data || data.length === 0) {
+    const arr = Array.isArray(data) ? data : (data?.data || []);
+    if (!arr.length) {
       await bot.sendMessage(chatId, `⚠️ Fixture ${fixtureId}: sin estadísticas`);
       return;
     }
-    for (const teamData of data) {
-      const lines = teamData.statistics.map(s => `${s.displayName}: ${s.value}`).join('\n');
-      await bot.sendMessage(chatId,
-        `📊 *${teamData.team.name}*\n\`\`\`\n${lines}\n\`\`\``,
-        { parse_mode: 'Markdown' }
-      );
+    for (const teamData of arr) {
+      const teamName = teamData.team?.name || teamData.teamName || '(equipo)';
+      const stats = teamData.statistics || [];
+      const lines = stats.map(s => `${s.displayName}: ${s.value}`).join('\n');
+      const msg = `📊 ${teamName}\n\n${lines || '(sin campos)'}`;
+      await bot.sendMessage(chatId, msg.slice(0, 4000));
     }
   } catch (e) {
-    await bot.sendMessage(chatId, `❌ Error: ${e.message}`);
+    await bot.sendMessage(chatId, `Error: ${e.message}`);
   }
 });
 
