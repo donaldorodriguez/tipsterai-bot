@@ -4422,55 +4422,53 @@ async function evaluatePickResult(pick, fixture, stats) {
     if (pick.mercado === 'UNDER_CARDS') return totalCards < linea ? 'W' : 'L';
   }
 
-  // ── Fallback texto: cuando mercado=OTHER o linea=null, extraer del campo seleccion ──
-  // Cubre picks donde Claude extractor no mapeó correctamente el mercado o la línea.
-  const lineaRegex = /(\d+[.,]\d+|\d+)/;
-  const parseLinea = (txt) => { const m = txt.match(lineaRegex); return m ? parseFloat(m[1].replace(',', '.')) : null; };
+  // ── Fallback texto: evalúa por contexto del mercado antes de aplicar la fórmula ──
+  // Detectar el tipo de pick por palabras clave ANTES de intentar evaluar,
+  // para evitar que "Corners Over 9.5" sea evaluado como goles Over 9.5.
+  const esCornerPick = /c[oó]rners?|esquinas?/i.test(sel);
+  const esTarjetaPick = /tarjetas?|cards?|amarillas?|rojas?\s+card/i.test(sel);
+  const es1T = /1er?\s*tiempo|primer\s*tiempo|half\s*time|\bht\b|\b1t\b/i.test(sel);
+  const es2T = /2[°º]?\s*tiempo|segundo\s*tiempo|\b2t\b/i.test(sel);
 
-  // Goles over/under — ambos órdenes: "Over 2.5 goles FT" y "goles Over 2.5"
-  // También captura "Under 3.5 FT" (sin mencionar "goles" explícitamente)
-  const overGoalMatch  = sel.match(/(?:over|más de|mas de)\s+(\d+[.,]\d+)\s*(?:goles?|goals?|ft\b)?/i) ||
-                         sel.match(/(?:goles?|goals?)\s+(?:over|más de|mas de)\s+(\d+[.,]\d+)/i);
-  const underGoalMatch = sel.match(/(?:under|menos de)\s+(\d+[.,]\d+)\s*(?:goles?|goals?|ft\b|total)?/i) ||
-                         sel.match(/(?:goles?|goals?)\s+(?:under|menos de)\s+(\d+[.,]\d+)/i);
-
-  // Primero filtrar picks que necesitan marcador de 1T o 2T — no son goles FT
-  const es1T = /1er?\s*tiempo|primer\s*tiempo|half\s*time|ht\b|1t\b/i.test(sel);
-  const es2T = /2[°º]?\s*tiempo|segundo\s*tiempo|2t\b/i.test(sel);
-  if (!es1T && !es2T) {
-    if (overGoalMatch)  { const l = parseFloat((overGoalMatch[1]||overGoalMatch[1]).replace(',','.')); return total > l ? 'W' : 'L'; }
-    if (underGoalMatch) { const l = parseFloat((underGoalMatch[1]||underGoalMatch[1]).replace(',','.')); return total < l ? 'W' : 'L'; }
-  }
-  if (es1T || es2T) return '?'; // necesita marcador de tiempo parcial, no disponible
-
-  // Corners over/under — ambos órdenes: "Over 9.5 corners" y "Corners Over 9.5"
-  if (stats) {
+  // 1. Corners — se evalúan primero para no confundirse con goles
+  if (esCornerPick && stats) {
     const cornersHome = homeStats(stats)?.['Corner Kicks'] ?? null;
     const cornersAway = awayStats(stats)?.['Corner Kicks'] ?? null;
     if (cornersHome != null && cornersAway != null) {
       const tc = cornersHome + cornersAway;
-      const overCornMatch  = sel.match(/(?:over|más de|mas de)\s+(\d+[.,]\d+)\s*(?:c[oó]rners?|esquinas?)/i) ||
+      const overCornMatch  = sel.match(/(?:over|más de|mas de)\s+(\d+[.,]\d+)\s*(?:c[oó]rners?|esquinas?)?/i) ||
                              sel.match(/(?:c[oó]rners?|esquinas?)\s+(?:over|más de|mas de)\s+(\d+[.,]\d+)/i);
-      const underCornMatch = sel.match(/(?:under|menos de|bajo)\s+(\d+[.,]\d+)\s*(?:c[oó]rners?|esquinas?)/i) ||
+      const underCornMatch = sel.match(/(?:under|menos de|bajo)\s+(\d+[.,]\d+)\s*(?:c[oó]rners?|esquinas?)?/i) ||
                              sel.match(/(?:c[oó]rners?|esquinas?)\s+(?:under|menos de|bajo)\s+(\d+[.,]\d+)/i);
       if (overCornMatch)  { const l = parseFloat(overCornMatch[1].replace(',','.')); return tc > l ? 'W' : 'L'; }
       if (underCornMatch) { const l = parseFloat(underCornMatch[1].replace(',','.')); return tc < l ? 'W' : 'L'; }
     }
+    return '?';
+  }
 
-    // Tarjetas over/under — ambos órdenes: "Over 2.5 tarjetas" y "Tarjetas Over 2.5"
+  // 2. Tarjetas
+  if (esTarjetaPick && stats) {
     const cardsHome = (homeStats(stats)?.['Yellow Cards'] ?? 0) + (homeStats(stats)?.['Red Cards'] ?? 0);
     const cardsAway = (awayStats(stats)?.['Yellow Cards'] ?? 0) + (awayStats(stats)?.['Red Cards'] ?? 0);
     const tc2 = cardsHome + cardsAway;
-    const overCardsMatch  = sel.match(/(?:over|más de|mas de)\s+(\d+[.,]\d+)\s*(?:tarjetas?|cards?|amarillas?)/i) ||
+    if (/al menos\s+1\s+tarjeta|at least\s+1\s+card/i.test(sel)) return tc2 >= 1 ? 'W' : 'L';
+    const overCardsMatch  = sel.match(/(?:over|más de|mas de)\s+(\d+[.,]\d+)\s*(?:tarjetas?|cards?|amarillas?)?/i) ||
                             sel.match(/(?:tarjetas?|cards?|amarillas?)\s+(?:over|más de|mas de)\s+(\d+[.,]\d+)/i);
-    const underCardsMatch = sel.match(/(?:under|menos de)\s+(\d+[.,]\d+)\s*(?:tarjetas?|cards?|amarillas?)/i) ||
+    const underCardsMatch = sel.match(/(?:under|menos de)\s+(\d+[.,]\d+)\s*(?:tarjetas?|cards?|amarillas?)?/i) ||
                             sel.match(/(?:tarjetas?|cards?|amarillas?)\s+(?:under|menos de)\s+(\d+[.,]\d+)/i);
     if (overCardsMatch)  { const l = parseFloat(overCardsMatch[1].replace(',','.')); return tc2 > l ? 'W' : 'L'; }
     if (underCardsMatch) { const l = parseFloat(underCardsMatch[1].replace(',','.')); return tc2 < l ? 'W' : 'L'; }
-
-    // "Al menos 1 tarjeta" — Over 0.5 tarjetas
-    if (/al menos\s+1\s+tarjeta|at least\s+1\s+card/i.test(sel)) return tc2 >= 1 ? 'W' : 'L';
+    return '?';
   }
+
+  // 3. Goles — solo si NO es pick de corners ni tarjetas, y no es 1T/2T
+  if (es1T || es2T) return '?';
+  const overGoalMatch  = sel.match(/(?:over|más de|mas de)\s+(\d+[.,]\d+)\s*(?:goles?|goals?|ft\b|total)?/i) ||
+                         sel.match(/(?:goles?|goals?)\s+(?:over|más de|mas de)\s+(\d+[.,]\d+)/i);
+  const underGoalMatch = sel.match(/(?:under|menos de)\s+(\d+[.,]\d+)\s*(?:goles?|goals?|ft\b|total)?/i) ||
+                         sel.match(/(?:goles?|goals?)\s+(?:under|menos de)\s+(\d+[.,]\d+)/i);
+  if (overGoalMatch)  { const l = parseFloat(overGoalMatch[1].replace(',','.')); return total > l ? 'W' : 'L'; }
+  if (underGoalMatch) { const l = parseFloat(underGoalMatch[1].replace(',','.')); return total < l ? 'W' : 'L'; }
 
   // DNB inferido del texto
   if (/dnb|empate\s+devuelve/i.test(sel)) {
@@ -4559,8 +4557,16 @@ async function evaluatePendingPicks() {
     picks = loadPicks();
   }
 
-  const pending = picks.filter(p => (!p.resultado || p.resultado === '?') && p.fixtureId);
-  console.log(`📊 evaluatePendingPicks: ${picks.length} total | ${pending.length} pendientes con fixtureId`);
+  // Re-evaluar también picks recientes (últimos 7 días) con W/L por si fueron mal evaluados.
+  // Solo afecta picks dentro de la ventana de corrección para no cambiar resultados históricos.
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 7);
+  const pending = picks.filter(p => {
+    if (!p.fixtureId) return false;
+    if (!p.resultado || p.resultado === '?') return true;
+    if (['W', 'L', 'V'].includes(p.resultado) && p.emitidoAt && new Date(p.emitidoAt) >= cutoff) return true;
+    return false;
+  });
+  console.log(`📊 evaluatePendingPicks: ${picks.length} total | ${pending.length} a evaluar (pendientes + recientes)`);
   if (!pending.length) return picks;
 
   const fixtureIds = [...new Set(pending.map(p => p.fixtureId))];
