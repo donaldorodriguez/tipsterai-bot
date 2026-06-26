@@ -4195,47 +4195,66 @@ async function extractPicksFromText(analysisText, matchesCtx) {
 
 async function recordPicks(analysisText, matchesCtx) {
   if (!analysisText || !matchesCtx.length) return;
-  if (analysisText.trimStart().startsWith('⛔')) return; // sin picks válidos, no gastar tokens
+  if (analysisText.trimStart().startsWith('⛔')) return;
   try {
     const extracted = await extractPicksFromText(analysisText, matchesCtx);
     if (!extracted.length) { console.log('📝 No se extrajeron picks estructurados'); return; }
 
-    const existing = loadPicks();
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
 
-    const newPicks = extracted.map(p => {
-      // Match pick to a fixture from context
-      const matched = matchesCtx.find(m =>
-        m.local.toLowerCase().includes((p.local || '').toLowerCase().split(' ')[0]) ||
-        m.visitante.toLowerCase().includes((p.visitante || '').toLowerCase().split(' ')[0]) ||
-        (p.local || '').toLowerCase().includes(m.local.toLowerCase().split(' ')[0])
-      );
-      return {
-        id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        emitidoAt: new Date().toISOString(),
-        fecha: today,
-        fixtureId: matched?.fixtureId || null,
-        fechaPartido: matched?.fechaPartido || null,
-        liga: matched?.liga || p.liga || null,
-        local: p.local,
-        visitante: p.visitante,
-        mercado: p.mercado,
-        seleccion: p.seleccion,
-        linea: p.linea ?? null,
-        handicap: p.handicap ?? null,
-        cuota: p.cuota ?? null,
-        stake: p.stake ?? null,
-        esCombinada: p.esCombinada || false,
-        resultado: null,
-        scoresFinal: null,
-      };
-    });
+    // Cargar picks existentes de HOY desde Airtable para evitar duplicados entre sesiones/deploys
+    const existingAirtable = process.env.AIRTABLE_API_KEY
+      ? await getPicksFromAirtable('hoy').catch(() => [])
+      : [];
+    const existingLocal = loadPicks();
 
-    const allPicks = [...existing, ...newPicks];
-    persistPicks(allPicks);
-    console.log(`📝 ${newPicks.length} picks guardados en picks.json`);
-    // Guardar también en Airtable (no bloquea si falla)
-    savePicksToAirtable(allPicks).catch(e => console.warn('Airtable picks:', e.message));
+    // Clave de dedup: fecha + local + visitante + mercado
+    const existingKeys = new Set([
+      ...existingAirtable.map(p => `${p.fecha}|${(p.local||'').toLowerCase()}|${(p.visitante||'').toLowerCase()}|${p.mercado}`),
+      ...existingLocal.map(p =>    `${p.fecha}|${(p.local||'').toLowerCase()}|${(p.visitante||'').toLowerCase()}|${p.mercado}`),
+    ]);
+
+    const newPicks = extracted
+      .map(p => {
+        const matched = matchesCtx.find(m =>
+          m.local.toLowerCase().includes((p.local || '').toLowerCase().split(' ')[0]) ||
+          m.visitante.toLowerCase().includes((p.visitante || '').toLowerCase().split(' ')[0]) ||
+          (p.local || '').toLowerCase().includes(m.local.toLowerCase().split(' ')[0])
+        );
+        return {
+          id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          emitidoAt: new Date().toISOString(),
+          fecha: today,
+          fixtureId: matched?.fixtureId || null,
+          fechaPartido: matched?.fechaPartido || null,
+          liga: matched?.liga || p.liga || null,
+          local: p.local,
+          visitante: p.visitante,
+          mercado: p.mercado,
+          seleccion: p.seleccion,
+          linea: p.linea ?? null,
+          handicap: p.handicap ?? null,
+          cuota: p.cuota ?? null,
+          stake: p.stake ?? null,
+          esCombinada: p.esCombinada || false,
+          resultado: '?',
+          scoresFinal: null,
+        };
+      })
+      .filter(p => {
+        const key = `${p.fecha}|${(p.local||'').toLowerCase()}|${(p.visitante||'').toLowerCase()}|${p.mercado}`;
+        return !existingKeys.has(key);
+      });
+
+    if (!newPicks.length) {
+      console.log('📝 Picks ya registrados hoy — sin duplicados');
+      return;
+    }
+
+    persistPicks([...existingLocal, ...newPicks]);
+    console.log(`📝 ${newPicks.length} picks nuevos guardados`);
+    // Solo guardar picks NUEVOS en Airtable (ya no los existentes)
+    savePicksToAirtable(newPicks).catch(e => console.warn('Airtable picks:', e.message));
   } catch (e) {
     console.error('recordPicks error:', e.message);
   }
@@ -4367,8 +4386,16 @@ function saveAlertaGolPicks(alerts) {
 }
 
 async function evaluatePendingPicks() {
-  const picks = loadPicks();
-  const pending = picks.filter(p => p.resultado === null && p.fixtureId);
+  // Fuente primaria: Airtable (sobrevive deploys). Fallback: JSON local.
+  let picks;
+  if (process.env.AIRTABLE_API_KEY) {
+    const fromAirtable = await getPicksFromAirtable('total').catch(() => []);
+    picks = fromAirtable.length ? fromAirtable : loadPicks();
+  } else {
+    picks = loadPicks();
+  }
+
+  const pending = picks.filter(p => (!p.resultado || p.resultado === '?') && p.fixtureId);
   if (!pending.length) return picks;
 
   const fixtureIds = [...new Set(pending.map(p => p.fixtureId))];
@@ -4376,11 +4403,12 @@ async function evaluatePendingPicks() {
 
   await Promise.allSettled(fixtureIds.map(async (fid) => {
     const pick = pending.find(p => p.fixtureId === fid);
-    if (!pick?.fechaPartido) return;
-    const date = pick.fechaPartido.split('T')[0];
+    // fecha es la fecha del partido (el pick se emite el mismo día)
+    const date = pick.fecha || pick.fechaPartido?.split('T')[0];
+    if (!date) return;
     try {
       const allMatches = await fetchFixturesByDate(date);
-      const m = allMatches.find(match => match.id === fid);
+      const m = allMatches.find(match => match.id === Number(fid));
       if (m && FINISHED_DESCS.has(m.state?.description)) {
         const f = hlToApif(m);
         const stats = await getFixtureStatistics(fid).catch(() => null);
@@ -4391,7 +4419,7 @@ async function evaluatePendingPicks() {
 
   const actualizados = [];
   for (const pick of picks) {
-    if (pick.resultado !== null || !pick.fixtureId) continue;
+    if ((pick.resultado && pick.resultado !== '?') || !pick.fixtureId) continue;
     const entry = fixtureMap[pick.fixtureId];
     if (!entry) continue;
     pick.resultado = await evaluatePickResult(pick, entry.fixture, entry.stats);
@@ -4400,10 +4428,15 @@ async function evaluatePendingPicks() {
     actualizados.push(pick);
   }
 
-  persistPicks(picks);
-  for (const pick of actualizados) {
-    updatePickResultInAirtable(pick._airtableId, pick.resultado, pick.scoresFinal).catch(() => {});
-    updatePickInAirtable(pick).catch(() => {}); // compatibilidad hacia atrás
+  if (actualizados.length) {
+    persistPicks(picks.filter(p => !p._airtableId)); // solo persiste picks locales
+    for (const pick of actualizados) {
+      if (pick._airtableId) {
+        updatePickResultInAirtable(pick._airtableId, pick.resultado, pick.scoresFinal).catch(() => {});
+      } else {
+        updatePickInAirtable(pick).catch(() => {}); // fallback picks locales sin ID Airtable
+      }
+    }
   }
   return picks;
 }
