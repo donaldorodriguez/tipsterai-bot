@@ -4193,6 +4193,87 @@ async function extractPicksFromText(analysisText, matchesCtx) {
   } catch { return []; }
 }
 
+// Gate matemático de stake: compara el stake del LLM contra la prob real calculada.
+// Si el LLM infló el stake, lo baja al máximo que los números soportan.
+const STAKE_PROB_THRESHOLDS = { 10: 80, 9: 75, 8: 70, 7: 65, 6: 60 };
+const STAKE_CUOTA_MIN       = { 10: 1.85, 9: 1.75, 8: 1.65, 7: 1.55, 6: 1.50 };
+
+function validateStake(pick, probBlock) {
+  const claimed = pick.stake;
+  if (!claimed) return claimed;
+
+  // Corners no tienen probabilidad calculada pre-partido — cap fijo a 7
+  if (['CORNERS_OVER', 'CORNERS_UNDER', 'OVER_CORNERS', 'UNDER_CORNERS'].includes(pick.mercado)) {
+    return Math.min(claimed, 7);
+  }
+
+  if (!probBlock) return claimed;
+
+  const probs = probBlock.modeloPoisson || {};
+  const overProb = pick.linea >= 3 ? parseFloat(probs.probOver35) : parseFloat(probs.probOver25);
+  const marketProb = {
+    BTTS_YES:    parseFloat(probs.probBTTS_Combinada),
+    BTTS_NO:     100 - parseFloat(probs.probBTTS_Combinada),
+    OVER_GOALS:  overProb,
+    UNDER_GOALS: 100 - overProb,
+    HOME_WIN:    parseFloat(probs.probLocalGana),
+    AWAY_WIN:    parseFloat(probs.probVisitanteGana),
+    DRAW:        parseFloat(probs.probEmpate),
+  }[pick.mercado];
+
+  if (!marketProb || isNaN(marketProb)) return claimed;
+
+  const cuotaOk = !pick.cuota || pick.cuota >= (STAKE_CUOTA_MIN[claimed] || 0);
+
+  for (const [s, threshold] of Object.entries(STAKE_PROB_THRESHOLDS).sort((a,b) => b[0]-a[0])) {
+    const stk = parseInt(s);
+    if (marketProb >= threshold && cuotaOk) return Math.min(claimed, stk);
+    if (marketProb >= threshold) return Math.min(claimed, stk - 1);
+  }
+  return Math.min(claimed, 6);
+}
+
+// Valida y corrige stakes ANTES de publicar el mensaje.
+// Ejecuta el gate matemático + regla de máximo 1 stake 9+/10 por sesión.
+async function applyStakeGate(picksText, enriched, matchesCtx) {
+  try {
+    const extracted = await extractPicksFromText(picksText, matchesCtx);
+    if (!extracted.length) return picksText;
+
+    let correctedText = picksText;
+    let highStakeCount = 0;
+
+    for (const p of extracted.filter(x => !x.esCombinada)) {
+      const f = enriched.find(e =>
+        e.local?.toLowerCase().includes((p.local || '').toLowerCase().split(' ')[0]) ||
+        e.visitante?.toLowerCase().includes((p.visitante || '').toLowerCase().split(' ')[0])
+      );
+
+      let stakeValidado = validateStake(p, f?.probabilidadesCalculadas);
+
+      // Máximo 1 pick con stake 9 o 10 por sesión
+      if (stakeValidado >= 9) {
+        if (highStakeCount > 0) {
+          console.log(`⚠️ Stake cap: ${p.local} vs ${p.visitante} reducido ${stakeValidado}→8 (ya hay un pick 9+)`);
+          stakeValidado = 8;
+        } else {
+          highStakeCount++;
+        }
+      }
+
+      if (stakeValidado !== p.stake) {
+        console.log(`⚠️ Pre-publish gate: ${p.local} vs ${p.visitante} (${p.mercado}): ${p.stake}→${stakeValidado}`);
+        correctedText = correctedText.replace(`Stake: ${p.stake}/10`, `Stake: ${stakeValidado}/10`);
+      }
+    }
+
+    return correctedText;
+  } catch (e) {
+    console.error('applyStakeGate:', e.message);
+    return picksText; // fail-open: publicar sin corrección antes que crashear
+  }
+}
+
 async function recordPicks(analysisText, matchesCtx) {
   if (!analysisText || !matchesCtx.length) return;
   if (analysisText.trimStart().startsWith('⛔')) return;
@@ -5177,6 +5258,10 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     picksText = '⛔ Sin picks de valor real hoy.'
   }
 
+  // Gate pre-publicación: valida y corrige stakes antes de enviar
+  const matchesCtxForGate = enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga }));
+  picksText = await applyStakeGate(picksText, enriched, matchesCtxForGate);
+
   // Guardar en caché
   setPicksCache('all', picksText, enriched.map(f => f.fixtureId));
   try {
@@ -5434,6 +5519,10 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
       `Partidos de ${displayName} del día ${today}. DATOS REALES:\n\n${JSON.stringify(enriched.map(e => ({ ...e, _extendedProbs: undefined })), null, 2)}\n\nEmite picks de valor para esta liga. REGLAS IRROMPIBLES: (1) CUOTA MÍNIMA ABSOLUTA 1.65 — cualquier pick con cuota menor se DESCARTA, (2) PROHIBIDO DNB, (3) PROHIBIDO Over 1.5 FT, (4) PROHIBIDO mostrar EV%, probabilidades internas o razones de exclusión. Si no hay picks con valor real, responde SOLO: ⛔ Sin picks de valor real hoy.`
     );
   }
+
+  // Gate pre-publicación: valida y corrige stakes antes de enviar
+  const matchesCtxLigaGate = enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga }));
+  picksText = await applyStakeGate(picksText, enriched, matchesCtxLigaGate);
 
   // Guardar en caché
   setPicksCache(cacheScope, picksText, enriched.map(f => f.fixtureId));
