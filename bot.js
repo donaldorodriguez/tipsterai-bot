@@ -7113,15 +7113,16 @@ async function runZcodeMarketScrape() {
 
     // ── 1. Line Reversals + Dropping Odds — extraer del DOM ──────────────────────
     try {
-      // Interceptar la respuesta AJAX de linemovinggameslistn1.php para diagnóstico
-      let lrAjaxStatus = null, lrAjaxLen = 0;
+      // Interceptar TODOS los requests del LR page para diagnóstico
+      const lrXhrCalls = [];
       const lrResponseHandler = async res => {
-        if (res.url().includes('linemoving') || res.url().includes('line_reversals')) {
+        const url = res.url();
+        const ct = res.headers()['content-type'] || '';
+        // Solo loguear JS/JSON/HTML (no imágenes/fonts/analytics noise)
+        if (/json|javascript|html|php/i.test(ct) && !url.includes('google') && !url.includes('analytics') && !url.includes('fontawesome')) {
           try {
-            lrAjaxStatus = res.status();
             const body = await res.text().catch(() => '');
-            lrAjaxLen = body.length;
-            console.log(`🔌 LR AJAX ${res.url().split('/').pop()} → ${lrAjaxStatus} [${lrAjaxLen}b]: ${body.slice(0,100).replace(/\s+/g,' ')}`);
+            lrXhrCalls.push({ url: url.split('/').pop().slice(0,60), status: res.status(), len: body.length, preview: body.slice(0,80).replace(/\s+/g,' ') });
           } catch (_) {}
         }
       };
@@ -7131,6 +7132,9 @@ async function runZcodeMarketScrape() {
       // Esperar que el JS del site inyecte las filas via AJAX (hasta 15s)
       await page.waitForSelector('.GamesTableRow, [class*="GamesTableRow"]', { timeout: 15000 }).catch(() => null);
       page.off('response', lrResponseHandler);
+      if (lrXhrCalls.length > 0) {
+        console.log(`🔌 LR requests [${lrXhrCalls.length}]: ${lrXhrCalls.map(c => `${c.url}→${c.status}[${c.len}b]`).join(' | ')}`);
+      }
 
       // Extraer datos estructurados — retornar debug info para loguear en Node.js
       const lrResult = await page.evaluate(() => {
