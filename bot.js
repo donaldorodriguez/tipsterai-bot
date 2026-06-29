@@ -7216,7 +7216,8 @@ async function runZcodeMarketScrape() {
           addDrop(s.team1, s.drop1, s.oddOpen1, s.oddClose1, s.pct1);
           addDrop(s.team2, s.drop2, s.oddOpen2, s.oddClose2, s.pct2);
         }
-        console.log(`🔄 Line Reversals: ${lrData.length} partidos | 📉 Dropping Odds: ${_zdoStore.size} equipos`);
+        const lrSample = lrData.slice(0,3).map(s=>`${s.team1}(${s.pct1}%) vs ${s.team2}(${s.pct2}%)`).join(', ');
+        console.log(`🔄 Line Reversals: ${lrData.length} partidos | 📉 Dropping Odds: ${_zdoStore.size} equipos | ${lrSample}`);
       } else {
         console.warn(`Line Reversals: sin datos del endpoint (${lrRawHtml ? lrRawHtml.length+'b recibidos pero 0 rows parseados' : 'timeout sin respuesta'})`);
       }
