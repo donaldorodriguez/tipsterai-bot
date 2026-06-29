@@ -8541,15 +8541,13 @@ bot.onText(/\/zcode[-_]?tools/, async (msg) => {
   const chatId = String(msg.chat.id);
 
   const TOOLS = [
-    { name: 'Dropping Odds',    url: 'https://zcodesystem.com/dropping_odds' },
-    { name: 'Line Reversals',   url: 'https://zcodesystem.com/line_reversals' },
-    { name: 'Line Reversals VIP', url: 'https://zcodesystem.com/vipclub/linereversals.php' },
-    { name: 'Totals Predictor', url: 'https://zcodesystem.com/totals_predictor' },
-    { name: 'Scores Predictor', url: 'https://zcodesystem.com/scorespredictor/' },
-    { name: 'EV Tool',          url: 'https://zcodesystem.com/evtool/' },
-    { name: 'Power Rankings',   url: 'https://zcodesystem.com/power_rankings.php' },
-    { name: 'Contrarian Bets',  url: 'https://zcodesystem.com/vipclub/contrarianbets.php' },
-    { name: 'Soccer Oscillator',url: 'https://zcodesystem.com/soccer_oscillator/' },
+    { name: 'Soccer Buddy',      url: 'https://zcodesystem.com/soccerbuddy/',                  wait: 5000 },
+    { name: 'EV Tool',           url: 'https://zcodesystem.com/evtool/',                        wait: 3000 },
+    { name: 'Line Reversals',    url: 'https://zcodesystem.com/line_reversals',                 wait: 3000 },
+    { name: 'Totals Predictor',  url: 'https://zcodesystem.com/totals_predictor',               wait: 4000 },
+    { name: 'Power Rankings',    url: 'https://zcodesystem.com/power_rankings.php',             wait: 3000 },
+    { name: 'Soccer Oscillator', url: 'https://zcodesystem.com/soccer_oscillator/',             wait: 4000 },
+    { name: 'Contrarian Bets',   url: 'https://zcodesystem.com/vipclub/contrarianbets.php',    wait: 3000 },
   ];
 
   await bot.sendMessage(chatId, `🔍 Explorando ${TOOLS.length} herramientas ZCode con Puppeteer...`);
@@ -8573,7 +8571,11 @@ bot.onText(/\/zcode[-_]?tools/, async (msg) => {
         const isTrack = url.includes('analytics') || url.includes('facebook') || url.includes('logevent') || url.includes('pixel') || url.includes('gtm');
         if (isJS || isCSS || isYT || isTrack) return;
         const isJson = ct.includes('json') || ct.includes('javascript');
-        const isData = url.includes('/api/') || url.includes('ajax') || url.includes('.php') || url.includes('predict') || url.includes('odds') || url.includes('reversal') || url.includes('ranking') || url.includes('contrarian') || url.includes('oscillator') || url.includes('soccer');
+        const isData = url.includes('/api/') || url.includes('ajax') || url.includes('.php')
+          || url.includes('predict') || url.includes('odds') || url.includes('reversal')
+          || url.includes('ranking') || url.includes('contrarian') || url.includes('oscillator')
+          || url.includes('soccer') || url.includes('buddy') || url.includes('total')
+          || url.includes('zcode') || url.includes('evtool') || url.includes('gameslist');
         if (isJson || isData) {
           const body = await res.text().catch(() => '');
           if (body.length > 20 && body.length < 500000) {
@@ -8585,15 +8587,22 @@ bot.onText(/\/zcode[-_]?tools/, async (msg) => {
       const hasCookies = await _zbSetCookies(page);
       try {
         await page.goto(tool.url, { waitUntil: 'networkidle2', timeout: 35000 });
-        // Scroll para activar lazy loading
+        // Scroll para activar lazy loading y esperar carga dinámica (Ajax/polling)
         await page.evaluate(() => window.scrollBy(0, 600));
-        await new Promise(r => setTimeout(r, 1000));
+        await new Promise(r => setTimeout(r, tool.wait || 3000));
         await page.evaluate(() => window.scrollBy(0, 600));
-        await new Promise(r => setTimeout(r, 3000));
+        await new Promise(r => setTimeout(r, 1500));
 
-        // Screenshot full page para ver contenido real
-        const shot = await page.screenshot({ type: 'png', fullPage: true });
-        await bot.sendPhoto(chatId, shot, { caption: `${tool.name} | cookies: ${hasCookies?'✅':'❌'} | URL: ${page.url().slice(0,60)}` });
+        // Screenshot (tolerante a dimensiones inválidas)
+        const shot = await page.screenshot({ type: 'png', fullPage: false })
+          .catch(() => page.screenshot({ type: 'png', fullPage: false, clip: { x:0, y:0, width:800, height:600 } }))
+          .catch(() => null);
+        if (shot && shot.length > 500) {
+          await bot.sendPhoto(chatId, shot, { caption: `${tool.name} | cookies: ${hasCookies?'✅':'❌'} | URL: ${page.url().slice(0,60)}` })
+            .catch(() => bot.sendMessage(chatId, `📸 ${tool.name} | cookies: ${hasCookies?'✅':'❌'} (screenshot omitido)`));
+        } else {
+          await bot.sendMessage(chatId, `📸 ${tool.name} | cookies: ${hasCookies?'✅':'❌'} | URL: ${page.url().slice(0,60)} (sin screenshot)`);
+        }
 
         // APIs encontradas
         if (apiCalls.length > 0) {
