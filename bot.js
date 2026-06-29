@@ -7028,31 +7028,49 @@ function _parseZcodeGameTable(html) {
   return signals;
 }
 
-// Helper: GET/POST directo a un endpoint ZCode con cookies (sin Puppeteer)
+// Helper: GET directo a un endpoint ZCode con cookies.
+// Si el endpoint devuelve 404, primero carga la página padre (warm-up) y reintenta.
 async function _zcodeGet(path, params = {}, options = {}) {
-  const fullUrl = path.startsWith('http') ? path : `https://zcodesystem.com${path}`;
-  const referer = options.referer || 'https://zcodesystem.com/';
-  const headers = { ..._zdoHeaders(), 'Referer': referer };
+  const fullUrl  = path.startsWith('http') ? path : `https://zcodesystem.com${path}`;
+  const referer  = options.referer || 'https://zcodesystem.com/';
+  const headers  = { ..._zdoHeaders(), 'Referer': referer };
+  const axCfg    = { headers, params, timeout: 18000, validateStatus: s => s < 500 };
 
-  // Intentar GET primero, luego POST si no hay datos útiles
-  for (const method of ['get', 'post']) {
-    const resp = method === 'get'
-      ? await axios.get(fullUrl, { headers, params, timeout: 15000, validateStatus: s => s < 500 })
-      : await axios.post(fullUrl, new URLSearchParams(params).toString(), {
-          headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
-          timeout: 15000, validateStatus: s => s < 500,
-        });
+  // Intento 1: GET directo
+  let resp = await axios.get(fullUrl, axCfg);
+  let body = resp.data;
+  let bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
 
-    const body = resp.data;
-    const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+  // Si la respuesta es 404 o parece una página de error, hacer warm-up de la página padre y reintentar
+  const is404     = resp.status === 404 || bodyStr.includes('404 Not Found');
+  const isError   = /sign.?in|log.?in|password|403 Forbidden|Access Denied/i.test(bodyStr.slice(0, 400));
 
-    // Si la respuesta tiene datos reales (no login page, no vacío)
-    const isLoginRedirect = /sign.?in|log.?in|password|username/i.test(bodyStr.slice(0, 300));
-    if (!isLoginRedirect && bodyStr.length > 100) return body;
+  if ((is404 || isError) && referer !== 'https://zcodesystem.com/') {
+    console.log(`🔍 ${path}: ${resp.status} → warm-up ${referer}...`);
+    // Cargar la página padre para inicializar la sesión PHP
+    await axios.get(referer, { headers: { ..._zdoHeaders(), 'Referer': 'https://zcodesystem.com/' }, timeout: 18000 })
+      .catch(() => {});
+    await new Promise(r => setTimeout(r, 1000));
 
-    if (method === 'get') console.log(`🔍 ${path}: GET → ${bodyStr.length} bytes, primer 200: ${bodyStr.slice(0,200).replace(/\n/g,' ')}`);
+    // Reintentar GET y luego POST
+    for (const method of ['get', 'post']) {
+      const r2 = method === 'get'
+        ? await axios.get(fullUrl, axCfg).catch(() => null)
+        : await axios.post(fullUrl, new URLSearchParams(params).toString(), {
+            headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+            timeout: 18000, validateStatus: s => s < 500,
+          }).catch(() => null);
+
+      if (!r2) continue;
+      const b2 = r2.data;
+      const s2 = typeof b2 === 'string' ? b2 : JSON.stringify(b2);
+      console.log(`🔍 ${path}: ${method.toUpperCase()} retry [${r2.status}] ${s2.length}b → ${s2.slice(0,200).replace(/\s+/g,' ')}`);
+      if (r2.status < 400 && s2.length > 100 && !s2.includes('404 Not Found')) return b2;
+    }
+    return null;
   }
-  return null;
+
+  return body;
 }
 
 async function runZcodeMarketScrape() {
