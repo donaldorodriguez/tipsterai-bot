@@ -7113,9 +7113,24 @@ async function runZcodeMarketScrape() {
 
     // ── 1. Line Reversals + Dropping Odds — extraer del DOM ──────────────────────
     try {
+      // Interceptar la respuesta AJAX de linemovinggameslistn1.php para diagnóstico
+      let lrAjaxStatus = null, lrAjaxLen = 0;
+      const lrResponseHandler = async res => {
+        if (res.url().includes('linemoving') || res.url().includes('line_reversals')) {
+          try {
+            lrAjaxStatus = res.status();
+            const body = await res.text().catch(() => '');
+            lrAjaxLen = body.length;
+            console.log(`🔌 LR AJAX ${res.url().split('/').pop()} → ${lrAjaxStatus} [${lrAjaxLen}b]: ${body.slice(0,100).replace(/\s+/g,' ')}`);
+          } catch (_) {}
+        }
+      };
+      page.on('response', lrResponseHandler);
+
       await page.goto('https://zcodesystem.com/line_reversals', { waitUntil: 'networkidle2', timeout: 40000 });
-      // Esperar que el JS del site inyecte las filas via AJAX (hasta 10s)
-      await page.waitForSelector('.GamesTableRow, [class*="GamesTableRow"]', { timeout: 10000 }).catch(() => null);
+      // Esperar que el JS del site inyecte las filas via AJAX (hasta 15s)
+      await page.waitForSelector('.GamesTableRow, [class*="GamesTableRow"]', { timeout: 15000 }).catch(() => null);
+      page.off('response', lrResponseHandler);
 
       // Extraer datos estructurados — retornar debug info para loguear en Node.js
       const lrResult = await page.evaluate(() => {
