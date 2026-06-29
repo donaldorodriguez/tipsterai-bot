@@ -6991,7 +6991,11 @@ function _parseZcodeLR(html) {
   // Dividir en bloques por cada fila de partido
   const blocks = html.split(/class="GamesTableRow[^"]*"/).slice(1);
   if (blocks.length === 0) {
-    console.warn(`LR parser: 0 bloques en HTML [${html.length}b]. Preview: ${html.slice(0,200).replace(/\s+/g,' ')}`);
+    // Diagnóstico: ver clases usadas y dónde están los %
+    const divClasses = [...html.matchAll(/class="([^"]{3,40})"/g)].map(m=>m[1]).slice(0,25);
+    console.warn(`LR parser: 0 bloques en HTML [${html.length}b]. Clases: ${divClasses.join(' | ')}`);
+    const firstPct = html.indexOf('%');
+    if (firstPct > 0) console.warn(`LR first% ctx: ${html.slice(Math.max(0,firstPct-150), firstPct+50).replace(/\s+/g,' ')}`);
     return results;
   }
 
