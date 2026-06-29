@@ -2500,6 +2500,16 @@ function buildPickCandidates(enrichedFixtures) {
     const _sharpVisit   = _mkt?.lineReversal?.sharpEnLocal === false;
     const _dropLocal    = _mkt?.droppingOddsLocal?.drop    || 0;
     const _dropVisit    = _mkt?.droppingOddsVisitante?.drop || 0;
+    // Señales extra: Totals Predictor, Power Rankings, Soccer Oscillator, Contrarian Bets
+    const _extra        = f.zcodeExtra  || null;
+    const _tpTotal      = _extra?.totalsPredictor?.predictedTotal ?? null;
+    const _powerGap     = (_extra?.powerHome != null && _extra?.powerAway != null)
+                            ? (_extra.powerHome - _extra.powerAway) : null;
+    const _homeHot      = _extra?.oscHome?.hot  === true;
+    const _homeCold     = _extra?.oscHome?.cold === true;
+    const _awayHot      = _extra?.oscAway?.hot  === true;
+    const _awayCold     = _extra?.oscAway?.cold === true;
+    const _contrarianSide = _extra?.contrarian?.side ?? null; // 'home' | 'away'
 
     for (const m of markets) {
       // ── Inyectar prob real de tarjetas (antes del check de odds) ─────────────
@@ -2590,6 +2600,58 @@ function buildPickCandidates(enrichedFixtures) {
         if (mktBoost > 0) {
           evRaw = evRaw + mktBoost;
           console.log(`💰 MktBoost ${f.local} vs ${f.visitante} [${m.key}] +${mktBoost} (sharp:${_sharpLocal?'L':_sharpVisit?'V':'-'} drop:${_dropLocal}/${_dropVisit}%)`);
+        }
+      }
+
+      // ── Totals Predictor + Power Rankings + Soccer Oscillator + Contrarian ──────
+      if (_extra) {
+        let extraBoost = 0;
+
+        // Totals Predictor: predicción de goles totales del partido
+        if (_tpTotal !== null) {
+          if (_tpTotal >= 2.8 && ['over25', 'btts'].includes(m.key))  extraBoost += 3;
+          if (_tpTotal >= 3.3 && m.key === 'over35')                  extraBoost += 3;
+          if (_tpTotal >= 3.5 && m.key === 'over25')                  extraBoost += 2; // doble boost si muy alto
+          if (_tpTotal <= 2.0 && m.key === 'under25')                 extraBoost += 3;
+          if (_tpTotal <= 1.8 && ['under25', 'btts'].includes(m.key)) {
+            if (m.key === 'btts') extraBoost -= 2; // penalizar BTTS si bajo total predicho
+          }
+        }
+
+        // Power Rankings: diferencia de fuerza → favorece al más fuerte
+        if (_powerGap !== null) {
+          if (_powerGap >  15) { // local claramente superior
+            if (['homeWin', 'dnb_home', 'dc_1X'].includes(m.key)) extraBoost += Math.min(Math.round(_powerGap / 8), 4);
+          }
+          if (_powerGap < -15) { // visitante claramente superior
+            if (['awayWin', 'dnb_away', 'dc_X2'].includes(m.key)) extraBoost += Math.min(Math.round(-_powerGap / 8), 4);
+          }
+        }
+
+        // Soccer Oscillator: momentum / forma actual
+        if (_homeHot && _awayCold) {
+          if (['homeWin', 'dnb_home', 'dc_1X'].includes(m.key)) extraBoost += 3;
+          if (['over25', 'btts'].includes(m.key))               extraBoost += 1;
+        }
+        if (_awayHot && _homeCold) {
+          if (['awayWin', 'dnb_away', 'dc_X2'].includes(m.key)) extraBoost += 3;
+          if (['over25', 'btts'].includes(m.key))               extraBoost += 1;
+        }
+        if (_homeHot && _awayHot) { // ambos en racha goleadora
+          if (['over25', 'over35', 'btts'].includes(m.key))     extraBoost += 2;
+        }
+
+        // Contrarian Bets: fade al público → boost al lado contrario
+        if (_contrarianSide === 'home') {
+          if (['homeWin', 'dnb_home', 'dc_1X'].includes(m.key)) extraBoost += 4;
+        }
+        if (_contrarianSide === 'away') {
+          if (['awayWin', 'dnb_away', 'dc_X2'].includes(m.key)) extraBoost += 4;
+        }
+
+        if (extraBoost !== 0) {
+          evRaw = evRaw + extraBoost;
+          console.log(`🎯 ExtraBoost ${f.local} vs ${f.visitante} [${m.key}] ${extraBoost > 0 ? '+' : ''}${extraBoost} (tp:${_tpTotal} pr:${_powerGap?.toFixed(0)} osc:${_homeHot?'H🔥':_homeCold?'H❄':''}${_awayHot?'A🔥':_awayCold?'A❄':''} cb:${_contrarianSide||'-'})`);
         }
       }
 
@@ -3323,6 +3385,12 @@ Si el JSON de datos incluye el campo "probabilidadesCalculadas", DEBES usarlo co
   * droppingOddsVisitante.droppingOdds > 8% → dinero al visitante → refuerza picks visitante.
   * lineReversalLocal / lineReversalVisitante → la línea se movió CONTRA el público = apostadores sharps en ese equipo → señal fuerte de valor.
   * NUNCA menciones "Dropping Odds", "Line Reversals" ni "mercado" al usuario — úsalos en silencio para calibrar stakes.
+- zcodeExtra: señales de herramientas ZCode avanzadas. Si está presente:
+  * totalsPredictor.predictedTotal ≥ 2.8 → confirma Over 2.5 / BTTS. ≥ 3.3 → confirma Over 3.5. ≤ 2.0 → señal de bajo scoring → desconfirma BTTS y Over 2.5.
+  * powerHome / powerAway: ratings de fuerza (0–100). Diferencia > 15 → el equipo más fuerte tiene ventaja real → sube stake de su pick de resultado +1.
+  * oscHome / oscAway: momentum del oscilador ZCode. hot=true → equipo en racha anotadora → confirma picks de ese equipo. cold=true → equipo frío → descarta picks de ese equipo.
+  * contrarian.side: el lado contrarian (fade al público). Si side='home' → público contra el local pero el modelo dice local → pick de valor → sube stake +1.
+  * NUNCA menciones estos nombres técnicos al usuario — úsalos solo para calibrar.
 
 INSTRUCCIONES PARA MOMENTUM EN VIVO:
 Si el JSON incluye "momentumEnVivo", úsalo para detectar oportunidades en tiempo real:
@@ -5270,6 +5338,16 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     if (mktHits > 0) console.log(`📉 Dropping Odds/Line Reversals: ${mktHits} partidos con señales de mercado`);
   }
 
+  // ── Totals Predictor + Power Rankings + Soccer Oscillator + Contrarian Bets ─
+  if (_tpStore.size > 0 || _prStore.size > 0 || _soStore.size > 0 || _cbStore.size > 0) {
+    let zetHits = 0;
+    for (const e of enriched) {
+      const extra = getZcodeExtraSignals(e.local, e.visitante);
+      if (extra) { e.zcodeExtra = extra; zetHits++; }
+    }
+    if (zetHits > 0) console.log(`🎯 ZCode Extra (TP/PR/SO/CB): ${zetHits} partidos con señales adicionales`);
+  }
+
   await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV por mercado...`);
 
   // ── Filtro de calidad ANTES del motor ────────────────────────────────────
@@ -6860,6 +6938,14 @@ const _zlrStore  = new Map(); // key: normHome+'|||'+normAway → { reversal, ..
 let   _zdoLastRun = 0;
 const ZDO_INTERVAL = 15 * 60 * 1000; // cada 15 min
 
+// ── ZCode extra tools stores ──────────────────────────────────────────────────
+const _tpStore   = new Map(); // Totals Predictor: normHome+'|||'+normAway → { predictedTotal, confidence }
+const _prStore   = new Map(); // Power Rankings:   _zbNorm(team)           → { rating, rank, trend }
+const _soStore   = new Map(); // Soccer Oscillator: _zbNorm(team)          → { oscillator, hot }
+const _cbStore   = new Map(); // Contrarian Bets:   normHome+'|||'+normAway → { contrarianSide, publicPct }
+let   _zetLastRun = 0;
+const ZET_INTERVAL = 20 * 60 * 1000; // extra tools cada 20 min
+
 // Construir cookie string desde ZCODE_COOKIES env
 function _zdoCookieStr() {
   const raw = (process.env.ZCODE_COOKIES || '').trim();
@@ -7018,6 +7104,309 @@ async function runZcodeMarketScrape() {
   } finally {
     if (browser) await browser.close().catch(() => {});
   }
+}
+
+// ── ZCode Extra Tools: Totals Predictor, Power Rankings, Soccer Oscillator, Contrarian Bets ──
+async function runZcodeExtraTools() {
+  if (Date.now() - _zetLastRun < ZET_INTERVAL) return;
+  if (!process.env.ZCODE_COOKIES) return;
+
+  let browser;
+  try {
+    browser = await _zbBrowser();
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+    await _zbSetCookies(page);
+
+    // ── 1. Totals Predictor ────────────────────────────────────────────────────
+    try {
+      await page.goto('https://zcodesystem.com/totals_predictor', { waitUntil: 'networkidle2', timeout: 40000 });
+      await new Promise(r => setTimeout(r, 1200));
+
+      const tpData = await page.evaluate(() => {
+        const results = [];
+        // Buscar filas con equipos y predicciones de total
+        const rows = document.querySelectorAll('tr, .game-row, [class*="Row"], [class*="game"]');
+        rows.forEach(row => {
+          const text = (row.innerText || '').replace(/\s+/g, ' ').trim();
+          if (text.length < 10) return;
+
+          // Buscar patrón "Team1 vs Team2" o "Team1 @ Team2"
+          const vsMatch = text.match(/^(.{3,25})\s+(?:vs?\.?|@|–)\s+(.{3,25})/i);
+          if (!vsMatch) return;
+
+          const home = vsMatch[1].trim();
+          const away = vsMatch[2].replace(/\s+\d.*/, '').trim();
+
+          // Buscar número de total predicho (ej: 2.5, 3.0)
+          const totalMatch = text.match(/(?:total[:\s]+)?(\d+\.\d+)(?:\s*goals?)?/i);
+          const totalVal = totalMatch ? parseFloat(totalMatch[1]) : null;
+          if (!totalVal || totalVal < 0.5 || totalVal > 8) return;
+
+          // Buscar confianza (%)
+          const confMatch = text.match(/(\d{2,3})%/);
+          const confidence = confMatch ? parseInt(confMatch[1]) : null;
+
+          results.push({ home, away, predictedTotal: totalVal, confidence });
+        });
+
+        // Fallback: buscar elementos con data attributes
+        document.querySelectorAll('[data-home],[data-away],[data-total]').forEach(el => {
+          const home  = el.getAttribute('data-home') || el.getAttribute('data-team1') || '';
+          const away  = el.getAttribute('data-away') || el.getAttribute('data-team2') || '';
+          const total = parseFloat(el.getAttribute('data-total') || el.getAttribute('data-prediction') || '');
+          if (home && away && !isNaN(total)) {
+            results.push({ home: home.trim(), away: away.trim(), predictedTotal: total, confidence: null });
+          }
+        });
+
+        return results;
+      });
+
+      let tpCount = 0;
+      for (const entry of tpData) {
+        if (!entry.home || !entry.away || !entry.predictedTotal) continue;
+        if (/basketball|nba|nhl|mlb|nfl/i.test(entry.home + entry.away)) continue;
+        const key = _zbNorm(entry.home) + '|||' + _zbNorm(entry.away);
+        _tpStore.set(key, {
+          home: entry.home, away: entry.away,
+          predictedTotal: entry.predictedTotal,
+          confidence: entry.confidence,
+          _ts: Date.now(),
+        });
+        tpCount++;
+      }
+      console.log(`🎯 Totals Predictor: ${tpCount} partidos con predicción de total`);
+    } catch (e) { console.warn('Totals Predictor err:', e.message); }
+
+    // ── 2. Power Rankings ─────────────────────────────────────────────────────
+    try {
+      await page.goto('https://zcodesystem.com/power_rankings.php', { waitUntil: 'networkidle2', timeout: 40000 });
+      await new Promise(r => setTimeout(r, 1000));
+
+      const prData = await page.evaluate(() => {
+        const results = [];
+        // Tabla con rankings: posición, equipo, rating
+        const rows = document.querySelectorAll('tr, [class*="rank"], [class*="team-row"]');
+        rows.forEach((row, idx) => {
+          const cells = row.querySelectorAll('td, th');
+          if (cells.length < 2) return;
+          const text  = (row.innerText || '').replace(/\s+/g, ' ').trim();
+
+          // Buscar rating numérico (ej: 85.3, 72, etc.)
+          const ratingMatch = text.match(/(\d{2,3}(?:\.\d+)?)\s*(?:pts?|points?|rating|power)?/i);
+          if (!ratingMatch) return;
+          const rating = parseFloat(ratingMatch[1]);
+          if (rating < 1 || rating > 200) return;
+
+          // Primer texto sustancial = nombre del equipo
+          const teamMatch = text.match(/^(\d+\.?\s+)?([A-Za-zÀ-ÿ\s\-\.]{3,30})/);
+          if (!teamMatch) return;
+          const team = teamMatch[2].replace(/\d+\.?\s*$/, '').trim();
+          if (team.length < 3) return;
+
+          // Tendencia (flecha arriba/abajo o +/-)
+          const trend = text.includes('▲') || text.includes('↑') || /\+\d/.test(text) ? 'up' :
+                       text.includes('▼') || text.includes('↓') || /-\d/.test(text)  ? 'down' : 'neutral';
+
+          results.push({ team, rating, rank: idx + 1, trend });
+        });
+
+        // También buscar con data attributes
+        document.querySelectorAll('[data-team],[data-rating],[data-rank]').forEach(el => {
+          const team   = el.getAttribute('data-team') || el.getAttribute('data-name') || '';
+          const rating = parseFloat(el.getAttribute('data-rating') || el.getAttribute('data-power') || '');
+          const rank   = parseInt(el.getAttribute('data-rank') || el.getAttribute('data-position') || '0');
+          if (team && !isNaN(rating)) {
+            results.push({ team: team.trim(), rating, rank: rank || 999, trend: 'neutral' });
+          }
+        });
+
+        return results;
+      });
+
+      let prCount = 0;
+      for (const entry of prData) {
+        if (!entry.team || !entry.rating) continue;
+        const key = _zbNorm(entry.team);
+        if (!key || key.length < 2) continue;
+        _prStore.set(key, { team: entry.team, rating: entry.rating, rank: entry.rank, trend: entry.trend, _ts: Date.now() });
+        prCount++;
+      }
+      console.log(`📊 Power Rankings: ${prCount} equipos con rating`);
+    } catch (e) { console.warn('Power Rankings err:', e.message); }
+
+    // ── 3. Soccer Oscillator ──────────────────────────────────────────────────
+    try {
+      await page.goto('https://zcodesystem.com/soccer_oscillator/', { waitUntil: 'networkidle2', timeout: 40000 });
+      await new Promise(r => setTimeout(r, 1000));
+
+      const soData = await page.evaluate(() => {
+        const results = [];
+        const rows = document.querySelectorAll('tr, [class*="osc"], [class*="team-row"], [class*="Row"]');
+        rows.forEach(row => {
+          const text = (row.innerText || '').replace(/\s+/g, ' ').trim();
+          if (text.length < 5) return;
+
+          // Nombre de equipo
+          const teamMatch = text.match(/^([A-Za-zÀ-ÿ\s\-\.]{3,30})/);
+          if (!teamMatch) return;
+          const team = teamMatch[1].trim();
+
+          // Valor del oscilador (puede ser positivo o negativo)
+          const oscMatch = text.match(/([+-]?\d+(?:\.\d+)?)\s*(?:osc|pts?|oscillator)?/i);
+          const oscillator = oscMatch ? parseFloat(oscMatch[1]) : null;
+          if (oscillator === null) return;
+
+          // HOT = positivo / COLD = negativo
+          const hot = oscillator > 0 ||
+                      /\bhot\b|🔥|⬆️|overperform/i.test(text);
+          const cold = oscillator < 0 ||
+                       /\bcold\b|❄️|⬇️|underperform/i.test(text);
+
+          results.push({ team, oscillator, hot, cold });
+        });
+
+        // También buscar con clases CSS de colores (verde=hot, rojo=cold)
+        document.querySelectorAll('[class*="hot"],[class*="fire"],[class*="green"]').forEach(el => {
+          const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
+          const teamMatch = text.match(/^([A-Za-zÀ-ÿ\s\-\.]{3,30})/);
+          if (!teamMatch) return;
+          results.push({ team: teamMatch[1].trim(), oscillator: null, hot: true, cold: false });
+        });
+        document.querySelectorAll('[class*="cold"],[class*="ice"],[class*="red"]').forEach(el => {
+          const text = (el.innerText || '').replace(/\s+/g, ' ').trim();
+          const teamMatch = text.match(/^([A-Za-zÀ-ÿ\s\-\.]{3,30})/);
+          if (!teamMatch) return;
+          results.push({ team: teamMatch[1].trim(), oscillator: null, hot: false, cold: true });
+        });
+
+        return results;
+      });
+
+      let soCount = 0;
+      for (const entry of soData) {
+        if (!entry.team) continue;
+        const key = _zbNorm(entry.team);
+        if (!key || key.length < 2) continue;
+        _soStore.set(key, { team: entry.team, oscillator: entry.oscillator, hot: entry.hot, cold: entry.cold, _ts: Date.now() });
+        soCount++;
+      }
+      console.log(`🌊 Soccer Oscillator: ${soCount} equipos con señal de momentum`);
+    } catch (e) { console.warn('Soccer Oscillator err:', e.message); }
+
+    // ── 4. Contrarian Bets ────────────────────────────────────────────────────
+    try {
+      await page.goto('https://zcodesystem.com/vipclub/contrarianbets.php', { waitUntil: 'networkidle2', timeout: 40000 });
+      await new Promise(r => setTimeout(r, 1000));
+
+      const cbData = await page.evaluate(() => {
+        const results = [];
+        const rows = document.querySelectorAll('tr, .GamesTableRow, [class*="Row"], [class*="game"]');
+        rows.forEach(row => {
+          const text = (row.innerText || '').replace(/\s+/g, ' ').trim();
+          if (text.length < 10) return;
+
+          // Partido: Team1 vs Team2
+          const vsMatch = text.match(/^(.{3,25})\s+(?:vs?\.?|@|–)\s+(.{3,25})/i);
+          if (!vsMatch) return;
+          const home = vsMatch[1].trim();
+          const away = vsMatch[2].replace(/\s+\d.*/, '').trim();
+
+          // % del público en el lado "popular"
+          const pctMatches = [...text.matchAll(/(\d{1,3})%/g)].map(m => parseInt(m[1]));
+          if (pctMatches.length === 0) return;
+          const publicPct = Math.max(...pctMatches); // el lado con más público = lado a fading
+
+          // El lado contrarian = el lado opuesto al que tiene más público
+          // Buscar si hay marcas de "bet against" o "contrarian" en el texto
+          const contrarianSide = publicPct > 60
+            ? (text.indexOf('%') < text.length / 2 ? 'away' : 'home') // heurística
+            : null;
+
+          if (publicPct >= 60 && contrarianSide) {
+            results.push({ home, away, publicPct, contrarianSide });
+          }
+        });
+
+        // Data attributes
+        document.querySelectorAll('[data-contrarian],[data-fade],[data-public-pct]').forEach(el => {
+          const home = el.getAttribute('data-home') || '';
+          const away = el.getAttribute('data-away') || '';
+          const publicPct = parseInt(el.getAttribute('data-public-pct') || el.getAttribute('data-public') || '0');
+          const side = el.getAttribute('data-contrarian') || el.getAttribute('data-fade') || '';
+          if (home && away && publicPct >= 60) {
+            results.push({ home: home.trim(), away: away.trim(), publicPct, contrarianSide: side || 'unknown' });
+          }
+        });
+
+        return results;
+      });
+
+      let cbCount = 0;
+      for (const entry of cbData) {
+        if (!entry.home || !entry.away) continue;
+        if (/basketball|nba|nhl|mlb|nfl/i.test(entry.home + entry.away)) continue;
+        const key = _zbNorm(entry.home) + '|||' + _zbNorm(entry.away);
+        _cbStore.set(key, {
+          home: entry.home, away: entry.away,
+          publicPct: entry.publicPct,
+          contrarianSide: entry.contrarianSide,
+          _ts: Date.now(),
+        });
+        cbCount++;
+      }
+      console.log(`🔀 Contrarian Bets: ${cbCount} partidos con señal contrarian`);
+    } catch (e) { console.warn('Contrarian Bets err:', e.message); }
+
+    await page.close();
+    _zetLastRun = Date.now();
+  } catch (e) {
+    console.warn('runZcodeExtraTools err:', e.message);
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
+}
+
+// Obtener señales de herramientas extra para un partido
+function getZcodeExtraSignals(homeTeam, awayTeam) {
+  const hNorm = _zbNorm(homeTeam);
+  const aNorm = _zbNorm(awayTeam);
+  const signals = {};
+
+  // Totals Predictor
+  for (const [key, data] of _tpStore) {
+    const [k1, k2] = key.split('|||');
+    if ((_zbMatch(hNorm, k1) && _zbMatch(aNorm, k2)) ||
+        (_zbMatch(hNorm, k2) && _zbMatch(aNorm, k1))) {
+      signals.totalsPredictor = { predictedTotal: data.predictedTotal, confidence: data.confidence };
+      break;
+    }
+  }
+
+  // Power Rankings (buscar por equipo individual)
+  for (const [key, data] of _prStore) {
+    if (_zbMatch(hNorm, key)) signals.powerHome = data.rating;
+    if (_zbMatch(aNorm, key)) signals.powerAway = data.rating;
+  }
+
+  // Soccer Oscillator
+  for (const [key, data] of _soStore) {
+    if (_zbMatch(hNorm, key)) signals.oscHome = { hot: data.hot, cold: data.cold, val: data.oscillator };
+    if (_zbMatch(aNorm, key)) signals.oscAway = { hot: data.hot, cold: data.cold, val: data.oscillator };
+  }
+
+  // Contrarian Bets
+  for (const [key, data] of _cbStore) {
+    const [k1, k2] = key.split('|||');
+    if ((_zbMatch(hNorm, k1) && _zbMatch(aNorm, k2)) ||
+        (_zbMatch(hNorm, k2) && _zbMatch(aNorm, k1))) {
+      signals.contrarian = { side: data.contrarianSide, publicPct: data.publicPct };
+      break;
+    }
+  }
+
+  return Object.keys(signals).length > 0 ? signals : null;
 }
 
 // Función para obtener señales de mercado para un partido específico
@@ -7467,7 +7856,10 @@ function zbSchedule() {
   // Dropping Odds + Line Reversals — scrape inicial y cada 15 min
   runZcodeMarketScrape().catch(e => console.error('ZDO initial:', e.message));
   setInterval(() => runZcodeMarketScrape().catch(e => console.error('ZDO interval:', e.message)), ZDO_INTERVAL);
-  console.log(`📡 Soccer Buddy scraping activo (cada ${ZB_INTERVAL / 60000} min) | Dropping Odds cada ${ZDO_INTERVAL/60000} min`);
+  // Extra tools: Totals Predictor, Power Rankings, Soccer Oscillator, Contrarian Bets — cada 20 min
+  setTimeout(() => runZcodeExtraTools().catch(e => console.error('ZET initial:', e.message)), 90000); // delay 90s para no saturar al inicio
+  setInterval(() => runZcodeExtraTools().catch(e => console.error('ZET interval:', e.message)), ZET_INTERVAL);
+  console.log(`📡 Soccer Buddy (${ZB_INTERVAL/60000}min) | Dropping Odds (${ZDO_INTERVAL/60000}min) | Extra Tools (${ZET_INTERVAL/60000}min)`);
 }
 
 // Búsqueda de señales para un partido dado
