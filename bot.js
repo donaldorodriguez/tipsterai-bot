@@ -7073,91 +7073,104 @@ async function _zcodeGet(path, params = {}, options = {}) {
   return body;
 }
 
+// Parsear HTML de EV Tool (tabla MainTable) → Map de partido → { rank, evScore }
+function _parseEvToolHtml(html) {
+  const results = new Map();
+  if (!html || !html.includes('MainTable')) return results;
+  const rows = html.split(/<tr[\s>]/i).slice(1);
+  let rank = 0;
+  for (const row of rows) {
+    if (/<th/i.test(row)) continue;
+    const text = row.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
+    if (text.length < 10) continue;
+    const vsMatch = text.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\-\.]{2,25})\s+(?:@|vs\.?)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\-\.]{2,25})/i);
+    if (!vsMatch) continue;
+    const evMatch = text.match(/([+-]?\d+(?:\.\d+)?)/);
+    rank++;
+    const home = vsMatch[1].trim();
+    const away = vsMatch[2].trim();
+    results.set(_zbNorm(home) + '|||' + _zbNorm(away), { home, away, rank, evScore: evMatch ? parseFloat(evMatch[1]) : null });
+  }
+  return results;
+}
+
 async function runZcodeMarketScrape() {
   if (Date.now() - _zdoLastRun < ZDO_INTERVAL) return;
   if (!process.env.ZCODE_COOKIES) return;
 
-  // ── 1. Line Reversals + Dropping Odds — mismo endpoint, dos señales ──────────
-  // Ambas herramientas usan el mismo backend (linemovinggameslistn1.php).
-  // La caída de cuota (drop) se calcula a partir de las cuotas de apertura vs cierre.
+  // Los endpoints linemovinggameslistn1.php y gameslist.php requieren una sesión PHP
+  // inicializada por JavaScript del browser. Se usan Puppeteer + interceptación de red.
+  let browser;
   try {
-    const data = await _zcodeGet('/vipclub/linemovinggameslistn1.php', {}, { referer: 'https://zcodesystem.com/line_reversals' });
-    const lrRaw = typeof data === 'object' ? JSON.stringify(data) : (data || '');
-    const lrHtml = (typeof data === 'object' ? data?.html : data) || '';
-    console.log(`🔍 LR raw [${lrRaw.length}b]: ${lrRaw.slice(0,300).replace(/\s+/g,' ')}`);
+    browser = await _zbBrowser();
+    const page = await browser.newPage();
+    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
+    await _zbSetCookies(page);
 
-    if (lrHtml && lrHtml.includes('GamesTable')) {
-      const signals = _parseZcodeGameTable(lrHtml);
-      _zlrStore.clear();
-      _zdoStore.clear();
+    let lrHtml = '';
+    let evJson = null;
 
-      for (const s of signals) {
-        // Line Reversals: par home+away con % de sharp money
-        const kPair = _zbNorm(s.team1) + '|||' + _zbNorm(s.team2);
-        _zlrStore.set(kPair, s);
-
-        // Dropping Odds: por equipo individual — tomar el mayor drop detectado
-        const processTeam = (team, drop, oddBefore, oddAfter, pct) => {
-          if (!team || drop < 2) return;
-          const kTeam = _zbNorm(team) + '|||';
-          const ex = _zdoStore.get(kTeam);
-          if (!ex || drop > ex.drop) {
-            _zdoStore.set(kTeam, { team, drop, oddBefore, oddAfter, publicPct: pct ?? 0 });
-          }
-        };
-        processTeam(s.team1, s.drop1, s.oddOpen1, s.oddClose1, s.pct1);
-        processTeam(s.team2, s.drop2, s.oddOpen2, s.oddClose2, s.pct2);
+    page.on('response', async (res) => {
+      const url = res.url();
+      if (url.includes('linemovinggameslistn1')) {
+        const body = await res.text().catch(() => '');
+        try { lrHtml = JSON.parse(body).html || body; } catch { lrHtml = body; }
       }
-
-      console.log(`🔄 Line Reversals: ${signals.length} partidos | 📉 Dropping Odds: ${_zdoStore.size} equipos con movimiento`);
-    } else {
-      console.warn('Line Reversals: respuesta vacía o sin GamesTable');
-    }
-  } catch (e) {
-    console.warn('Line Reversals API err:', e.message);
-  }
-
-  // ── 2. EV Tool — endpoint descubierto: /evtool/gameslist.php ─────────────────
-  try {
-    const data = await _zcodeGet('/evtool/gameslist.php', {}, { referer: 'https://zcodesystem.com/evtool/' });
-    const evRaw = typeof data === 'object' ? JSON.stringify(data) : (data || '');
-    const evHtml = (typeof data === 'object' ? data?.html : null) || '';
-    console.log(`🔍 EV raw [${evRaw.length}b]: ${evRaw.slice(0,300).replace(/\s+/g,' ')}`);
-
-    if (evHtml && evHtml.includes('MainTable')) {
-      // Parsear filas de la tabla ordenada por EV descendente
-      // Cada <tr> tiene: rank, time, team1 vs team2, EV score
-      const rows = evHtml.split(/<tr[\s>]/i).slice(1);
-      _evStore.clear();
-      let rank = 0;
-      for (const row of rows) {
-        if (/<th/i.test(row)) continue; // header row
-        const text = row.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
-        if (text.length < 10) continue;
-
-        // Buscar "Team1 @ Team2" o "Team1 vs Team2"
-        const vsMatch = text.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\-\.]{2,25})\s+(?:@|vs\.?)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\-\.]{2,25})/i);
-        if (!vsMatch) continue;
-
-        // EV score: número decimal en el texto (puede ser negativo)
-        const evMatch = text.match(/([+-]?\d+(?:\.\d+)?)\s*(?:ev|%)?/i);
-        const evScore = evMatch ? parseFloat(evMatch[1]) : null;
-
-        rank++;
-        const home = vsMatch[1].trim();
-        const away = vsMatch[2].trim();
-        const key  = _zbNorm(home) + '|||' + _zbNorm(away);
-        _evStore.set(key, { home, away, rank, evScore, _ts: Date.now() });
+      if (url.includes('gameslist.php') && url.includes('evtool')) {
+        const body = await res.text().catch(() => '');
+        try { evJson = JSON.parse(body); } catch { evJson = { html: body }; }
       }
-      console.log(`📈 EV Tool: ${_evStore.size} partidos con EV score`);
-    } else {
-      console.warn('EV Tool: respuesta sin MainTable');
-    }
-  } catch (e) {
-    console.warn('EV Tool API err:', e.message);
-  }
+    });
 
-  _zdoLastRun = Date.now();
+    // ── 1. Line Reversals + Dropping Odds ────────────────────────────────────────
+    try {
+      await page.goto('https://zcodesystem.com/line_reversals', { waitUntil: 'networkidle2', timeout: 40000 });
+      await new Promise(r => setTimeout(r, 2000));
+
+      if (lrHtml && lrHtml.includes('GamesTable')) {
+        const signals = _parseZcodeGameTable(lrHtml);
+        _zlrStore.clear();
+        _zdoStore.clear();
+        for (const s of signals) {
+          _zlrStore.set(_zbNorm(s.team1) + '|||' + _zbNorm(s.team2), s);
+          const addDrop = (team, drop, oddBefore, oddAfter, pct) => {
+            if (!team || drop < 2) return;
+            const k = _zbNorm(team) + '|||';
+            const ex = _zdoStore.get(k);
+            if (!ex || drop > ex.drop) _zdoStore.set(k, { team, drop, oddBefore, oddAfter, publicPct: pct ?? 0 });
+          };
+          addDrop(s.team1, s.drop1, s.oddOpen1, s.oddClose1, s.pct1);
+          addDrop(s.team2, s.drop2, s.oddOpen2, s.oddClose2, s.pct2);
+        }
+        console.log(`🔄 Line Reversals: ${signals.length} partidos | 📉 Dropping Odds: ${_zdoStore.size} equipos`);
+      } else {
+        console.warn(`Line Reversals: sin GamesTable (html: ${lrHtml.length}b)`);
+      }
+    } catch (e) { console.warn('Line Reversals nav err:', e.message); }
+
+    // ── 2. EV Tool ───────────────────────────────────────────────────────────────
+    try {
+      await page.goto('https://zcodesystem.com/evtool/', { waitUntil: 'networkidle2', timeout: 40000 });
+      await new Promise(r => setTimeout(r, 2000));
+
+      const evHtml = evJson?.html || '';
+      if (evHtml && evHtml.includes('MainTable')) {
+        const parsed = _parseEvToolHtml(evHtml);
+        _evStore.clear();
+        for (const [k, v] of parsed) _evStore.set(k, { ...v, _ts: Date.now() });
+        console.log(`📈 EV Tool: ${_evStore.size} partidos con EV score`);
+      } else {
+        console.warn(`EV Tool: sin MainTable (evJson: ${JSON.stringify(evJson)?.slice(0,100)})`);
+      }
+    } catch (e) { console.warn('EV Tool nav err:', e.message); }
+
+    await page.close();
+    _zdoLastRun = Date.now();
+  } catch (e) {
+    console.warn('runZcodeMarketScrape err:', e.message);
+  } finally {
+    if (browser) await browser.close().catch(() => {});
+  }
 }
 
 // ── ZCode Extra Tools: Power Rankings (axios) + Totals Predictor, Soccer Oscillator, Contrarian (Puppeteer) ──
