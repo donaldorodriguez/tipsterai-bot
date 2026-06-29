@@ -7003,107 +7003,96 @@ function _parseZcodeGameTable(html) {
   return signals;
 }
 
+// Helper: GET directo a un endpoint ZCode con cookies (sin Puppeteer)
+async function _zcodeGet(path, params = {}) {
+  const url = new URL(path.startsWith('http') ? path : `https://zcodesystem.com${path}`);
+  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
+  const resp = await axios.get(url.toString(), {
+    headers: _zdoHeaders(),
+    timeout: 15000,
+    validateStatus: s => s < 500,
+  });
+  return resp.data; // puede ser string (HTML) o object (JSON)
+}
+
 async function runZcodeMarketScrape() {
   if (Date.now() - _zdoLastRun < ZDO_INTERVAL) return;
   if (!process.env.ZCODE_COOKIES) return;
 
-  let browser;
+  // ── 1. Line Reversals — llamada directa (endpoint descubierto con /zcode-tools) ──
   try {
-    browser = await _zbBrowser();
-    const page = await browser.newPage();
-    await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
-    await _zbSetCookies(page);
+    const data = await _zcodeGet('/vipclub/linemovinggameslistn1.php');
+    const lrHtml = (typeof data === 'object' ? data.html : data) || '';
 
-    // --- Line Reversals — interceptar linemovinggameslistn1.php ---
-    let lrHtml = '';
-    let doHtml  = '';
-    page.on('response', async (res) => {
-      const url = res.url();
-      if (url.includes('linemovinggameslistn1')) {
-        const body = await res.text().catch(() => '');
-        try { lrHtml = JSON.parse(body).html || body; } catch { lrHtml = body; }
+    if (lrHtml && lrHtml.includes('GamesTable')) {
+      const signals = _parseZcodeGameTable(lrHtml);
+      _zlrStore.clear();
+      for (const s of signals) {
+        const k = _zbNorm(s.team1) + '|||' + _zbNorm(s.team2);
+        _zlrStore.set(k, s);
       }
-      if (url.includes('droppingodds') || url.includes('dropping_odds')) {
-        const ct = res.headers()['content-type'] || '';
-        if (ct.includes('json') || url.includes('.php')) {
-          const body = await res.text().catch(() => '');
-          try { doHtml = JSON.parse(body).html || body; } catch { doHtml = body; }
-        }
-      }
-    });
+      console.log(`🔄 Line Reversals (API directa): ${signals.length} partidos`);
+    } else {
+      console.warn('Line Reversals: respuesta vacía o sin GamesTable');
+    }
+  } catch (e) {
+    console.warn('Line Reversals API err:', e.message);
+  }
 
+  // ── 2. Dropping Odds — probar endpoints conocidos ─────────────────────────
+  // El endpoint exacto no fue capturado aún; se prueban variantes en orden.
+  const DO_ENDPOINTS = [
+    '/vipclub/droppingoddslist.php',
+    '/vipclub/droppingodds.php',
+    '/droppingodds',
+  ];
+
+  let doHtml = '';
+  for (const ep of DO_ENDPOINTS) {
     try {
-      await page.goto('https://zcodesystem.com/line_reversals', { waitUntil: 'networkidle2', timeout: 40000 });
-      await new Promise(r => setTimeout(r, 1000));
-
-      if (lrHtml) {
-        const signals = _parseZcodeGameTable(lrHtml);
-        let count = 0;
-        for (const s of signals) {
-          const k = _zbNorm(s.team1) + '|||' + _zbNorm(s.team2);
-          _zlrStore.set(k, s);
-          count++;
-        }
-        console.log(`🔄 Line Reversals: ${count} partidos con señales de dinero`);
-      } else {
-        // Fallback: extraer tabla directamente del DOM
-        const domData = await page.evaluate(() => {
-          const rows = [];
-          document.querySelectorAll('.GamesTableRow, [class*="TableRow"]').forEach(row => {
-            const text = row.innerText?.replace(/\s+/g,' ').trim();
-            if (text && text.length > 20) rows.push(text.slice(0,200));
-          });
-          return rows;
-        });
-        console.log(`🔄 Line Reversals DOM fallback: ${domData.length} filas`);
-        for (const text of domData) {
-          const pcts = [...text.matchAll(/(\d{1,3})%/g)].map(m=>parseInt(m[1]));
-          const odds = [...text.matchAll(/\d+\.\d{2}/g)].map(m=>parseFloat(m[0]));
-          const teams = text.match(/^([A-Za-z\s]{3,20})/);
-          if (teams && pcts.length >= 2 && odds.length >= 2) {
-            const k = _zbNorm(teams[1]) + '|||';
-            _zlrStore.set(k, { team1: teams[1].trim(), pct1: pcts[0], pct2: pcts[1], odds1: odds[0], odds2: odds[1] });
-          }
-        }
+      const data = await _zcodeGet(ep);
+      const html = (typeof data === 'object' ? data.html : data) || '';
+      // Validar que tenga contenido útil (cuotas + porcentajes)
+      if (html && /\d+\.\d{2}/.test(html) && /\d+%/.test(html) && html.length > 200) {
+        doHtml = html;
+        console.log(`📉 Dropping Odds: endpoint activo → ${ep}`);
+        break;
       }
-    } catch (e) { console.warn('ZCode Line Reversals nav err:', e.message); }
+    } catch (_) { /* intentar el siguiente */ }
+  }
 
-    // --- Dropping Odds ---
-    try {
-      await page.goto('https://zcodesystem.com/dropping_odds', { waitUntil: 'networkidle2', timeout: 40000 });
-      await new Promise(r => setTimeout(r, 1000));
-
-      const dropData = await page.evaluate(() => {
-        const rows = [];
-        document.querySelectorAll('tr, .GamesTableRow, [class*="Row"]').forEach(row => {
-          const text = row.innerText?.replace(/\s+/g,' ').trim();
-          if (text && /\d+%/.test(text) && /\d+\.\d{2}/.test(text)) rows.push(text.slice(0,200));
-        });
-        return rows;
-      });
-
-      let count = 0;
-      for (const text of dropData) {
-        const pcts = [...text.matchAll(/(\d{1,3})%/g)].map(m=>parseInt(m[1]));
-        const odds = [...text.matchAll(/(\d+\.\d{2})/g)].map(m=>parseFloat(m[1]));
-        const maxDrop = Math.max(...pcts);
-        if (maxDrop < 3 || odds.length < 2) continue;
-        const teamMatch = text.match(/^([A-Za-zÀ-ÿ\s]{3,25})/);
-        if (!teamMatch) continue;
-        const key = _zbNorm(teamMatch[1].trim()) + '|||';
-        _zdoStore.set(key, { team: teamMatch[1].trim(), drop: maxDrop, oddBefore: odds[0], oddAfter: odds[1] });
+  if (doHtml) {
+    // Parsear movimientos de cuota: buscar filas con equipo + odds antes/después
+    _zdoStore.clear();
+    let count = 0;
+    // Dividir en bloques (mismo patrón que Line Reversals)
+    const blocks = doHtml.split(/class="GamesTableRow[^"]*"/).slice(1);
+    for (const block of blocks) {
+      const text = block.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
+      const odds  = [...text.matchAll(/(\d+\.\d{2})/g)].map(m => parseFloat(m[1]));
+      const pcts  = [...text.matchAll(/(\d{1,3})%/g)].map(m => parseInt(m[1]));
+      if (odds.length < 2) continue;
+      // Calcular % de caída de cuota
+      const drop = odds.length >= 2 ? +((odds[0] - odds[odds.length - 1]) / odds[0] * 100).toFixed(1) : 0;
+      if (drop < 2) continue;
+      const teamMatch = text.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\-\.]{2,25})/);
+      if (!teamMatch) continue;
+      const team = teamMatch[1].trim();
+      // Tomar la señal más fuerte por equipo (mayor drop)
+      const key = _zbNorm(team) + '|||';
+      const existing = _zdoStore.get(key);
+      const maxPublicPct = pcts.length > 0 ? Math.max(...pcts) : 0;
+      if (!existing || drop > (existing.drop || 0)) {
+        _zdoStore.set(key, { team, drop, oddBefore: odds[0], oddAfter: odds[odds.length - 1], publicPct: maxPublicPct });
         count++;
       }
-      console.log(`📉 Dropping Odds: ${count} movimientos ≥3% extraídos`);
-    } catch (e) { console.warn('ZCode Dropping Odds err:', e.message); }
-
-    await page.close();
-    _zdoLastRun = Date.now();
-  } catch (e) {
-    console.warn('runZcodeMarketScrape err:', e.message);
-  } finally {
-    if (browser) await browser.close().catch(() => {});
+    }
+    console.log(`📉 Dropping Odds: ${count} movimientos ≥2% procesados`);
+  } else {
+    console.warn('📉 Dropping Odds: ningún endpoint respondió con datos válidos');
   }
+
+  _zdoLastRun = Date.now();
 }
 
 // ── ZCode Extra Tools: Totals Predictor, Power Rankings, Soccer Oscillator, Contrarian Bets ──
@@ -8544,7 +8533,7 @@ bot.onText(/\/zcode[-_]?tools/, async (msg) => {
           // Clases únicas de todos los elementos
           const classes = new Set();
           document.querySelectorAll('[class]').forEach(el => {
-            el.className.split(' ').filter(c=>c.length>2).forEach(c=>classes.add(c));
+            String(el.className).split(' ').filter(c=>c.length>2).forEach(c=>classes.add(c));
           });
           // Texto limpio
           document.querySelectorAll('script,style,nav,footer,header').forEach(el=>el.remove());
