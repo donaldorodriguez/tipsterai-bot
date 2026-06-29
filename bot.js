@@ -7113,31 +7113,83 @@ async function runZcodeMarketScrape() {
       // Esperar a que el JS del site cargue los datos en el DOM
       await new Promise(r => setTimeout(r, 3000));
 
-      const lrHtml = await page.evaluate(() => {
-        const t = document.querySelector('.GamesTable, [class*="GamesTable"]');
-        return t ? t.outerHTML : '';
-      }).catch(() => '');
+      // Extraer datos estructurados directamente en el browser para evitar problemas de parsing HTML
+      const lrData = await page.evaluate(() => {
+        const rows = [];
+        const rowEls = document.querySelectorAll('.GamesTableRow, [class*="GamesTableRow"]');
+        // Debug: log first row text to Railway logs
+        if (rowEls.length > 0) {
+          console.log('LR_ROW0:', rowEls[0].innerText.replace(/\s+/g,' ').slice(0,200));
+        } else {
+          console.log('LR_ROW0: no .GamesTableRow elements found');
+        }
+        rowEls.forEach(row => {
+          const text = row.innerText.replace(/\s+/g, ' ').trim();
+          if (!text || text.length < 10) return;
 
-      if (lrHtml && lrHtml.includes('GamesTable')) {
-        console.log(`🔍 LR DOM [${lrHtml.length}b] preview: ${lrHtml.slice(0,400).replace(/\s+/g,' ')}`);
-        const signals = _parseZcodeGameTable(lrHtml);
+          // Porcentajes: buscar números seguidos de % (con o sin espacio)
+          const pctMatches = [...text.matchAll(/(\d{1,3})\s*%/g)].map(m => parseInt(m[1]));
+          if (pctMatches.length < 2) return;
+          // Cuotas decimales
+          const oddsMatches = [...text.matchAll(/\b(\d+\.\d{2})\b/g)].map(m => parseFloat(m[1]));
+
+          // Intentar extraer equipos via "vs" separador
+          let team1 = '', team2 = '';
+          const vsMatch = text.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\.\-']{2,28}?)\s+vs?\.?\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\.\-']{2,28}?)(?:\s+\d|\s+\()/i);
+          if (vsMatch) {
+            team1 = vsMatch[1].trim();
+            team2 = vsMatch[2].trim();
+          } else {
+            // Fallback: texto antes del 1er % y entre 1er y 2do %
+            const parts = text.split(/\d{1,3}\s*%/);
+            const raw1 = parts[0].replace(/[^A-Za-zÀ-ÿ\s\.\-']/g, ' ').trim();
+            const raw2 = (parts[1] || '').replace(/[^A-Za-zÀ-ÿ\s\.\-']/g, ' ').trim();
+            // Quitar prefijo de fecha (e.g. "Jun 29", "Mon")
+            team1 = raw1.replace(/^(?:[A-Za-z]{3}[\s\d]*)+/, '').trim().slice(-30);
+            team2 = raw2.slice(0, 30);
+          }
+
+          if (team1.length < 2) return;
+
+          rows.push({
+            team1,
+            team2,
+            pct1: pctMatches[0],
+            pct2: pctMatches[1],
+            odds1: oddsMatches[0] || null,
+            odds2: oddsMatches[1] || null,
+            odds3: oddsMatches[2] || null,
+            odds4: oddsMatches[3] || null,
+          });
+        });
+        return rows;
+      }).catch(() => []);
+
+      if (lrData.length > 0) {
         _zlrStore.clear();
         _zdoStore.clear();
-        for (const s of signals) {
-          _zlrStore.set(_zbNorm(s.team1) + '|||' + _zbNorm(s.team2), s);
+        for (const s of lrData) {
+          // Sharp side = equipo con mayor %
+          const sharpSide = s.pct1 > s.pct2 ? s.team1 : s.team2;
+          const drop1 = s.odds1 && s.odds2 && s.odds1 > s.odds2 ? +((s.odds1 - s.odds2) / s.odds1 * 100).toFixed(1) : 0;
+          const drop2 = s.odds3 && s.odds4 && s.odds3 > s.odds4 ? +((s.odds3 - s.odds4) / s.odds3 * 100).toFixed(1) : 0;
+          const sig = { ...s, drop1, drop2, sharpSide };
+
+          _zlrStore.set(_zbNorm(s.team1) + '|||' + _zbNorm(s.team2), sig);
+
           const addDrop = (team, drop, oddBefore, oddAfter, pct) => {
             if (!team || drop < 2) return;
             const k = _zbNorm(team) + '|||';
             const ex = _zdoStore.get(k);
             if (!ex || drop > ex.drop) _zdoStore.set(k, { team, drop, oddBefore, oddAfter, publicPct: pct ?? 0 });
           };
-          addDrop(s.team1, s.drop1, s.oddOpen1, s.oddClose1, s.pct1);
-          addDrop(s.team2, s.drop2, s.oddOpen2, s.oddClose2, s.pct2);
+          addDrop(s.team1, drop1, s.odds1, s.odds2, s.pct1);
+          addDrop(s.team2, drop2, s.odds3, s.odds4, s.pct2);
         }
-        console.log(`🔄 Line Reversals: ${signals.length} partidos | 📉 Dropping Odds: ${_zdoStore.size} equipos`);
+        console.log(`🔄 Line Reversals: ${lrData.length} partidos | 📉 Dropping Odds: ${_zdoStore.size} equipos`);
       } else {
-        const preview = await page.evaluate(() => document.body?.innerText?.slice(0,200) || '').catch(() => '');
-        console.warn(`Line Reversals: sin GamesTable. Page: ${preview.replace(/\s+/g,' ')}`);
+        const preview = await page.evaluate(() => document.body?.innerText?.slice(0,150) || '').catch(() => '');
+        console.warn(`Line Reversals: sin datos DOM. Page: ${preview.replace(/\s+/g,' ')}`);
       }
     } catch (e) { console.warn('Line Reversals nav err:', e.message); }
 
