@@ -7064,7 +7064,9 @@ async function runZcodeMarketScrape() {
   // La caída de cuota (drop) se calcula a partir de las cuotas de apertura vs cierre.
   try {
     const data = await _zcodeGet('/vipclub/linemovinggameslistn1.php', {}, { referer: 'https://zcodesystem.com/line_reversals' });
+    const lrRaw = typeof data === 'object' ? JSON.stringify(data) : (data || '');
     const lrHtml = (typeof data === 'object' ? data?.html : data) || '';
+    console.log(`🔍 LR raw [${lrRaw.length}b]: ${lrRaw.slice(0,300).replace(/\s+/g,' ')}`);
 
     if (lrHtml && lrHtml.includes('GamesTable')) {
       const signals = _parseZcodeGameTable(lrHtml);
@@ -7100,7 +7102,9 @@ async function runZcodeMarketScrape() {
   // ── 2. EV Tool — endpoint descubierto: /evtool/gameslist.php ─────────────────
   try {
     const data = await _zcodeGet('/evtool/gameslist.php', {}, { referer: 'https://zcodesystem.com/evtool/' });
+    const evRaw = typeof data === 'object' ? JSON.stringify(data) : (data || '');
     const evHtml = (typeof data === 'object' ? data?.html : null) || '';
+    console.log(`🔍 EV raw [${evRaw.length}b]: ${evRaw.slice(0,300).replace(/\s+/g,' ')}`);
 
     if (evHtml && evHtml.includes('MainTable')) {
       // Parsear filas de la tabla ordenada por EV descendente
