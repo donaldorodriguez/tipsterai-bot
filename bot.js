@@ -7107,6 +7107,10 @@ async function runZcodeMarketScrape() {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await _zbSetCookies(page);
 
+    // Warmup: visitar home para inicializar la sesión server-side antes de páginas VIP
+    await page.goto('https://zcodesystem.com/', { waitUntil: 'domcontentloaded', timeout: 20000 }).catch(() => {});
+    await new Promise(r => setTimeout(r, 1500));
+
     // ── 1. Line Reversals + Dropping Odds — extraer del DOM ──────────────────────
     try {
       await page.goto('https://zcodesystem.com/line_reversals', { waitUntil: 'networkidle2', timeout: 40000 });
