@@ -7028,16 +7028,31 @@ function _parseZcodeGameTable(html) {
   return signals;
 }
 
-// Helper: GET directo a un endpoint ZCode con cookies (sin Puppeteer)
-async function _zcodeGet(path, params = {}) {
-  const url = new URL(path.startsWith('http') ? path : `https://zcodesystem.com${path}`);
-  Object.entries(params).forEach(([k, v]) => url.searchParams.set(k, v));
-  const resp = await axios.get(url.toString(), {
-    headers: _zdoHeaders(),
-    timeout: 15000,
-    validateStatus: s => s < 500,
-  });
-  return resp.data; // puede ser string (HTML) o object (JSON)
+// Helper: GET/POST directo a un endpoint ZCode con cookies (sin Puppeteer)
+async function _zcodeGet(path, params = {}, options = {}) {
+  const fullUrl = path.startsWith('http') ? path : `https://zcodesystem.com${path}`;
+  const referer = options.referer || 'https://zcodesystem.com/';
+  const headers = { ..._zdoHeaders(), 'Referer': referer };
+
+  // Intentar GET primero, luego POST si no hay datos útiles
+  for (const method of ['get', 'post']) {
+    const resp = method === 'get'
+      ? await axios.get(fullUrl, { headers, params, timeout: 15000, validateStatus: s => s < 500 })
+      : await axios.post(fullUrl, new URLSearchParams(params).toString(), {
+          headers: { ...headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+          timeout: 15000, validateStatus: s => s < 500,
+        });
+
+    const body = resp.data;
+    const bodyStr = typeof body === 'string' ? body : JSON.stringify(body);
+
+    // Si la respuesta tiene datos reales (no login page, no vacío)
+    const isLoginRedirect = /sign.?in|log.?in|password|username/i.test(bodyStr.slice(0, 300));
+    if (!isLoginRedirect && bodyStr.length > 100) return body;
+
+    if (method === 'get') console.log(`🔍 ${path}: GET → ${bodyStr.length} bytes, primer 200: ${bodyStr.slice(0,200).replace(/\n/g,' ')}`);
+  }
+  return null;
 }
 
 async function runZcodeMarketScrape() {
@@ -7048,8 +7063,8 @@ async function runZcodeMarketScrape() {
   // Ambas herramientas usan el mismo backend (linemovinggameslistn1.php).
   // La caída de cuota (drop) se calcula a partir de las cuotas de apertura vs cierre.
   try {
-    const data = await _zcodeGet('/vipclub/linemovinggameslistn1.php');
-    const lrHtml = (typeof data === 'object' ? data.html : data) || '';
+    const data = await _zcodeGet('/vipclub/linemovinggameslistn1.php', {}, { referer: 'https://zcodesystem.com/line_reversals' });
+    const lrHtml = (typeof data === 'object' ? data?.html : data) || '';
 
     if (lrHtml && lrHtml.includes('GamesTable')) {
       const signals = _parseZcodeGameTable(lrHtml);
@@ -7084,8 +7099,8 @@ async function runZcodeMarketScrape() {
 
   // ── 2. EV Tool — endpoint descubierto: /evtool/gameslist.php ─────────────────
   try {
-    const data = await _zcodeGet('/evtool/gameslist.php');
-    const evHtml = (typeof data === 'object' ? data.html : null) || '';
+    const data = await _zcodeGet('/evtool/gameslist.php', {}, { referer: 'https://zcodesystem.com/evtool/' });
+    const evHtml = (typeof data === 'object' ? data?.html : null) || '';
 
     if (evHtml && evHtml.includes('MainTable')) {
       // Parsear filas de la tabla ordenada por EV descendente
@@ -7130,8 +7145,8 @@ async function runZcodeExtraTools() {
 
   // ── Power Rankings — axios directo a /powerrankings.php ──────────────────────
   try {
-    const html = await _zcodeGet('/powerrankings.php');
-    const prHtml = typeof html === 'string' ? html : '';
+    const html = await _zcodeGet('/powerrankings.php', {}, { referer: 'https://zcodesystem.com/power_rankings.php' });
+    const prHtml = typeof html === 'string' ? html : (typeof html === 'object' ? JSON.stringify(html) : '');
 
     if (prHtml && prHtml.includes('Power Ranking')) {
       // Parsear filas de tabla: Rank | Team | Rating | Trend
