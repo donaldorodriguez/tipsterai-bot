@@ -2491,14 +2491,11 @@ function buildPickCandidates(enrichedFixtures) {
     const pHomeCardsO15  = poissonCDF_above(cardsLambda * 0.52, 2);
     const pAwayCardsO15  = poissonCDF_above(cardsLambda * 0.48, 2);
 
-    for (const m of markets) {
-      const o = m.oddsVal;
-      if (!o || o <= 1) continue;                          // sin cuota
-      // Piso global 1.65 — mercados obvios (cuota muy baja = sin valor real)
-      // Un pick con DNB 1.15 al Real Madrid o DC 1X 1.20 no tiene valor
-      if (o < 1.65) continue;
+    // Señales ZCode Soccer Buddy para este fixture
+    const _zb = f.soccerBuddy || null;
 
-      // ── Inyectar prob real de tarjetas ───────────────────────────────────────
+    for (const m of markets) {
+      // ── Inyectar prob real de tarjetas (antes del check de odds) ─────────────
       if (m._cardsBlock) {
         m.prob = m.key === 'cardsOver25'     ? pCardsOver25
                : m.key === 'cardsOver35'     ? pCardsOver35
@@ -2511,18 +2508,59 @@ function buildPickCandidates(enrichedFixtures) {
 
       if (!m.prob || m.prob < (m.minProb || 0.48)) continue; // prob insuficiente
 
-      // Tarjetas: no hay modelo propio → solo evaluar si la cuota tiene valor implícito
+      // ── Cuota real o cuota justa implícita (abre DC, DNB, HT, team corners) ──
+      // Sin cuota real, usamos 1/(prob × 0.93) que refleja breakeven con margen 7%.
+      // Estas "implied" odss no tienen valor real sobre el mercado — el stake se limita.
+      const hasRealOdds = m.oddsVal != null && m.oddsVal > 1;
+      const impliedFair = m.prob > 0.10 ? +(1 / (m.prob * 0.93)).toFixed(2) : null;
+      const o = hasRealOdds ? m.oddsVal : impliedFair;
+      if (!o || o <= 1) continue;
+
+      // Piso mínimo para cuotas REALES: 1.65 global, 1.30 para DC/DNB
+      if (hasRealOdds) {
+        const catFloor = ['dc', 'dnb'].includes(m.cat) ? 1.30 : 1.65;
+        if (o < catFloor) continue;
+      }
+
+      // ── Tarjetas: no hay modelo propio → solo evaluar si la cuota tiene valor ─
       // usamos prob heurística directamente (ya definida en cada tarjeta arriba)
 
-      const evRaw = calcEV(m.prob, o);
+      let evRaw = calcEV(m.prob, o);
       if (evRaw === null || evRaw < -5) continue;
 
-      // DNB solo si hay cuota real (ya filtrado arriba por oddsVal)
-      // Sin restricción adicional — EV y minProb ya lo controlan
+      // ── ZCode Soccer Buddy: boost de EV por confirmación externa ─────────────
+      if (_zb) {
+        let zbBoost = 0;
+        if (m.key === 'btts'      && _zb.btts_pct >= 68)  zbBoost += (_zb.btts_pct >= 78 ? 6 : 3);
+        if (m.key === 'bttsNo'    && _zb.btts_pct != null && _zb.btts_pct <= 32) zbBoost += 3;
+        if ((m.key === 'over25' || m.key === 'over15') && _zb.over25_pct >= 68) zbBoost += (_zb.over25_pct >= 78 ? 6 : 3);
+        if (m.key === 'over35'    && _zb.over35_pct >= 60)  zbBoost += 3;
+        if (m.key === 'under25'   && _zb.over25_pct != null && _zb.over25_pct <= 32) zbBoost += 3;
+        if (m.key === 'ht_over05' && _zb.ht_over05_pct >= 72) zbBoost += 4;
+        if (m.key === 'draw_1T'   && _zb.draw_pct >= 38)  zbBoost += 2;
+        if (m.key === 'homeWin'   && _zb.home_win_pct >= 60) zbBoost += 3;
+        if (m.key === 'awayWin'   && _zb.away_win_pct >= 58) zbBoost += 3;
+        if (m.key === 'dnb_home'  && _zb.home_win_pct >= 58) zbBoost += 2;
+        if (m.key === 'dnb_away'  && _zb.away_win_pct >= 55) zbBoost += 2;
+        if (_zb.inValueBets) zbBoost += 3;  // ZCode lo marca como value bet → bonus universal  // ZCode lo marca como value bet → bonus universal
+        // Score prediction confirma dirección del resultado
+        const pred = (_zb.scorePred || '');
+        if (pred) {
+          const [hs, as] = pred.split(':').map(Number);
+          if (!isNaN(hs) && !isNaN(as)) {
+            if (m.key === 'homeWin'  && hs > as)  zbBoost += 2;
+            if (m.key === 'awayWin'  && as > hs)  zbBoost += 2;
+            if (m.key === 'btts'     && hs >= 1 && as >= 1) zbBoost += 2;
+            if (m.key === 'over25'   && (hs + as) >= 3) zbBoost += 2;
+            if (m.key === 'under25'  && (hs + as) <= 2) zbBoost += 2;
+          }
+        }
+        if (zbBoost > 0) {
+          evRaw = Math.min(evRaw + zbBoost, Math.max(evRaw * 1.5, evRaw + zbBoost));
+        }
+      }
 
       // ── Tier multiplier de liga: penaliza ligas de baja cobertura ────────────
-      // Impide que un partido de segunda división colombiana con EV "alto"
-      // (por datos incompletos) compita con UCL o Premier League.
       const leagueP   = LEAGUE_PRIORITY[f.leagueId] || 20;
       const tierMult  = leagueP >= 80 ? 1.15   // Tier 1-2: UCL, Libertadores, ligas top
                       : leagueP >= 60 ? 1.05   // Tier 3: Eredivisie, Belgian, Brasileirao
@@ -2530,11 +2568,9 @@ function buildPickCandidates(enrichedFixtures) {
                       : leagueP >= 30 ? 0.90   // Tier 5: Ligas medianas europeas
                       :                0.75;   // Tier 6-7: Ligas sin datos confiables
       const ev = +(evRaw * tierMult).toFixed(2);
-      if (ev < -5) continue;  // re-verificar después del ajuste
+      if (ev < -5) continue;
 
-      // Stake basado en EV (ventaja real sobre el mercado).
-      // Las casas tienen márgenes del 5-8% → EV > 5% ya indica valor real.
-      // No se usa prob × cuota combinada porque eso requeriría errores imposibles del mercado.
+      // Stake basado en EV.
       let stake;
       if      (ev > 15 && m.prob >= 0.52) stake = 10;
       else if (ev > 10 && m.prob >= 0.52) stake = 9;
@@ -2575,10 +2611,14 @@ function buildPickCandidates(enrichedFixtures) {
         stake = 8;
       }
 
+      // Sin cuota real: stake cap 6 (no sabemos si el mercado realmente tiene valor)
+      if (!hasRealOdds && stake > 6) stake = 6;
+
       // La cuota mostrada al usuario lleva el buffer (+0.15).
-      // La cuota real (o) se usó para el cálculo de EV — es correcta internamente.
-      const oddsDisplayed = +Math.round((o + ODDS_DISPLAY_BUFFER) * 20) / 20; // redondea a 0.05
-      if (oddsDisplayed > 2.65) continue; // Cuota máxima: 2.65
+      const oddsDisplayed = hasRealOdds
+        ? +Math.round((o + ODDS_DISPLAY_BUFFER) * 20) / 20
+        : null; // cuota implícita → el LLM buscará la cuota real en su análisis
+      if (oddsDisplayed != null && oddsDisplayed > 2.65) continue; // Cuota máxima
       if (stake < 5) continue;            // Stake mínimo publicable: 5/10
 
       candidates.push({
@@ -2594,7 +2634,8 @@ function buildPickCandidates(enrichedFixtures) {
         marketLabel:  m.label,
         category:     m.cat,
         prob:         +(m.prob * 100).toFixed(1),
-        odds:         oddsDisplayed,
+        odds:         oddsDisplayed,          // null si no hay cuota real
+        _syntheticOdds: !hasRealOdds,         // true = cuota implícita, el LLM busca la real
         ev:           ev,
         stake,
         xGLocal:      probs.homeLambda,
@@ -3233,14 +3274,17 @@ Si el JSON de datos incluye el campo "probabilidadesCalculadas", DEBES usarlo co
 - forma5: forma reciente ponderada de los últimos 5 partidos. Si un equipo tiene forma5.nota = "Forma mala" (≤5 puntos), reduce 8% la prob de victoria.
 - cuotasReales: cuotas reales de Bet365. Usa ESTAS cuotas para el campo "Cuota mínima" del pick (no inventes cuotas). Si no hay cuotas reales, mantén las estimadas.
 - prediccionAPI: predicción del modelo de API-Football. Úsala como señal de confirmación — si coincide con tu análisis, sube el stake en 0.5. Si contradice, baja el stake en 1.
+- picksMotorJS: picks pre-calculados por el motor Poisson. Si un pick tiene "_syntheticOdds": true significa que NO hay cuota real disponible — el motor la estimó. Para esos picks: (a) busca la cuota real en cuotasReales o en tu conocimiento de mercado típico, (b) si encuentras cuota real ≥ 1.40, publícalo con esa cuota real, (c) si no la encuentras, usa "est. ~X.XX" en el formato. Los picks con _syntheticOdds siguen siendo válidos matemáticamente — solo falta la cuota exacta de la casa.
 - soccerBuddy: señales del modelo ZCode Soccer Buddy (simulación Monte Carlo de miles de partidos). Son externas y complementan el Poisson propio.
   * Si soccerBuddy.btts_pct ≥ 70 Y nuestro probBTTS ≥ 60 → confirmación doble → sube stake en 1.
   * Si soccerBuddy.over25_pct ≥ 70 Y nuestro probOver25 ≥ 60 → confirmación doble → sube stake en 1.
-  * Si soccerBuddy.ht_over05_pct ≥ 70 → señal fuerte de gol en 1T → considera ese mercado si no lo tenías.
-  * Si soccerBuddy.scorePred y coincide con la dirección de nuestro análisis (local/empate/visitante) → confirmación extra → +0.5 stake.
+  * Si soccerBuddy.ht_over05_pct ≥ 70 → señal fuerte de gol en 1T → añade ese mercado si no lo tenías (DC con gol en 1T, Over 0.5 1T).
+  * Si soccerBuddy.sh_over05_pct ≥ 75 → señal fuerte de gol en 2T → considera Over 0.5 segunda mitad si hay cuota.
+  * Si soccerBuddy.scorePred → úsalo para decidir entre resultado local/empate/visitante y para confirmar BTTS.
+  * Si soccerBuddy.inValueBets = true → el pick está validado por ZCode como value bet → confirma la selección, sube stake +1.
   * Si soccerBuddy contradice nuestro modelo (ej. nosotros: Over25 65%, ellos: over25_pct 35%) → NO emitas ese pick. Hay señal mixta.
   * NUNCA menciones "ZCode", "Soccer Buddy" ni "simulación Monte Carlo" al usuario. Solo usa los datos en silencio para calibrar.
-  * Los valores LOCKED (que aparecen como null en el JSON) simplemente no los uses — no dan señal.
+  * Los valores null en soccerBuddy son campos no disponibles — simplemente ignóralos.
 - mercadoZCode: señales de mercado real (dinero de apostadores profesionales). Si está presente:
   * droppingOddsLocal.droppingOdds > 8% → cuota del local bajó bruscamente = dinero entrando al local → refuerza picks locales, sube stake +1.
   * droppingOddsVisitante.droppingOdds > 8% → dinero al visitante → refuerza picks visitante.
@@ -5157,16 +5201,21 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       if (zb) {
         e.soccerBuddy = {
           _nota: 'Predicciones del modelo ZCode Soccer Buddy (simulación Monte Carlo). Úsalas como señal de confirmación externa.',
-          scorePred:   zb.scorePred   || null,
-          htScorePred: zb.htScorePred || null,
-          btts_pct:    zb.btts        || null,
-          over15_pct:  zb.over15      || null,
-          over25_pct:  zb.over25      || null,
-          draw_pct:    zb.draw        || null,
-          ht_over05_pct: zb.ht_over05 || null,
-          ht_over15_pct: zb.ht_over15 || null,
-          sh_over05_pct: zb.sh_over05 || null,
-          sh_over15_pct: zb.sh_over15 || null,
+          scorePred:     zb.scorePred   || null,
+          htScorePred:   zb.htScorePred || null,
+          likelyResult:  zb.likelyResult || null,
+          inValueBets:   zb.inValueBets  || false,
+          btts_pct:      zb.btts         ?? null,
+          over15_pct:    zb.over15       ?? null,
+          over25_pct:    zb.over25       ?? null,
+          over35_pct:    zb.over35       ?? null,
+          draw_pct:      zb.draw         ?? null,
+          home_win_pct:  zb.home_win     ?? null,
+          away_win_pct:  zb.away_win     ?? null,
+          ht_over05_pct: zb.ht_over05    ?? null,
+          ht_over15_pct: zb.ht_over15    ?? null,
+          sh_over05_pct: zb.sh_over05    ?? null,
+          sh_over15_pct: zb.sh_over15    ?? null,
         };
         // Eliminar nulls para no inflar el JSON
         Object.keys(e.soccerBuddy).forEach(k => {
@@ -7231,7 +7280,7 @@ async function zbScrapeOnce() {
     await new Promise(r => setTimeout(r, 1000));
 
     const raw = await page.evaluate(() => {
-      const PROB_ORDER = ['draw','over15','over25','btts','ht_over05','ht_over15','sh_over05','sh_over15'];
+      const PROB_ORDER = ['draw','over15','over25','btts','ht_over05','ht_over15','sh_over05','sh_over15','over35','home_win','away_win'];
 
       // Detecta si una celda está bloqueada (requiere upgrade)
       const isLocked = td =>
@@ -7338,8 +7387,9 @@ async function zbScrapeOnce() {
         home: entry.home, away: entry.away, league: entry.league,
         inValueBets: false, likelyResult: null,
         scorePred: null, htScorePred: null,
-        draw: null, over15: null, over25: null, btts: null,
+        draw: null, over15: null, over25: null, over35: null, btts: null,
         ht_over05: null, ht_over15: null, sh_over05: null, sh_over15: null,
+        home_win: null, away_win: null,
         gameId: null, _ts: Date.now(),
       };
 
