@@ -7107,25 +7107,16 @@ async function runZcodeMarketScrape() {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36');
     await _zbSetCookies(page);
 
-    let lrHtml = '';
-    let evJson = null;
-
-    page.on('response', async (res) => {
-      const url = res.url();
-      if (url.includes('linemovinggameslistn1')) {
-        const body = await res.text().catch(() => '');
-        try { lrHtml = JSON.parse(body).html || body; } catch { lrHtml = body; }
-      }
-      if (url.includes('gameslist.php') && url.includes('evtool')) {
-        const body = await res.text().catch(() => '');
-        try { evJson = JSON.parse(body); } catch { evJson = { html: body }; }
-      }
-    });
-
-    // ── 1. Line Reversals + Dropping Odds ────────────────────────────────────────
+    // ── 1. Line Reversals + Dropping Odds — extraer del DOM ──────────────────────
     try {
       await page.goto('https://zcodesystem.com/line_reversals', { waitUntil: 'networkidle2', timeout: 40000 });
-      await new Promise(r => setTimeout(r, 2000));
+      // Esperar a que el JS del site cargue los datos en el DOM
+      await new Promise(r => setTimeout(r, 3000));
+
+      const lrHtml = await page.evaluate(() => {
+        const t = document.querySelector('.GamesTable, [class*="GamesTable"]');
+        return t ? t.outerHTML : '';
+      }).catch(() => '');
 
       if (lrHtml && lrHtml.includes('GamesTable')) {
         const signals = _parseZcodeGameTable(lrHtml);
@@ -7144,23 +7135,29 @@ async function runZcodeMarketScrape() {
         }
         console.log(`🔄 Line Reversals: ${signals.length} partidos | 📉 Dropping Odds: ${_zdoStore.size} equipos`);
       } else {
-        console.warn(`Line Reversals: sin GamesTable (html: ${lrHtml.length}b)`);
+        const preview = await page.evaluate(() => document.body?.innerText?.slice(0,200) || '').catch(() => '');
+        console.warn(`Line Reversals: sin GamesTable. Page: ${preview.replace(/\s+/g,' ')}`);
       }
     } catch (e) { console.warn('Line Reversals nav err:', e.message); }
 
-    // ── 2. EV Tool ───────────────────────────────────────────────────────────────
+    // ── 2. EV Tool — extraer del DOM ─────────────────────────────────────────────
     try {
       await page.goto('https://zcodesystem.com/evtool/', { waitUntil: 'networkidle2', timeout: 40000 });
-      await new Promise(r => setTimeout(r, 2000));
+      await new Promise(r => setTimeout(r, 3000));
 
-      const evHtml = evJson?.html || '';
-      if (evHtml && evHtml.includes('MainTable')) {
-        const parsed = _parseEvToolHtml(evHtml);
+      const evHtml = await page.evaluate(() => {
+        const t = document.querySelector('#MainTable, table.DataTableGr, [class*="DataTable"]');
+        return t ? t.outerHTML : '';
+      }).catch(() => '');
+
+      if (evHtml && (evHtml.includes('MainTable') || evHtml.includes('<tr'))) {
+        const parsed = _parseEvToolHtml(evHtml.includes('MainTable') ? evHtml : `<table id="MainTable">${evHtml}</table>`);
         _evStore.clear();
         for (const [k, v] of parsed) _evStore.set(k, { ...v, _ts: Date.now() });
         console.log(`📈 EV Tool: ${_evStore.size} partidos con EV score`);
       } else {
-        console.warn(`EV Tool: sin MainTable (evJson: ${JSON.stringify(evJson)?.slice(0,100)})`);
+        const preview = await page.evaluate(() => document.body?.innerText?.slice(0,200) || '').catch(() => '');
+        console.warn(`EV Tool: sin MainTable. Page: ${preview.replace(/\s+/g,' ')}`);
       }
     } catch (e) { console.warn('EV Tool nav err:', e.message); }
 
