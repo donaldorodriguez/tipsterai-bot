@@ -6998,7 +6998,6 @@ function _parseZcodeLR(html) {
     return results;
   }
 
-  console.log(`🔍 LR parser: ${blocks.length} game blocks`);
 
   for (const block of blocks) {
     // Nombres de equipo: class="team">Team Name<
@@ -7173,8 +7172,7 @@ async function runZcodeMarketScrape() {
           if (res.url().includes('line_moving_games_list') || res.url().includes('linemovinggameslist')) {
             try {
               const body = await res.text().catch(() => '');
-              console.log(`🔌 LR endpoint: ${res.url().split('/').pop()} → ${res.status()} [${body.length}b]`);
-              if (body.length > 1000) {
+                      if (body.length > 1000) {
                 page.off('response', handler);
                 resolve(body);
               }
@@ -7198,8 +7196,7 @@ async function runZcodeMarketScrape() {
           const parsed = JSON.parse(lrRawHtml);
           if (parsed.html) lrHtml = parsed.html;
         } catch (_) {}
-        console.log(`🔍 LR HTML [${lrHtml.length}b]: ${lrHtml.slice(0,120).replace(/\s+/g,' ')}`);
-        lrData = _parseZcodeLR(lrHtml);
+          lrData = _parseZcodeLR(lrHtml);
       }
 
       if (lrData.length > 0) {
@@ -7216,8 +7213,7 @@ async function runZcodeMarketScrape() {
           addDrop(s.team1, s.drop1, s.oddOpen1, s.oddClose1, s.pct1);
           addDrop(s.team2, s.drop2, s.oddOpen2, s.oddClose2, s.pct2);
         }
-        const lrSample = lrData.slice(0,3).map(s=>`${s.team1}(${s.pct1}%) vs ${s.team2}(${s.pct2}%)`).join(', ');
-        console.log(`🔄 Line Reversals: ${lrData.length} partidos | 📉 Dropping Odds: ${_zdoStore.size} equipos | ${lrSample}`);
+        console.log(`🔄 Line Reversals: ${lrData.length} partidos | 📉 Dropping Odds: ${_zdoStore.size} equipos`);
       } else {
         console.warn(`Line Reversals: sin datos del endpoint (${lrRawHtml ? lrRawHtml.length+'b recibidos pero 0 rows parseados' : 'timeout sin respuesta'})`);
       }
