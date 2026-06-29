@@ -6983,60 +6983,51 @@ function _zdoHeaders() {
 // Parsear HTML de tabla ZCode (Line Reversals / GamesTable) → array de señales por partido
 // Extrae: equipos, % de dinero sharp, cuotas de apertura y cierre, y % de drop de cuota.
 // Parser para la respuesta de line_moving_games_list_n1.php
-// El HTML contiene divs class="GamesTableRow" con datos de partido
+// Estructura real: rows con class="game active", equipos en class="team",
+// porcentajes en class="public_tickets ... ToML ...">ML public: <b>X%</b>
+// odds en class="MoneyLine odd1">X.XX
 function _parseZcodeLR(html) {
   const results = [];
   if (!html || html.length < 100) return results;
 
-  // Dividir en bloques por cada fila de partido
-  const blocks = html.split(/class="GamesTableRow[^"]*"/).slice(1);
+  // Los rows de partido usan class="game..." (game active, game  , etc.)
+  const blocks = html.split(/class="game\s/).slice(1);
+
   if (blocks.length === 0) {
-    // Diagnóstico: ver clases usadas y dónde están los %
-    const divClasses = [...html.matchAll(/class="([^"]{3,40})"/g)].map(m=>m[1]).slice(0,25);
-    console.warn(`LR parser: 0 bloques en HTML [${html.length}b]. Clases: ${divClasses.join(' | ')}`);
-    const firstPct = html.indexOf('%');
-    if (firstPct > 0) console.warn(`LR first% ctx: ${html.slice(Math.max(0,firstPct-150), firstPct+50).replace(/\s+/g,' ')}`);
+    console.warn(`LR parser: 0 game blocks en HTML [${html.length}b]`);
     return results;
   }
 
-  // Debug: primer bloque para ver la estructura
-  const debugText = blocks[0].replace(/<[^>]+>/g,' ').replace(/&[a-z]+;/g,' ').replace(/\s+/g,' ').trim().slice(0,200);
-  console.log(`🔍 LR block0 [${blocks.length} rows]: ${debugText}`);
+  console.log(`🔍 LR parser: ${blocks.length} game blocks`);
 
   for (const block of blocks) {
-    const text = block.replace(/<[^>]+>/g,' ').replace(/&[a-z]+;/g,' ').replace(/\s+/g,' ').trim();
+    // Nombres de equipo: class="team">Team Name<
+    const teams = [...block.matchAll(/class="team[^"]*"[^>]*>\s*([^<\n]{2,35}?)\s*</g)]
+      .map(m => m[1].trim())
+      .filter(t => t.length >= 2 && /[A-Za-zÀ-ÿ]/.test(t));
 
-    // Porcentajes — buscar TODOS los números seguidos de %
-    const pctMatches = [...text.matchAll(/(\d{1,3})\s*%/g)].map(m => parseInt(m[1]));
-    if (pctMatches.length < 2) continue;
+    // Porcentajes ML público: "ML public: <b>75%</b>"
+    const pcts = [...block.matchAll(/ML public:\s*<b>(\d+)%<\/b>/gi)]
+      .map(m => parseInt(m[1]));
 
-    // Cuotas decimales (ej. 1.85, 2.10)
-    const odds = [...text.matchAll(/\b(\d+\.\d{2})\b/g)].map(m => parseFloat(m[1]));
+    // Cuotas MoneyLine: class="MoneyLine odd1">1.85
+    const mlOdds = [...block.matchAll(/class="MoneyLine[^"]*"[^>]*>\s*([\d]+\.[\d]{2})\s*</g)]
+      .map(m => parseFloat(m[1]));
 
-    // Extraer nombres de equipo: texto alfabético antes del primer % y entre los dos primeros %
-    const pctIdx1 = text.search(/\d{1,3}\s*%/);
-    const raw1 = text.slice(0, pctIdx1).replace(/[^A-Za-zÀ-ÿ\s\-'\.]/g, ' ').trim();
-    // Quitar prefijo de fecha/hora al inicio (ej. "Jun 29", "12:00")
-    const team1 = raw1.replace(/^[\s\d:\/\-]+|^(?:[A-Za-z]{3,}\s+\d+\s+)|^\w{3}\s+/g, '').trim().slice(-30);
+    if (teams.length < 2 || pcts.length < 2) continue;
 
-    const afterFirst = text.slice(pctIdx1).replace(/^\d{1,3}\s*%/, '').trim();
-    const pctIdx2 = afterFirst.search(/\d{1,3}\s*%/);
-    const raw2 = pctIdx2 > 0 ? afterFirst.slice(0, pctIdx2).replace(/[^A-Za-zÀ-ÿ\s\-'\.]/g, ' ').trim() : '';
-    const team2 = raw2.slice(0, 30);
-
-    if (team1.length < 2) continue;
-
-    const open1  = odds.length >= 4 ? odds[0] : null;
-    const close1 = odds.length >= 4 ? odds[1] : (odds[0] || null);
-    const open2  = odds.length >= 4 ? odds[2] : null;
-    const close2 = odds.length >= 4 ? odds[3] : (odds[1] || null);
-    const drop1 = open1 && open1 > close1 ? +((open1 - close1) / open1 * 100).toFixed(1) : 0;
-    const drop2 = open2 && open2 > close2 ? +((open2 - close2) / open2 * 100).toFixed(1) : 0;
-    const sharpSide = pctMatches[0] > pctMatches[1] ? team1 : team2;
+    // Dropping odds: calcular de apertura → cierre si hay 4+ cuotas
+    const open1  = mlOdds.length >= 4 ? mlOdds[0] : null;
+    const close1 = mlOdds.length >= 4 ? mlOdds[1] : (mlOdds[0] || null);
+    const open2  = mlOdds.length >= 4 ? mlOdds[2] : null;
+    const close2 = mlOdds.length >= 4 ? mlOdds[3] : (mlOdds[1] || null);
+    const drop1 = open1 && close1 && open1 > close1 ? +((open1 - close1) / open1 * 100).toFixed(1) : 0;
+    const drop2 = open2 && close2 && open2 > close2 ? +((open2 - close2) / open2 * 100).toFixed(1) : 0;
+    const sharpSide = pcts[0] > pcts[1] ? teams[0] : teams[1];
 
     results.push({
-      team1, pct1: pctMatches[0], oddOpen1: open1, oddClose1: close1, drop1,
-      team2, pct2: pctMatches[1], oddOpen2: open2, oddClose2: close2, drop2,
+      team1: teams[0], pct1: pcts[0], oddOpen1: open1, oddClose1: close1, drop1,
+      team2: teams[1], pct2: pcts[1], oddOpen2: open2, oddClose2: close2, drop2,
       sharpSide,
     });
   }
