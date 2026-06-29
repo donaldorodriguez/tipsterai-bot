@@ -6982,6 +6982,63 @@ function _zdoHeaders() {
 
 // Parsear HTML de tabla ZCode (Line Reversals / GamesTable) → array de señales por partido
 // Extrae: equipos, % de dinero sharp, cuotas de apertura y cierre, y % de drop de cuota.
+// Parser para la respuesta de line_moving_games_list_n1.php
+// El HTML contiene divs class="GamesTableRow" con datos de partido
+function _parseZcodeLR(html) {
+  const results = [];
+  if (!html || html.length < 100) return results;
+
+  // Dividir en bloques por cada fila de partido
+  const blocks = html.split(/class="GamesTableRow[^"]*"/).slice(1);
+  if (blocks.length === 0) {
+    console.warn(`LR parser: 0 bloques en HTML [${html.length}b]. Preview: ${html.slice(0,200).replace(/\s+/g,' ')}`);
+    return results;
+  }
+
+  // Debug: primer bloque para ver la estructura
+  const debugText = blocks[0].replace(/<[^>]+>/g,' ').replace(/&[a-z]+;/g,' ').replace(/\s+/g,' ').trim().slice(0,200);
+  console.log(`🔍 LR block0 [${blocks.length} rows]: ${debugText}`);
+
+  for (const block of blocks) {
+    const text = block.replace(/<[^>]+>/g,' ').replace(/&[a-z]+;/g,' ').replace(/\s+/g,' ').trim();
+
+    // Porcentajes — buscar TODOS los números seguidos de %
+    const pctMatches = [...text.matchAll(/(\d{1,3})\s*%/g)].map(m => parseInt(m[1]));
+    if (pctMatches.length < 2) continue;
+
+    // Cuotas decimales (ej. 1.85, 2.10)
+    const odds = [...text.matchAll(/\b(\d+\.\d{2})\b/g)].map(m => parseFloat(m[1]));
+
+    // Extraer nombres de equipo: texto alfabético antes del primer % y entre los dos primeros %
+    const pctIdx1 = text.search(/\d{1,3}\s*%/);
+    const raw1 = text.slice(0, pctIdx1).replace(/[^A-Za-zÀ-ÿ\s\-'\.]/g, ' ').trim();
+    // Quitar prefijo de fecha/hora al inicio (ej. "Jun 29", "12:00")
+    const team1 = raw1.replace(/^[\s\d:\/\-]+|^(?:[A-Za-z]{3,}\s+\d+\s+)|^\w{3}\s+/g, '').trim().slice(-30);
+
+    const afterFirst = text.slice(pctIdx1).replace(/^\d{1,3}\s*%/, '').trim();
+    const pctIdx2 = afterFirst.search(/\d{1,3}\s*%/);
+    const raw2 = pctIdx2 > 0 ? afterFirst.slice(0, pctIdx2).replace(/[^A-Za-zÀ-ÿ\s\-'\.]/g, ' ').trim() : '';
+    const team2 = raw2.slice(0, 30);
+
+    if (team1.length < 2) continue;
+
+    const open1  = odds.length >= 4 ? odds[0] : null;
+    const close1 = odds.length >= 4 ? odds[1] : (odds[0] || null);
+    const open2  = odds.length >= 4 ? odds[2] : null;
+    const close2 = odds.length >= 4 ? odds[3] : (odds[1] || null);
+    const drop1 = open1 && open1 > close1 ? +((open1 - close1) / open1 * 100).toFixed(1) : 0;
+    const drop2 = open2 && open2 > close2 ? +((open2 - close2) / open2 * 100).toFixed(1) : 0;
+    const sharpSide = pctMatches[0] > pctMatches[1] ? team1 : team2;
+
+    results.push({
+      team1, pct1: pctMatches[0], oddOpen1: open1, oddClose1: close1, drop1,
+      team2, pct2: pctMatches[1], oddOpen2: open2, oddClose2: close2, drop2,
+      sharpSide,
+    });
+  }
+  return results;
+}
+
 function _parseZcodeGameTable(html) {
   const signals = [];
   if (!html) return signals;
@@ -7113,95 +7170,60 @@ async function runZcodeMarketScrape() {
 
     // ── 1. Line Reversals + Dropping Odds — extraer del DOM ──────────────────────
     try {
-      // Interceptar TODOS los requests del LR page para diagnóstico
-      const lrXhrCalls = [];
-      const lrResponseHandler = async res => {
-        const url = res.url();
-        const ct = res.headers()['content-type'] || '';
-        // Solo loguear JS/JSON/HTML (no imágenes/fonts/analytics noise)
-        if (/json|javascript|html|php/i.test(ct) && !url.includes('google') && !url.includes('analytics') && !url.includes('fontawesome')) {
-          try {
-            const body = await res.text().catch(() => '');
-            lrXhrCalls.push({ url: url.split('/').pop().slice(0,60), status: res.status(), len: body.length, preview: body.slice(0,80).replace(/\s+/g,' ') });
-          } catch (_) {}
-        }
-      };
-      page.on('response', lrResponseHandler);
-
-      await page.goto('https://zcodesystem.com/line_reversals', { waitUntil: 'networkidle2', timeout: 40000 });
-      // Esperar que el JS del site inyecte las filas via AJAX (hasta 15s)
-      await page.waitForSelector('.GamesTableRow, [class*="GamesTableRow"]', { timeout: 15000 }).catch(() => null);
-      page.off('response', lrResponseHandler);
-      if (lrXhrCalls.length > 0) {
-        console.log(`🔌 LR requests [${lrXhrCalls.length}]: ${lrXhrCalls.map(c => `${c.url}→${c.status}[${c.len}b]`).join(' | ')}`);
-      }
-
-      // Extraer datos estructurados — retornar debug info para loguear en Node.js
-      const lrResult = await page.evaluate(() => {
-        const rowEls = document.querySelectorAll('.GamesTableRow, [class*="GamesTableRow"]');
-        const hasTable = !!document.querySelector('.GamesTable, [class*="GamesTable"]');
-        const debugRow0 = rowEls.length > 0
-          ? rowEls[0].innerText.replace(/\s+/g,' ').slice(0, 200)
-          : (hasTable ? 'GamesTable existe pero sin rows aún' : 'no GamesTable encontrado');
-
-        const rows = [];
-        rowEls.forEach(row => {
-          const text = row.innerText.replace(/\s+/g, ' ').trim();
-          if (!text || text.length < 10) return;
-
-          const pctMatches = [...text.matchAll(/(\d{1,3})\s*%/g)].map(m => parseInt(m[1]));
-          if (pctMatches.length < 2) return;
-          const oddsMatches = [...text.matchAll(/\b(\d+\.\d{2})\b/g)].map(m => parseFloat(m[1]));
-
-          let team1 = '', team2 = '';
-          const vsMatch = text.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\.\-']{2,28}?)\s+vs?\.?\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\.\-']{2,28}?)(?:\s+\d|\s+\()/i);
-          if (vsMatch) {
-            team1 = vsMatch[1].trim();
-            team2 = vsMatch[2].trim();
-          } else {
-            const parts = text.split(/\d{1,3}\s*%/);
-            const raw1 = parts[0].replace(/[^A-Za-zÀ-ÿ\s\.\-']/g, ' ').trim();
-            const raw2 = (parts[1] || '').replace(/[^A-Za-zÀ-ÿ\s\.\-']/g, ' ').trim();
-            team1 = raw1.replace(/^(?:[A-Za-z]{3}[\s\d]*)+/, '').trim().slice(-30);
-            team2 = raw2.slice(0, 30);
+      // Capturar la respuesta de line_moving_games_list_n1.php directamente
+      // (llega con delay ~15-25s después de que realplexor se conecta)
+      let lrRawHtml = '';
+      const lrRespPromise = new Promise(resolve => {
+        const handler = async res => {
+          if (res.url().includes('line_moving_games_list') || res.url().includes('linemovinggameslist')) {
+            try {
+              const body = await res.text().catch(() => '');
+              console.log(`🔌 LR endpoint: ${res.url().split('/').pop()} → ${res.status()} [${body.length}b]`);
+              if (body.length > 1000) {
+                page.off('response', handler);
+                resolve(body);
+              }
+            } catch (_) {}
           }
+        };
+        page.on('response', handler);
+        // Auto-resolve sin datos después de 35s
+        setTimeout(() => { page.off('response', handler); resolve(''); }, 35000);
+      });
 
-          if (team1.length < 2) return;
-          rows.push({ team1, team2, pct1: pctMatches[0], pct2: pctMatches[1],
-            odds1: oddsMatches[0]||null, odds2: oddsMatches[1]||null,
-            odds3: oddsMatches[2]||null, odds4: oddsMatches[3]||null });
-        });
-        return { rows, debugRow0, rowCount: rowEls.length };
-      }).catch(e => ({ rows: [], debugRow0: `evaluate err: ${e.message}`, rowCount: 0 }));
+      await page.goto('https://zcodesystem.com/line_reversals', { waitUntil: 'domcontentloaded', timeout: 40000 });
+      // Esperar respuesta AJAX (hasta 35s)
+      lrRawHtml = await lrRespPromise;
 
-      console.log(`🔍 LR DOM [${lrResult.rowCount} rows]: ${lrResult.debugRow0}`);
-      const lrData = lrResult.rows;
+      let lrData = [];
+      if (lrRawHtml) {
+        // El endpoint devuelve JSON {"html":"..."} o HTML directo
+        let lrHtml = lrRawHtml;
+        try {
+          const parsed = JSON.parse(lrRawHtml);
+          if (parsed.html) lrHtml = parsed.html;
+        } catch (_) {}
+        console.log(`🔍 LR HTML [${lrHtml.length}b]: ${lrHtml.slice(0,120).replace(/\s+/g,' ')}`);
+        lrData = _parseZcodeLR(lrHtml);
+      }
 
       if (lrData.length > 0) {
         _zlrStore.clear();
         _zdoStore.clear();
         for (const s of lrData) {
-          // Sharp side = equipo con mayor %
-          const sharpSide = s.pct1 > s.pct2 ? s.team1 : s.team2;
-          const drop1 = s.odds1 && s.odds2 && s.odds1 > s.odds2 ? +((s.odds1 - s.odds2) / s.odds1 * 100).toFixed(1) : 0;
-          const drop2 = s.odds3 && s.odds4 && s.odds3 > s.odds4 ? +((s.odds3 - s.odds4) / s.odds3 * 100).toFixed(1) : 0;
-          const sig = { ...s, drop1, drop2, sharpSide };
-
-          _zlrStore.set(_zbNorm(s.team1) + '|||' + _zbNorm(s.team2), sig);
-
+          _zlrStore.set(_zbNorm(s.team1) + '|||' + _zbNorm(s.team2), s);
           const addDrop = (team, drop, oddBefore, oddAfter, pct) => {
             if (!team || drop < 2) return;
             const k = _zbNorm(team) + '|||';
             const ex = _zdoStore.get(k);
             if (!ex || drop > ex.drop) _zdoStore.set(k, { team, drop, oddBefore, oddAfter, publicPct: pct ?? 0 });
           };
-          addDrop(s.team1, drop1, s.odds1, s.odds2, s.pct1);
-          addDrop(s.team2, drop2, s.odds3, s.odds4, s.pct2);
+          addDrop(s.team1, s.drop1, s.oddOpen1, s.oddClose1, s.pct1);
+          addDrop(s.team2, s.drop2, s.oddOpen2, s.oddClose2, s.pct2);
         }
         console.log(`🔄 Line Reversals: ${lrData.length} partidos | 📉 Dropping Odds: ${_zdoStore.size} equipos`);
       } else {
-        const preview = await page.evaluate(() => document.body?.innerText?.slice(0,150) || '').catch(() => '');
-        console.warn(`Line Reversals: sin datos DOM. Page: ${preview.replace(/\s+/g,' ')}`);
+        console.warn(`Line Reversals: sin datos del endpoint (${lrRawHtml ? lrRawHtml.length+'b recibidos pero 0 rows parseados' : 'timeout sin respuesta'})`);
       }
     } catch (e) { console.warn('Line Reversals nav err:', e.message); }
 
