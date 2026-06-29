@@ -1443,24 +1443,30 @@ function normalizeRefName(name) {
     .join(' ');
 }
 
+function _toFloat(val) {
+  if (val == null || val === '') return null;
+  const n = parseFloat(val);
+  return isNaN(n) ? null : n;
+}
+
 function parseStatsHubApiData(refs) {
   return refs.map(r => ({
     nombre:                r.name,
     normalizado:           normalizeRefName(r.name),
     partidos:              parseInt(r.games) || null,
-    amarillas_por_partido: parseFloat(r.avg_yellow_cards_per_game) || null,
-    rojas_por_partido:     parseFloat(r.avg_red_cards_per_game) || null,
-    avg_tarjetas:          parseFloat(r.avg_cards_per_game) || null,
-    tarjetas_1T:           parseFloat(r.avg_first_half_cards) || null,
-    tarjetas_2T:           parseFloat(r.avg_second_half_cards) || null,
+    amarillas_por_partido: _toFloat(r.avg_yellow_cards_per_game),
+    rojas_por_partido:     _toFloat(r.avg_red_cards_per_game),
+    avg_tarjetas:          _toFloat(r.avg_cards_per_game),
+    tarjetas_1T:           _toFloat(r.avg_first_half_cards),
+    tarjetas_2T:           _toFloat(r.avg_second_half_cards),
     penaltis_por_partido:  (r.total_penalties && r.games)
                              ? +(parseInt(r.total_penalties) / parseInt(r.games)).toFixed(2) : null,
-    faltas_por_partido:    parseFloat(r.avg_fouls_per_game) || null,
-    pct_over35_tarjetas:   parseFloat(r.o35_cards_pct) || null,
-    pct_over45_tarjetas:   parseFloat(r.o45_cards_pct) || null,
-    pct_over55_tarjetas:   parseFloat(r.o55_cards_pct) || null,
-    pct_btc:               parseFloat(r.both_teams_card_pct) || null,
-    pct_btc2:              parseFloat(r.both_teams_o15_card_pct) || null,
+    faltas_por_partido:    _toFloat(r.avg_fouls_per_game),
+    pct_over35_tarjetas:   _toFloat(r.o35_cards_pct),
+    pct_over45_tarjetas:   _toFloat(r.o45_cards_pct),
+    pct_over55_tarjetas:   _toFloat(r.o55_cards_pct),
+    pct_btc:               _toFloat(r.both_teams_card_pct),
+    pct_btc2:              _toFloat(r.both_teams_o15_card_pct),
   }));
 }
 
@@ -1518,6 +1524,7 @@ async function getRefereeCardStats(name) {
       pct_btc:               sh.pct_btc,
       pct_btc2:              sh.pct_btc2,
       fuente_stats:          'statshub',
+      _muestraInsuficiente:  sh.partidos != null && sh.partidos < 15,
     };
     _refereeStatsCache.set(name, result);
     setTimeout(() => _refereeStatsCache.delete(name), 24 * 3_600_000);
@@ -1743,6 +1750,26 @@ function poissonCDF_above(lambda, threshold) {
   return 1 - cumulative;
 }
 
+// Añade alias semánticos a stats de equipo local (jugando en casa)
+function withHomeContext(stats) {
+  if (!stats) return null;
+  return {
+    ...stats,
+    amarillasPorPartido: stats.tarjetasAmHome ?? null,
+    cornersxP:           stats.cornersPerGameHome ?? stats.cornersPerGame ?? null,
+  };
+}
+
+// Añade alias semánticos a stats de equipo visitante (jugando fuera)
+function withAwayContext(stats) {
+  if (!stats) return null;
+  return {
+    ...stats,
+    amarillasPorPartido: stats.tarjetasAmAway ?? null,
+    cornersxP:           stats.cornersPerGameAway ?? stats.cornersPerGame ?? null,
+  };
+}
+
 /**
  * Calcula probabilidades usando modelo de Poisson Dixon-Coles simplificado.
  * Requiere promedios de goles por partido de ambos equipos.
@@ -1834,7 +1861,7 @@ function calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
  * Extiende calcPoissonProbs con probabilidades de 1er tiempo y corners.
  * Necesario para pick selection multi-mercado sin depender del LLM.
  */
-function calcExtendedProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
+function calcExtendedProbs(homeFor, homeAgainst, awayFor, awayAgainst, liga = '') {
   const base = calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst);
 
   // ── HT: escalar lambdas al primer tiempo (≈45% de los goles FT)
@@ -1856,10 +1883,12 @@ function calcExtendedProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
   }
 
   // ── Corners: estimación basada en xG total
-  // Empíricamente: ~10 corners/partido cuando xG total ≈ 2.5
-  // Fórmula calibrada: cornersLambda = 8 + (xGTotal - 2.0) * 3.0
+  // Internacionales (Mundial, Euros, Copa América, Nations League) promedian ~2 corners menos
+  const _isIntl = /world cup|copa del mundo|mundial|copa am[eé]rica|nations league|euro\b|eurocopa|concacaf gold cup|gold cup|copa oro/i.test(liga);
+  const _cornersBase = _isIntl ? 7.5 : 8.0;
+  const _cornersMult = _isIntl ? 2.0 : 3.0;
   const xGTotal       = base.homeLambda + base.awayLambda;
-  const cornersLambda = Math.max(5, Math.min(14, 8 + (xGTotal - 2.0) * 3.0));
+  const cornersLambda = Math.max(5, Math.min(14, _cornersBase + (xGTotal - 2.0) * _cornersMult));
 
   // Corners por equipo: local típicamente saca ~55% de los corners
   const homeCornersLambda = cornersLambda * 0.55;
@@ -3168,8 +3197,8 @@ PARA CADA PICK, INDICA QUÉ DATO DEL JSON LO RESPALDA:
 - Goles → usa golesAnotadosHome/Away, golesRecibidosHome/Away, xGLocal/xGVisitante
 - Portería a cero → usa cleanSheets, golesRecibidosHome
 - Sin marcar → usa failedToScore de cada equipo en su contexto
-- Corners → usa statsLocal.corners (si disponible) o estima de ligas ofensivas
-- Tarjetas → usa amarillasPorPartido de cada equipo + contexto árbitro si disponible
+- Corners → usa statsLocal.cornersxP + statsVisitante.cornersxP (corners reales del equipo en su contexto). Si ambos tienen valor, la lambda real = cornersxP local + cornersxP visitante. También verifica cornersLambda del bloque probabilidades.
+- Tarjetas → usa statsLocal.amarillasPorPartido + statsVisitante.amarillasPorPartido (tarjetas reales del equipo en su contexto) + contexto árbitro si disponible
 - BTTS → usa probBTTS_Combinada + failedToScore de ambos equipos
 
 ${LEAGUE_STATS_CONTEXT}
@@ -3181,7 +3210,8 @@ Para BTTS No: failedToScore de algún equipo > 40% en su contexto (casa/fuera).
 Para Over/Under goles: usa probOver25, probOver35. Over si prob > 65% con EV positivo.
 Para Portería a cero local: golesRecibidosHome < 0.8/p AND cleanSheets > 40% en casa.
 Para Portería a cero visitante: golesRecibidosAway < 0.8/p AND cleanSheets > 35% fuera.
-Para Corners total: usa "cornersLambda" del bloque probabilidades — es la proyección matemática real basada en xG. Si cornersLambda > 10.5: Over 9.5 con valor. Si cornersOver95 < 55%: stake máximo 7 para corners. NUNCA uses un número de corners que no provenga de cornersLambda en los datos.
+Para Corners total: usa "cornersLambda" del bloque probabilidades — es la proyección matemática real basada en xG. Si cornersLambda > 11.0: Over 9.5 con valor. Si cornersOver95 < 60%: stake máximo 7 para corners. NUNCA uses un número de corners que no provenga de cornersLambda en los datos.
+⛔ LÍMITE DURO CORNERS: Máximo 2 picks de corners en toda la sesión (todos los partidos combinados). Si ya tienes 2 picks de corners, el tercer partido DEBE ser de otro mercado (goles, BTTS, resultado, tarjetas). No negociable.
 Para Corners equipo específico: si un equipo promedia +5.5 córners en su contexto → Over equipo X.
 Para Tarjetas total: suma amarillasPorPartido ambos equipos. Over si supera línea +1.0.
 Para Tarjetas equipo específico: si un equipo promedia > 2.0 tarjetas en su contexto.
@@ -3547,6 +3577,8 @@ BASE RATES DE LIGA (baseRatesLiga) — USO OBLIGATORIO:
 
 ÁRBITRO (arbitroStats) — SIEMPRE MOSTRAR:
 - Si arbitroStats tiene datos y arbitroStats._derivado NO es true → "🃏 Árbitro: [nombre] | [X.X] 🟡/p · [X.X] 🔴/p · [X.X] total/p ([N] partidos)"
+  • Si rojas_por_partido = 0 (no null): muestra "0.00 🔴/p" — no escribas "s/d"
+  • Si arbitroStats._muestraInsuficiente = true → añade " ⚠️ muestra pequeña" al final de la línea y NO subas el stake basándote en sus datos; stake máximo 7 si el único argumento es el árbitro.
 - Si arbitroStats tiene datos y arbitroStats._derivado = true → "🃏 Árbitro: [nombre] (est. [X.X] tarjetas/p — promedio histórico equipos)"
   • La estimación viene del historial de tarjetas de ambos equipos (sin datos del árbitro real), úsala como referencia aproximada.
 - Si arbitroStats es null y hay nombre de árbitro → "🃏 Árbitro: [nombre] (sin historial disponible)"
@@ -4242,6 +4274,7 @@ async function applyStakeGate(picksText, enriched, matchesCtx) {
 
     let correctedText = picksText;
     let highStakeCount = 0;
+    let cornerPickCount = 0;
 
     for (const p of extracted.filter(x => !x.esCombinada)) {
       const f = enriched.find(e =>
@@ -4261,9 +4294,22 @@ async function applyStakeGate(picksText, enriched, matchesCtx) {
         }
       }
 
+      // Máximo 2 picks de corners por sesión
+      if (['OVER_CORNERS', 'UNDER_CORNERS'].includes(p.mercado)) {
+        cornerPickCount++;
+        if (cornerPickCount > 2) {
+          console.log(`⚠️ Corner cap: ${p.local} vs ${p.visitante} reducido ${stakeValidado}→5 (máx 2 corners/sesión)`);
+          stakeValidado = Math.min(stakeValidado, 5);
+        }
+      }
+
       if (stakeValidado !== p.stake) {
         console.log(`⚠️ Pre-publish gate: ${p.local} vs ${p.visitante} (${p.mercado}): ${p.stake}→${stakeValidado}`);
-        correctedText = correctedText.replace(`Stake: ${p.stake}/10`, `Stake: ${stakeValidado}/10`);
+        // El texto puede tener formato Telegram: "Stake: *10/10*" o "Stake: 10/10"
+        correctedText = correctedText.replace(
+          new RegExp(`Stake: \\*?${p.stake}/10\\*?`, 'g'),
+          `Stake: *${stakeValidado}/10*`
+        );
       }
     }
 
@@ -4966,7 +5012,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     const aForAdj = aFor * (1 - blend + blend * aFormFact);   // ataque visitante según forma
     const hAgtAdj = hAgt * (1 - blend + blend * aFormFact);   // defensa local = cuánto hace el ataque visitante
     const aAgtAdj = aAgt * (1 - blend + blend * hFormFact);   // defensa visit = cuánto hace el ataque local
-    const extProbs = calcExtendedProbs(hForAdj, hAgtAdj, aForAdj, aAgtAdj);
+    const extProbs = calcExtendedProbs(hForAdj, hAgtAdj, aForAdj, aAgtAdj, f.leagueName || '');
 
     return {
       fixtureId:      f.fixtureId,
@@ -4979,8 +5025,8 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       visitante:      f.awayTeam,
       hora:           formatHour(f.date),
       fechaPartido:   f.date,
-      statsLocal:     hStats,
-      statsVisitante: aStats,
+      statsLocal:     withHomeContext(hStats),
+      statsVisitante: withAwayContext(aStats),
       _extendedProbs: extProbs,
       _statsSource:   (hStats && aStats) ? 'real' : hStats ? 'local_only' : aStats ? 'away_only' : 'fallback',
       _formFactors:   { hFormFact, aFormFact }, // útil para debug
@@ -5065,6 +5111,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
         const blendedProbs = calcExtendedProbs(
           blendedHomeLambda, currentProbs.homeLambda_agt ?? blendedHomeLambda,
           blendedAwayLambda, currentProbs.awayLambda_agt ?? blendedAwayLambda,
+          enriched[i].liga || '',
         );
         enriched[i]._extendedProbs = blendedProbs;
         enriched[i]._lambdaSource = 'blend_api_poisson';
@@ -5461,8 +5508,8 @@ async function handleSistemaHoy(chatId) {
       local:        f.homeTeam,
       visitante:    f.awayTeam,
       hora:         formatHour(f.date),
-      statsLocal:   homeStats,
-      statsVisitante: awayStats,
+      statsLocal:   withHomeContext(homeStats),
+      statsVisitante: withAwayContext(awayStats),
       h2h:          h2h.slice(0, 8), // últimos 8 H2H
       ...(probBlock && { probabilidadesCalculadas: probBlock }),
     };
@@ -5556,7 +5603,7 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
     const hAgt   = parseFloat(hStats?.golesRecibidosHome) || 0;
     const aFor   = parseFloat(aStats?.golesAnotadosAway) || 0;
     const aAgt   = parseFloat(aStats?.golesRecibidosAway) || 0;
-    const extProbs = (hFor > 0 || aFor > 0) ? calcExtendedProbs(hFor, hAgt, aFor, aAgt) : null;
+    const extProbs = (hFor > 0 || aFor > 0) ? calcExtendedProbs(hFor, hAgt, aFor, aAgt, f.leagueName || '') : null;
     return {
       fixtureId:      f.fixtureId,
       liga:           f.leagueName,
@@ -5565,8 +5612,8 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
       visitante:      f.awayTeam,
       hora:           formatHour(f.date),
       fechaPartido:   f.date,
-      statsLocal:     hStats,
-      statsVisitante: aStats,
+      statsLocal:     withHomeContext(hStats),
+      statsVisitante: withAwayContext(aStats),
       _extendedProbs: extProbs,
     };
   });
@@ -5893,10 +5940,10 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     // Para selecciones: homeStatsData ya contiene la mejor fuente disponible (ver getTeamStats cascade).
     // El campo 'nota' dentro de stats indica si es referencia de otra competición o de últimos 20 partidos.
     statsLocal:     homeStatsData
-      ? { ...homeStatsData, _fuente: homeStatsData.nota || 'datos del torneo actual' }
+      ? withHomeContext({ ...homeStatsData, _fuente: homeStatsData.nota || 'datos del torneo actual' })
       : null,
     statsVisitante: awayStatsData
-      ? { ...awayStatsData, _fuente: awayStatsData.nota || 'datos del torneo actual' }
+      ? withAwayContext({ ...awayStatsData, _fuente: awayStatsData.nota || 'datos del torneo actual' })
       : null,
     ...(homeDomStats && { statsLocalLigaDomestica:     { ...homeDomStats,     _fuente: 'promedio liga doméstica' } }),
     ...(awayDomStats && { statsVisitanteLigaDomestica: { ...awayDomStats,     _fuente: 'promedio liga doméstica' } }),
@@ -5953,7 +6000,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const hAgt = parseFloat(_bestHomeStats?.golesRecibidosHome) || 1.1;
   const aFor = parseFloat(_bestAwayStats?.golesAnotadosAway) || 1.0;
   const aAgt = parseFloat(_bestAwayStats?.golesRecibidosAway) || 1.3;
-  const extProbs = calcExtendedProbs(hFor, hAgt, aFor, aAgt);
+  const extProbs = calcExtendedProbs(hFor, hAgt, aFor, aAgt, nextRaw.league?.name || '');
 
   const fixtureForEngine = {
     fixtureId:      nextRaw.fixture.id,
@@ -5962,8 +6009,8 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     local:          homeTeam,
     visitante:      awayTeam,
     hora:           formatHour(nextRaw.fixture.date),
-    statsLocal:     homeDomStats || homeStatsData,
-    statsVisitante: awayDomStats || awayStatsData,
+    statsLocal:     withHomeContext(homeDomStats || homeStatsData),
+    statsVisitante: withAwayContext(awayDomStats || awayStatsData),
     _extendedProbs: extProbs,
     cuotasReales:   realOdds || undefined,
   };
@@ -6302,8 +6349,8 @@ async function handleEspecifica(chatId, intent) {
     rolEnPartido: isHome ? 'LOCAL' : 'VISITANTE',
     h2h:          h2hData2,
     bttsEnH2H:    h2hData2.filter(m => m.btts).length,
-    statsLocal:     homeStatsData2 ? { ...homeStatsData2, _fuente: 'promedio temporada completa' } : null,
-    statsVisitante: awayStatsData2 ? { ...awayStatsData2, _fuente: 'promedio temporada completa' } : null,
+    statsLocal:     homeStatsData2 ? withHomeContext({ ...homeStatsData2, _fuente: 'promedio temporada completa' }) : null,
+    statsVisitante: awayStatsData2 ? withAwayContext({ ...awayStatsData2, _fuente: 'promedio temporada completa' }) : null,
     ...(predData2    && { prediccionAPIFootball: predData2 }),
     ...(lineupsData2 && lineupsData2.length > 0 && { alineaciones: lineupsData2 }),
     ...(injHome2     && injHome2.length > 0 && { lesionadosLocal: injHome2 }),
