@@ -7119,6 +7119,7 @@ async function runZcodeMarketScrape() {
       }).catch(() => '');
 
       if (lrHtml && lrHtml.includes('GamesTable')) {
+        console.log(`🔍 LR DOM [${lrHtml.length}b] preview: ${lrHtml.slice(0,400).replace(/\s+/g,' ')}`);
         const signals = _parseZcodeGameTable(lrHtml);
         _zlrStore.clear();
         _zdoStore.clear();
