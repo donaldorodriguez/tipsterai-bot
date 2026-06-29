@@ -2500,7 +2500,7 @@ function buildPickCandidates(enrichedFixtures) {
     const _sharpVisit   = _mkt?.lineReversal?.sharpEnLocal === false;
     const _dropLocal    = _mkt?.droppingOddsLocal?.drop    || 0;
     const _dropVisit    = _mkt?.droppingOddsVisitante?.drop || 0;
-    // Señales extra: Totals Predictor, Power Rankings, Soccer Oscillator, Contrarian Bets
+    // Señales extra: Totals Predictor, Power Rankings, Soccer Oscillator, Contrarian Bets, EV Tool
     const _extra        = f.zcodeExtra  || null;
     const _tpTotal      = _extra?.totalsPredictor?.predictedTotal ?? null;
     const _powerGap     = (_extra?.powerHome != null && _extra?.powerAway != null)
@@ -2510,6 +2510,7 @@ function buildPickCandidates(enrichedFixtures) {
     const _awayHot      = _extra?.oscAway?.hot  === true;
     const _awayCold     = _extra?.oscAway?.cold === true;
     const _contrarianSide = _extra?.contrarian?.side ?? null; // 'home' | 'away'
+    const _evRank       = _extra?.evTool?.rank  ?? null;      // posición en EV Tool (menor = mejor)
 
     for (const m of markets) {
       // ── Inyectar prob real de tarjetas (antes del check de odds) ─────────────
@@ -2649,9 +2650,18 @@ function buildPickCandidates(enrichedFixtures) {
           if (['awayWin', 'dnb_away', 'dc_X2'].includes(m.key)) extraBoost += 4;
         }
 
+        // EV Tool: partido en top-20 de ZCode EV list → boost global en todos sus mercados
+        if (_evRank !== null) {
+          const evBonus = _evRank <= 5  ? 5    // top 5: señal muy fuerte
+                        : _evRank <= 10 ? 3    // top 10
+                        : _evRank <= 20 ? 1    // top 20
+                        : 0;
+          if (evBonus > 0) extraBoost += evBonus;
+        }
+
         if (extraBoost !== 0) {
           evRaw = evRaw + extraBoost;
-          console.log(`🎯 ExtraBoost ${f.local} vs ${f.visitante} [${m.key}] ${extraBoost > 0 ? '+' : ''}${extraBoost} (tp:${_tpTotal} pr:${_powerGap?.toFixed(0)} osc:${_homeHot?'H🔥':_homeCold?'H❄':''}${_awayHot?'A🔥':_awayCold?'A❄':''} cb:${_contrarianSide||'-'})`);
+          console.log(`🎯 ExtraBoost ${f.local} vs ${f.visitante} [${m.key}] ${extraBoost > 0 ? '+' : ''}${extraBoost} (tp:${_tpTotal} pr:${_powerGap?.toFixed(0)} osc:${_homeHot?'H🔥':_homeCold?'H❄':''}${_awayHot?'A🔥':_awayCold?'A❄':''} cb:${_contrarianSide||'-'} ev:#${_evRank||'-'})`);
         }
       }
 
@@ -6943,6 +6953,7 @@ const _tpStore   = new Map(); // Totals Predictor: normHome+'|||'+normAway → {
 const _prStore   = new Map(); // Power Rankings:   _zbNorm(team)           → { rating, rank, trend }
 const _soStore   = new Map(); // Soccer Oscillator: _zbNorm(team)          → { oscillator, hot }
 const _cbStore   = new Map(); // Contrarian Bets:   normHome+'|||'+normAway → { contrarianSide, publicPct }
+const _evStore   = new Map(); // EV Tool:           normHome+'|||'+normAway → { rank, evScore }
 let   _zetLastRun = 0;
 const ZET_INTERVAL = 20 * 60 * 1000; // extra tools cada 20 min
 
@@ -6969,36 +6980,50 @@ function _zdoHeaders() {
   };
 }
 
-// Parsear HTML de tabla ZCode → array de señales por equipo
+// Parsear HTML de tabla ZCode (Line Reversals / GamesTable) → array de señales por partido
+// Extrae: equipos, % de dinero sharp, cuotas de apertura y cierre, y % de drop de cuota.
 function _parseZcodeGameTable(html) {
   const signals = [];
   if (!html) return signals;
 
-  // Extraer bloques de partido: cada partido tiene TEAM1 y TEAM2 con sus cuotas
-  // Patrón: equipos con porcentajes de dinero (ej. "Bulgaria 75%" vs "Finland 25%")
-  const teamPctPattern = /([A-Za-zÀ-ÿ\s]+?)\s+(\d{1,3})%/g;
-  const oddsPattern = /\d+\.\d{2}/g;
+  const teamPctPattern = /([A-Za-zÀ-ÿ\s\-\.]{3,30}?)\s+(\d{1,3})%/g;
 
-  // Dividir el HTML en bloques de partido
+  // Dividir en bloques de partido (cada GamesTableRow = 1 partido)
   const gameBlocks = html.split(/class="GamesTableRow[^"]*"/).slice(1);
 
   for (const block of gameBlocks) {
-    // Quitar tags HTML
     const text = block.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
-    const teams = [...text.matchAll(teamPctPattern)];
-    const odds  = [...text.matchAll(oddsPattern)].map(m => parseFloat(m[0]));
-    const pcts  = teams.map(m => ({ team: m[1].trim(), pct: parseInt(m[2]) }))
-                       .filter(t => t.team.length > 2 && t.team.length < 30);
 
-    if (pcts.length >= 2 && odds.length >= 2) {
-      signals.push({
-        team1: pcts[0].team, pct1: pcts[0].pct,
-        team2: pcts[1].team, pct2: pcts[1].pct,
-        odds1: odds[0],      odds2: odds[1],
-        // Sharp side = equipo con más % de dinero de sharps (menor % público)
-        sharpSide: pcts[0].pct < pcts[1].pct ? pcts[1].team : pcts[0].team,
-      });
-    }
+    // Equipos con sus % de dinero
+    const pcts = [...text.matchAll(teamPctPattern)]
+      .map(m => ({ team: m[1].trim(), pct: parseInt(m[2]) }))
+      .filter(t => t.team.length > 2 && t.team.length < 35 && !/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d)/i.test(t.team));
+
+    // Todas las cuotas decimales del bloque (pueden ser open1, close1, open2, close2)
+    const odds = [...text.matchAll(/\b(\d+\.\d{2})\b/g)].map(m => parseFloat(m[1]));
+
+    if (pcts.length < 2 || odds.length < 2) continue;
+
+    // Cuotas de apertura y cierre para cada equipo
+    // Si hay ≥4 odds: [openTeam1, closeTeam1, openTeam2, closeTeam2]
+    // Si hay 2 odds: current odds de cada equipo
+    const open1  = odds.length >= 4 ? odds[0] : null;
+    const close1 = odds.length >= 4 ? odds[1] : odds[0];
+    const open2  = odds.length >= 4 ? odds[2] : null;
+    const close2 = odds.length >= 4 ? odds[3] : odds[1];
+
+    // % de drop: caída de cuota desde apertura → indica dinero entrando en ese equipo
+    const drop1 = open1 && open1 > close1 ? +((open1 - close1) / open1 * 100).toFixed(1) : 0;
+    const drop2 = open2 && open2 > close2 ? +((open2 - close2) / open2 * 100).toFixed(1) : 0;
+
+    // Sharp side = equipo con más % de dinero de apostadores sharp (invertido al % público)
+    const sharpSide = pcts[0].pct < pcts[1].pct ? pcts[1].team : pcts[0].team;
+
+    signals.push({
+      team1: pcts[0].team, pct1: pcts[0].pct, oddOpen1: open1, oddClose1: close1, drop1,
+      team2: pcts[1].team, pct2: pcts[1].pct, oddOpen2: open2, oddClose2: close2, drop2,
+      sharpSide,
+    });
   }
   return signals;
 }
@@ -7019,7 +7044,9 @@ async function runZcodeMarketScrape() {
   if (Date.now() - _zdoLastRun < ZDO_INTERVAL) return;
   if (!process.env.ZCODE_COOKIES) return;
 
-  // ── 1. Line Reversals — llamada directa (endpoint descubierto con /zcode-tools) ──
+  // ── 1. Line Reversals + Dropping Odds — mismo endpoint, dos señales ──────────
+  // Ambas herramientas usan el mismo backend (linemovinggameslistn1.php).
+  // La caída de cuota (drop) se calcula a partir de las cuotas de apertura vs cierre.
   try {
     const data = await _zcodeGet('/vipclub/linemovinggameslistn1.php');
     const lrHtml = (typeof data === 'object' ? data.html : data) || '';
@@ -7027,11 +7054,27 @@ async function runZcodeMarketScrape() {
     if (lrHtml && lrHtml.includes('GamesTable')) {
       const signals = _parseZcodeGameTable(lrHtml);
       _zlrStore.clear();
+      _zdoStore.clear();
+
       for (const s of signals) {
-        const k = _zbNorm(s.team1) + '|||' + _zbNorm(s.team2);
-        _zlrStore.set(k, s);
+        // Line Reversals: par home+away con % de sharp money
+        const kPair = _zbNorm(s.team1) + '|||' + _zbNorm(s.team2);
+        _zlrStore.set(kPair, s);
+
+        // Dropping Odds: por equipo individual — tomar el mayor drop detectado
+        const processTeam = (team, drop, oddBefore, oddAfter, pct) => {
+          if (!team || drop < 2) return;
+          const kTeam = _zbNorm(team) + '|||';
+          const ex = _zdoStore.get(kTeam);
+          if (!ex || drop > ex.drop) {
+            _zdoStore.set(kTeam, { team, drop, oddBefore, oddAfter, publicPct: pct ?? 0 });
+          }
+        };
+        processTeam(s.team1, s.drop1, s.oddOpen1, s.oddClose1, s.pct1);
+        processTeam(s.team2, s.drop2, s.oddOpen2, s.oddClose2, s.pct2);
       }
-      console.log(`🔄 Line Reversals (API directa): ${signals.length} partidos`);
+
+      console.log(`🔄 Line Reversals: ${signals.length} partidos | 📉 Dropping Odds: ${_zdoStore.size} equipos con movimiento`);
     } else {
       console.warn('Line Reversals: respuesta vacía o sin GamesTable');
     }
@@ -7039,66 +7082,90 @@ async function runZcodeMarketScrape() {
     console.warn('Line Reversals API err:', e.message);
   }
 
-  // ── 2. Dropping Odds — probar endpoints conocidos ─────────────────────────
-  // El endpoint exacto no fue capturado aún; se prueban variantes en orden.
-  const DO_ENDPOINTS = [
-    '/vipclub/droppingoddslist.php',
-    '/vipclub/droppingodds.php',
-    '/droppingodds',
-  ];
+  // ── 2. EV Tool — endpoint descubierto: /evtool/gameslist.php ─────────────────
+  try {
+    const data = await _zcodeGet('/evtool/gameslist.php');
+    const evHtml = (typeof data === 'object' ? data.html : null) || '';
 
-  let doHtml = '';
-  for (const ep of DO_ENDPOINTS) {
-    try {
-      const data = await _zcodeGet(ep);
-      const html = (typeof data === 'object' ? data.html : data) || '';
-      // Validar que tenga contenido útil (cuotas + porcentajes)
-      if (html && /\d+\.\d{2}/.test(html) && /\d+%/.test(html) && html.length > 200) {
-        doHtml = html;
-        console.log(`📉 Dropping Odds: endpoint activo → ${ep}`);
-        break;
-      }
-    } catch (_) { /* intentar el siguiente */ }
-  }
+    if (evHtml && evHtml.includes('MainTable')) {
+      // Parsear filas de la tabla ordenada por EV descendente
+      // Cada <tr> tiene: rank, time, team1 vs team2, EV score
+      const rows = evHtml.split(/<tr[\s>]/i).slice(1);
+      _evStore.clear();
+      let rank = 0;
+      for (const row of rows) {
+        if (/<th/i.test(row)) continue; // header row
+        const text = row.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
+        if (text.length < 10) continue;
 
-  if (doHtml) {
-    // Parsear movimientos de cuota: buscar filas con equipo + odds antes/después
-    _zdoStore.clear();
-    let count = 0;
-    // Dividir en bloques (mismo patrón que Line Reversals)
-    const blocks = doHtml.split(/class="GamesTableRow[^"]*"/).slice(1);
-    for (const block of blocks) {
-      const text = block.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
-      const odds  = [...text.matchAll(/(\d+\.\d{2})/g)].map(m => parseFloat(m[1]));
-      const pcts  = [...text.matchAll(/(\d{1,3})%/g)].map(m => parseInt(m[1]));
-      if (odds.length < 2) continue;
-      // Calcular % de caída de cuota
-      const drop = odds.length >= 2 ? +((odds[0] - odds[odds.length - 1]) / odds[0] * 100).toFixed(1) : 0;
-      if (drop < 2) continue;
-      const teamMatch = text.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\-\.]{2,25})/);
-      if (!teamMatch) continue;
-      const team = teamMatch[1].trim();
-      // Tomar la señal más fuerte por equipo (mayor drop)
-      const key = _zbNorm(team) + '|||';
-      const existing = _zdoStore.get(key);
-      const maxPublicPct = pcts.length > 0 ? Math.max(...pcts) : 0;
-      if (!existing || drop > (existing.drop || 0)) {
-        _zdoStore.set(key, { team, drop, oddBefore: odds[0], oddAfter: odds[odds.length - 1], publicPct: maxPublicPct });
-        count++;
+        // Buscar "Team1 @ Team2" o "Team1 vs Team2"
+        const vsMatch = text.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\-\.]{2,25})\s+(?:@|vs\.?)\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\-\.]{2,25})/i);
+        if (!vsMatch) continue;
+
+        // EV score: número decimal en el texto (puede ser negativo)
+        const evMatch = text.match(/([+-]?\d+(?:\.\d+)?)\s*(?:ev|%)?/i);
+        const evScore = evMatch ? parseFloat(evMatch[1]) : null;
+
+        rank++;
+        const home = vsMatch[1].trim();
+        const away = vsMatch[2].trim();
+        const key  = _zbNorm(home) + '|||' + _zbNorm(away);
+        _evStore.set(key, { home, away, rank, evScore, _ts: Date.now() });
       }
+      console.log(`📈 EV Tool: ${_evStore.size} partidos con EV score`);
+    } else {
+      console.warn('EV Tool: respuesta sin MainTable');
     }
-    console.log(`📉 Dropping Odds: ${count} movimientos ≥2% procesados`);
-  } else {
-    console.warn('📉 Dropping Odds: ningún endpoint respondió con datos válidos');
+  } catch (e) {
+    console.warn('EV Tool API err:', e.message);
   }
 
   _zdoLastRun = Date.now();
 }
 
-// ── ZCode Extra Tools: Totals Predictor, Power Rankings, Soccer Oscillator, Contrarian Bets ──
+// ── ZCode Extra Tools: Power Rankings (axios) + Totals Predictor, Soccer Oscillator, Contrarian (Puppeteer) ──
 async function runZcodeExtraTools() {
   if (Date.now() - _zetLastRun < ZET_INTERVAL) return;
   if (!process.env.ZCODE_COOKIES) return;
+
+  // ── Power Rankings — axios directo a /powerrankings.php ──────────────────────
+  try {
+    const html = await _zcodeGet('/powerrankings.php');
+    const prHtml = typeof html === 'string' ? html : '';
+
+    if (prHtml && prHtml.includes('Power Ranking')) {
+      // Parsear filas de tabla: Rank | Team | Rating | Trend
+      const rows = prHtml.split(/<tr[\s>]/i).slice(1);
+      _prStore.clear();
+      let prCount = 0;
+      for (const row of rows) {
+        if (/<th/i.test(row)) continue;
+        const text = row.replace(/<[^>]+>/g, ' ').replace(/&[a-z]+;/g, ' ').replace(/\s+/g, ' ').trim();
+        if (text.length < 5) continue;
+
+        // Rating: número entre 0 y 200 (típicamente 50-150 en ZCode)
+        const ratingMatch = text.match(/\b(\d{1,3}(?:\.\d+)?)\b/g);
+        const ratings = ratingMatch ? ratingMatch.map(Number).filter(n => n >= 30 && n <= 200) : [];
+        if (ratings.length === 0) continue;
+        const rating = ratings[0];
+
+        // Equipo: primer texto largo que no sea números
+        const teamMatch = text.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\-\.]{2,30})/);
+        if (!teamMatch) continue;
+        const team = teamMatch[1].trim();
+        if (team.length < 3 || /^(rank|team|power|rating|score|pts|pos)/i.test(team)) continue;
+
+        const trend = /\+\d|▲|↑/.test(text) ? 'up' : /-\d|▼|↓/.test(text) ? 'down' : 'neutral';
+        const key = _zbNorm(team);
+        if (key.length < 2) continue;
+        _prStore.set(key, { team, rating, rank: prCount + 1, trend, _ts: Date.now() });
+        prCount++;
+      }
+      console.log(`📊 Power Rankings (API directa): ${prCount} equipos`);
+    } else {
+      console.warn('Power Rankings: sin datos (respuesta no contiene "Power Ranking")');
+    }
+  } catch (e) { console.warn('Power Rankings API err:', e.message); }
 
   let browser;
   try {
@@ -7391,6 +7458,16 @@ function getZcodeExtraSignals(homeTeam, awayTeam) {
     if ((_zbMatch(hNorm, k1) && _zbMatch(aNorm, k2)) ||
         (_zbMatch(hNorm, k2) && _zbMatch(aNorm, k1))) {
       signals.contrarian = { side: data.contrarianSide, publicPct: data.publicPct };
+      break;
+    }
+  }
+
+  // EV Tool — partido aparece en lista de partidos con alto EV
+  for (const [key, data] of _evStore) {
+    const [k1, k2] = key.split('|||');
+    if ((_zbMatch(hNorm, k1) && _zbMatch(aNorm, k2)) ||
+        (_zbMatch(hNorm, k2) && _zbMatch(aNorm, k1))) {
+      signals.evTool = { rank: data.rank, evScore: data.evScore };
       break;
     }
   }
