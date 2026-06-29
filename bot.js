@@ -7114,60 +7114,49 @@ async function runZcodeMarketScrape() {
     // ── 1. Line Reversals + Dropping Odds — extraer del DOM ──────────────────────
     try {
       await page.goto('https://zcodesystem.com/line_reversals', { waitUntil: 'networkidle2', timeout: 40000 });
-      // Esperar a que el JS del site cargue los datos en el DOM
-      await new Promise(r => setTimeout(r, 3000));
+      // Esperar que el JS del site inyecte las filas via AJAX (hasta 10s)
+      await page.waitForSelector('.GamesTableRow, [class*="GamesTableRow"]', { timeout: 10000 }).catch(() => null);
 
-      // Extraer datos estructurados directamente en el browser para evitar problemas de parsing HTML
-      const lrData = await page.evaluate(() => {
-        const rows = [];
+      // Extraer datos estructurados — retornar debug info para loguear en Node.js
+      const lrResult = await page.evaluate(() => {
         const rowEls = document.querySelectorAll('.GamesTableRow, [class*="GamesTableRow"]');
-        // Debug: log first row text to Railway logs
-        if (rowEls.length > 0) {
-          console.log('LR_ROW0:', rowEls[0].innerText.replace(/\s+/g,' ').slice(0,200));
-        } else {
-          console.log('LR_ROW0: no .GamesTableRow elements found');
-        }
+        const hasTable = !!document.querySelector('.GamesTable, [class*="GamesTable"]');
+        const debugRow0 = rowEls.length > 0
+          ? rowEls[0].innerText.replace(/\s+/g,' ').slice(0, 200)
+          : (hasTable ? 'GamesTable existe pero sin rows aún' : 'no GamesTable encontrado');
+
+        const rows = [];
         rowEls.forEach(row => {
           const text = row.innerText.replace(/\s+/g, ' ').trim();
           if (!text || text.length < 10) return;
 
-          // Porcentajes: buscar números seguidos de % (con o sin espacio)
           const pctMatches = [...text.matchAll(/(\d{1,3})\s*%/g)].map(m => parseInt(m[1]));
           if (pctMatches.length < 2) return;
-          // Cuotas decimales
           const oddsMatches = [...text.matchAll(/\b(\d+\.\d{2})\b/g)].map(m => parseFloat(m[1]));
 
-          // Intentar extraer equipos via "vs" separador
           let team1 = '', team2 = '';
           const vsMatch = text.match(/([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\.\-']{2,28}?)\s+vs?\.?\s+([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ\s\.\-']{2,28}?)(?:\s+\d|\s+\()/i);
           if (vsMatch) {
             team1 = vsMatch[1].trim();
             team2 = vsMatch[2].trim();
           } else {
-            // Fallback: texto antes del 1er % y entre 1er y 2do %
             const parts = text.split(/\d{1,3}\s*%/);
             const raw1 = parts[0].replace(/[^A-Za-zÀ-ÿ\s\.\-']/g, ' ').trim();
             const raw2 = (parts[1] || '').replace(/[^A-Za-zÀ-ÿ\s\.\-']/g, ' ').trim();
-            // Quitar prefijo de fecha (e.g. "Jun 29", "Mon")
             team1 = raw1.replace(/^(?:[A-Za-z]{3}[\s\d]*)+/, '').trim().slice(-30);
             team2 = raw2.slice(0, 30);
           }
 
           if (team1.length < 2) return;
-
-          rows.push({
-            team1,
-            team2,
-            pct1: pctMatches[0],
-            pct2: pctMatches[1],
-            odds1: oddsMatches[0] || null,
-            odds2: oddsMatches[1] || null,
-            odds3: oddsMatches[2] || null,
-            odds4: oddsMatches[3] || null,
-          });
+          rows.push({ team1, team2, pct1: pctMatches[0], pct2: pctMatches[1],
+            odds1: oddsMatches[0]||null, odds2: oddsMatches[1]||null,
+            odds3: oddsMatches[2]||null, odds4: oddsMatches[3]||null });
         });
-        return rows;
-      }).catch(() => []);
+        return { rows, debugRow0, rowCount: rowEls.length };
+      }).catch(e => ({ rows: [], debugRow0: `evaluate err: ${e.message}`, rowCount: 0 }));
+
+      console.log(`🔍 LR DOM [${lrResult.rowCount} rows]: ${lrResult.debugRow0}`);
+      const lrData = lrResult.rows;
 
       if (lrData.length > 0) {
         _zlrStore.clear();
