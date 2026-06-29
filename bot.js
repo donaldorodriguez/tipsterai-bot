@@ -2492,7 +2492,14 @@ function buildPickCandidates(enrichedFixtures) {
     const pAwayCardsO15  = poissonCDF_above(cardsLambda * 0.48, 2);
 
     // Señales ZCode Soccer Buddy para este fixture
-    const _zb = f.soccerBuddy || null;
+    const _zb  = f.soccerBuddy    || null;
+    // Señales de mercado: Line Reversals + Dropping Odds
+    const _mkt = f.mercadoZCode   || null;
+    // Sharp money precomputado para boost directo
+    const _sharpLocal   = _mkt?.lineReversal?.sharpEnLocal === true;
+    const _sharpVisit   = _mkt?.lineReversal?.sharpEnLocal === false;
+    const _dropLocal    = _mkt?.droppingOddsLocal?.drop    || 0;
+    const _dropVisit    = _mkt?.droppingOddsVisitante?.drop || 0;
 
     for (const m of markets) {
       // ── Inyectar prob real de tarjetas (antes del check de odds) ─────────────
@@ -2557,6 +2564,32 @@ function buildPickCandidates(enrichedFixtures) {
         }
         if (zbBoost > 0) {
           evRaw = Math.min(evRaw + zbBoost, Math.max(evRaw * 1.5, evRaw + zbBoost));
+        }
+      }
+
+      // ── Line Reversals + Dropping Odds: dinero sharp → boost de EV ───────────
+      if (_mkt) {
+        let mktBoost = 0;
+        // Sharps en el local
+        if (_sharpLocal) {
+          if (['homeWin', 'dnb_home', 'dc_1X', 'ah_home_m05'].includes(m.key)) mktBoost += 4;
+          if (['btts', 'over25'].includes(m.key)) mktBoost += 2; // partidos abiertos
+        }
+        // Sharps en el visitante
+        if (_sharpVisit) {
+          if (['awayWin', 'dnb_away', 'dc_X2', 'ah_away_m05'].includes(m.key)) mktBoost += 4;
+          if (['btts', 'over25'].includes(m.key)) mktBoost += 2;
+        }
+        // Dropping odds local: cuota cayó = dinero entrando al local
+        if (_dropLocal > 5  && ['homeWin', 'dnb_home'].includes(m.key)) mktBoost += Math.min(Math.floor(_dropLocal / 3), 5);
+        if (_dropLocal > 10 && ['over25', 'btts'].includes(m.key))       mktBoost += 2;
+        // Dropping odds visitante
+        if (_dropVisit > 5  && ['awayWin', 'dnb_away'].includes(m.key)) mktBoost += Math.min(Math.floor(_dropVisit / 3), 5);
+        if (_dropVisit > 10 && ['over25', 'btts'].includes(m.key))       mktBoost += 2;
+
+        if (mktBoost > 0) {
+          evRaw = evRaw + mktBoost;
+          console.log(`💰 MktBoost ${f.local} vs ${f.visitante} [${m.key}] +${mktBoost} (sharp:${_sharpLocal?'L':_sharpVisit?'V':'-'} drop:${_dropLocal}/${_dropVisit}%)`);
         }
       }
 
