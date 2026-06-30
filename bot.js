@@ -7097,7 +7097,7 @@ async function _zcodeGet(path, params = {}, options = {}) {
   const isError   = /sign.?in|log.?in|password|403 Forbidden|Access Denied/i.test(bodyStr.slice(0, 400));
 
   if ((is404 || isError) && referer !== 'https://zcodesystem.com/') {
-    console.log(`🔍 ${path}: ${resp.status} → warm-up ${referer}...`);
+    if (!options.silent) console.log(`🔍 ${path}: ${resp.status} → warm-up ${referer}...`);
     // Cargar la página padre para inicializar la sesión PHP
     await axios.get(referer, { headers: { ..._zdoHeaders(), 'Referer': 'https://zcodesystem.com/' }, timeout: 18000 })
       .catch(() => {});
@@ -7115,7 +7115,7 @@ async function _zcodeGet(path, params = {}, options = {}) {
       if (!r2) continue;
       const b2 = r2.data;
       const s2 = typeof b2 === 'string' ? b2 : JSON.stringify(b2);
-      console.log(`🔍 ${path}: ${method.toUpperCase()} retry [${r2.status}] ${s2.length}b → ${s2.slice(0,200).replace(/\s+/g,' ')}`);
+      if (!options.silent) console.log(`🔍 ${path}: ${method.toUpperCase()} retry [${r2.status}] ${s2.length}b → ${s2.slice(0,200).replace(/\s+/g,' ')}`);
       if (r2.status < 400 && s2.length > 100 && !s2.includes('404 Not Found')) return b2;
     }
     return null;
@@ -7254,9 +7254,9 @@ async function runZcodeExtraTools() {
   if (Date.now() - _zetLastRun < ZET_INTERVAL) return;
   if (!process.env.ZCODE_COOKIES) return;
 
-  // ── Power Rankings — axios directo a /powerrankings.php ──────────────────────
+  // ── Power Rankings — axios directo a /powerrankings.php (intento silencioso, el 404 es esperado) ──
   try {
-    const html = await _zcodeGet('/powerrankings.php', {}, { referer: 'https://zcodesystem.com/power_rankings.php' });
+    const html = await _zcodeGet('/powerrankings.php', {}, { referer: 'https://zcodesystem.com/power_rankings.php', silent: true });
     const prHtml = typeof html === 'string' ? html : (typeof html === 'object' ? JSON.stringify(html) : '');
 
     if (prHtml && prHtml.includes('Power Ranking')) {
