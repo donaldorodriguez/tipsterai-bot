@@ -2534,9 +2534,11 @@ function buildPickCandidates(enrichedFixtures) {
       const o = hasRealOdds ? m.oddsVal : impliedFair;
       if (!o || o <= 1) continue;
 
-      // Piso mínimo para cuotas REALES: 1.65 global, 1.30 para DC/DNB
+      // Piso mínimo por mercado: usa el minOdds definido en cada mercado.
+      // El antiguo techo fijo de 1.65 eliminaba BTTS (~1.60) y Over 2.5 (~1.55) mientras
+      // que corners/cards con cuotas 1.70-1.90 pasaban siempre — solo corners y tarjetas salían.
       if (hasRealOdds) {
-        const catFloor = ['dc', 'dnb'].includes(m.cat) ? 1.30 : 1.65;
+        const catFloor = m.minOdds || (['dc', 'dnb'].includes(m.cat) ? 1.30 : 1.50);
         if (o < catFloor) continue;
       }
 
@@ -3886,6 +3888,8 @@ PROYECCIONES EN TIEMPO REAL:
   ⛔ PROHIBIDO multiplicar por 2 los datos del 1T para proyectar el partido completo.
   ⛔ PROHIBIDO recomendar Over X tarjetas si ya hay X-1 o X tarjetas — la cuota real sería < 1.25.
 - BTTS: si el equipo perdedor tiene que atacar → BTTS gana probabilidad real.
+  ⛔ PROHIBIDO recomendar "BTTS Sí" / "Ambos Marcan Sí" si el marcador actual muestra que AMBOS equipos ya marcaron (ej: 1-1, 2-1, 1-2, 2-2, 3-1, etc.) — el resultado ya está cumplido, no hay cuota que dar. Este es el error más grave porque el usuario ve un pick que ya pasó. Busca otro mercado.
+  ⛔ PROHIBIDO recomendar "BTTS No" si solo uno de los equipos marcó y el equipo perdedor tiene tiempo y necesidad de atacar en 2T.
 
 ⛔ COHERENCIA ENTRE PICKS — REGLA OBLIGATORIA:
 Antes de emitir los picks de un partido, verifica que no sean mutuamente excluyentes:
@@ -3927,7 +3931,7 @@ REGLAS IN-PLAY:
 - No uses # ## ### en el formato
 - No muestres score de momentum, xG, EV%, lambdaRem ni valores técnicos internos
 - No recomiendes resultado FT si el marcador ya lo hace improbable
-- No recomiendes Over si golesActuales >= línea - 1 (ver regla dura de GOLES arriba)
+- ⛔ PROHIBIDO recomendar Over X.5 goles FT si golesActuales >= X.5 - 1 (el partido necesita ≤1 gol más → cuota real < 1.50 → sin valor). Ejemplos: con 2 goles → no recomendes Over 2.5 (necesita 1 más, obvio); con 1 gol → no recomendes Over 1.5 (necesita 1 más, probable pero no valor). Si hay goles, las líneas de valor son las ALTAS (Over 3.5, Over 4.5) — usa SOLO las que aparecen en lineasGolesVivo.lineasConValor.
 - SIEMPRE da al menos 1 pick concreto. Si el contexto es claro, da 2.
 - Las frases "sin picks de valor", "no tengo estadísticas", "datos insuficientes" están PROHIBIDAS.
   Solo omite el análisis si el partido lleva < 3 minutos y no hay absolutamente ningún contexto.
@@ -6129,7 +6133,13 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     ...(momentum     && { momentumEnVivo: momentum }),
     ...(cornersProj  && { proyeccionCorners: cornersProj }),
     ...(cardsProj    && { proyeccionTarjetas: cardsProj }),
-    ...(goalLines    && { lineasGolesVivo:    goalLines }),
+    ...(goalLines    && { lineasGolesVivo:    {
+      ...goalLines,
+      // Flags para el LLM — marcadores obvios
+      ...(isLive && liveHomeGoals > 0 && liveAwayGoals > 0 && {
+        _bttsCumplido: `⛔ BTTS ya cumplido — marcador ${liveHomeGoals}-${liveAwayGoals}, ambos equipos ya marcaron. PROHIBIDO recomendar "Ambos Marcan Sí".`,
+      }),
+    }}),
     ...(cornersLines && { lineasCornersVivo:  cornersLines }),
     ...(cardsLines   && { lineasCardsVivo:    cardsLines }),
   };
@@ -6306,7 +6316,12 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
       ...(momentum      && { momentumEnVivo:       momentum }),
       ...(cornersProj   && { proyeccionCorners:    cornersProj }),
       ...(cardsProj     && { proyeccionTarjetas:   cardsProj }),
-      ...(goalLinesV    && { lineasGolesVivo:       goalLinesV }),
+      ...(goalLinesV    && { lineasGolesVivo: {
+        ...goalLinesV,
+        ...((f.homeGoals ?? 0) > 0 && (f.awayGoals ?? 0) > 0 && {
+          _bttsCumplido: `⛔ BTTS ya cumplido — marcador ${f.homeGoals}-${f.awayGoals}, ambos equipos ya marcaron. PROHIBIDO recomendar "Ambos Marcan Sí".`,
+        }),
+      }}),
       ...(cornersLinesV && { lineasCornersVivo:     cornersLinesV }),
       ...(cardsLinesV   && { lineasCardsVivo:       cardsLinesV }),
     };
