@@ -1430,7 +1430,7 @@ async function getApiPrediction(fixtureId) {
 }
 
 // ─── StatsHub — estadísticas de árbitros (fuente única y confiable) ──────────
-const STATSHUB_API = 'https://www.statshub.com/api/referees/list?page=1&limit=500&upcomingFixturesOnly=false&last20GamesOnly=true&leagueStatsOnly=false&sortField=next_game_timestamp&sortDirection=asc';
+const STATSHUB_API = 'https://www.statshub.com/api/referees/list?page=1&limit=500&upcomingFixturesOnly=false&last20GamesOnly=false&leagueStatsOnly=false&sortField=next_game_timestamp&sortDirection=asc';
 let statsHubReferees = [];
 
 function normalizeRefName(name) {
@@ -2722,10 +2722,12 @@ function buildPickCandidates(enrichedFixtures) {
       if (!hasRealOdds && stake > 6) stake = 6;
 
       // La cuota mostrada al usuario lleva el buffer (+0.15).
+      // Para cuotas sintéticas (sin odds real) se pasa la cuota justa implícita como estimación
+      // para que el LLM pueda escribir "est. ~X.XX" en lugar de "n/d".
       const oddsDisplayed = hasRealOdds
         ? +Math.round((o + ODDS_DISPLAY_BUFFER) * 20) / 20
-        : null; // cuota implícita → el LLM buscará la cuota real en su análisis
-      if (oddsDisplayed != null && oddsDisplayed > 2.65) continue; // Cuota máxima
+        : impliedFair; // cuota justa implícita — el LLM la muestra como "est. ~X.XX"
+      if (hasRealOdds && oddsDisplayed != null && oddsDisplayed > 2.65) continue; // Cuota máxima real
       if (stake < 5) continue;            // Stake mínimo publicable: 5/10
 
       candidates.push({
@@ -3381,7 +3383,7 @@ Si el JSON de datos incluye el campo "probabilidadesCalculadas", DEBES usarlo co
 - forma5: forma reciente ponderada de los últimos 5 partidos. Si un equipo tiene forma5.nota = "Forma mala" (≤5 puntos), reduce 8% la prob de victoria.
 - cuotasReales: cuotas reales de Bet365. Usa ESTAS cuotas para el campo "Cuota mínima" del pick (no inventes cuotas). Si no hay cuotas reales, mantén las estimadas.
 - prediccionAPI: predicción del modelo de API-Football. Úsala como señal de confirmación — si coincide con tu análisis, sube el stake en 0.5. Si contradice, baja el stake en 1.
-- picksMotorJS: picks pre-calculados por el motor Poisson. Si un pick tiene "_syntheticOdds": true significa que NO hay cuota real disponible — el motor la estimó. Para esos picks: (a) busca la cuota real en cuotasReales o en tu conocimiento de mercado típico, (b) si encuentras cuota real ≥ 1.40, publícalo con esa cuota real, (c) si no la encuentras, usa "est. ~X.XX" en el formato. Los picks con _syntheticOdds siguen siendo válidos matemáticamente — solo falta la cuota exacta de la casa.
+- picksMotorJS: picks pre-calculados por el motor Poisson. Si un pick tiene "_syntheticOdds": true, el campo "odds" ya contiene la cuota justa estimada — úsala como "est. ~X.XX" en el formato. Si encuentras la cuota real en cuotasReales, úsala en su lugar (sin "est. ~"). Los picks con _syntheticOdds son válidos matemáticamente.
 - soccerBuddy: señales del modelo ZCode Soccer Buddy (simulación Monte Carlo de miles de partidos). Son externas y complementan el Poisson propio.
   * Si soccerBuddy.btts_pct ≥ 70 Y nuestro probBTTS ≥ 60 → confirmación doble → sube stake en 1.
   * Si soccerBuddy.over25_pct ≥ 70 Y nuestro probOver25 ≥ 60 → confirmación doble → sube stake en 1.
@@ -3834,7 +3836,7 @@ REGLAS IRROMPIBLES:
 - La línea 📍 Estadio | 🃏 Árbitro es OBLIGATORIA — si no hay datos, escribe "No disponible"
 - La sección 📊 ANÁLISIS siempre muestra AMBOS equipos (▸ Local y ▸ Visitante) — nunca solo uno
 - Si motivacionLocal.estado o motivacionVisitante.estado es "desconocido" → no escribas "Sin datos de posición" — usa posicionLocal/posicionVisitante directamente o infiere del contexto
-- LA CUOTA ES EXACTAMENTE EL NÚMERO DEL CAMPO "odds" — escríbelo solo, sin paréntesis, sin "(estimada...)", sin "(verifica...)", sin "~", sin "est.", sin NINGÚN texto adicional después del número. Si odds es null → escribe "n/d". NUNCA inventes un número ni añadas comentarios.
+- LA CUOTA: si "_syntheticOdds" es false (cuota real) → escribe exactamente el número del campo "odds", sin texto adicional. Si "_syntheticOdds" es true (cuota estimada) → escribe "est. ~X.XX" usando el valor del campo "odds" como referencia. Si odds es null → escribe "n/d". NUNCA inventes un número fuera de estos casos.
 - NO cambies el stake ni la cuota que viene en los datos
 - CUOTA MÍNIMA 1.65: NUNCA recomiendes un pick donde la cuota sea < 1.65. Si en el JSON llega un pick con odds < 1.65, omítelo completamente y no lo publiques. Una cuota de 1.15 (ej: DNB Real Madrid), 1.20 o 1.40 no tiene valor real — el motor ya los filtra pero si por error llegan, descártalos en silencio.
 - DNB/DC (Draw No Bet, Doble Oportunidad) son mercados legítimos CUANDO la cuota ≥ 1.65. Explica el valor: "el visitante gana a 2.50 pero el DNB a 1.75 nos da cobertura con buen EV". NUNCA digas que un DNB es "seguro" o "cómodo" — explica por qué el equipo tiene capacidad de ganar Y por qué la cuota tiene valor.
