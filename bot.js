@@ -4145,194 +4145,12 @@ function persistPicks(picks) {
   fs.writeFileSync(PICKS_FILE, JSON.stringify(picks, null, 2));
 }
 
-// ─── Airtable Picks (persistencia entre deploys) ──────────────────────────────
-// Tabla "Picks" en Airtable — sobrevive reinicios de Railway
-const AIRTABLE_PICKS_TABLE = process.env.AIRTABLE_PICKS_TABLE || 'Picks';
-
-async function savePicksToAirtable(picks) {
-  if (!process.env.AIRTABLE_API_KEY || !process.env.AIRTABLE_BASE_ID) return;
-  try {
-    const base = getAirtableBase();
-    // Solo guardar picks nuevos (que no tengan airtable_id)
-    const nuevos = picks.filter(p => !p._airtableId);
-    if (!nuevos.length) return;
-
-    // Airtable permite máx 10 registros por batch
-    for (let i = 0; i < nuevos.length; i += 10) {
-      const batch = nuevos.slice(i, i + 10);
-      const records = await base(AIRTABLE_PICKS_TABLE).create(
-        batch.map(p => ({
-          fields: {
-            pick_id:     p.id,
-            fecha:       p.fecha,
-            liga:        p.liga || '',
-            local:       p.local || '',
-            visitante:   p.visitante || '',
-            mercado:     p.mercado || '',
-            seleccion:   p.seleccion || '',
-            cuota:       p.cuota || null,
-            stake:       p.stake || null,
-            resultado:   p.resultado || '',
-            score_final: p.scoresFinal ? `${p.scoresFinal.home}-${p.scoresFinal.away}` : '',
-            fixtureId:   p.fixtureId || null,
-            emitidoAt:   p.emitidoAt || '',
-          }
-        }))
-      );
-      // Guardar el ID de Airtable en el pick local para no duplicar
-      records.forEach((rec, idx) => { batch[idx]._airtableId = rec.id; });
-    }
-    persistPicks(picks); // actualizar JSON local con los _airtableId nuevos
-    console.log(`☁️ ${nuevos.length} picks guardados en Airtable`);
-  } catch (e) {
-    // Si la tabla no existe, lo reportamos sin crashear
-    if (e.message?.includes('TABLE_NOT_FOUND') || e.message?.includes('not authorized') || e.statusCode === 404) {
-      console.warn(`⚠️ Airtable Picks: tabla "${AIRTABLE_PICKS_TABLE}" no existe — usando solo JSON local`);
-    } else {
-      console.warn('⚠️ Airtable Picks save error:', e.message);
-    }
-  }
-}
-
-async function updatePickInAirtable(pick) {
-  if (!pick._airtableId || !process.env.AIRTABLE_API_KEY) return;
-  try {
-    const base = getAirtableBase();
-    await base(AIRTABLE_PICKS_TABLE).update(pick._airtableId, {
-      resultado:   pick.resultado || '',
-      score_final: pick.scoresFinal ? `${pick.scoresFinal.home}-${pick.scoresFinal.away}` : '',
-    });
-    console.log(`☁️ Resultado actualizado en Airtable: ${pick.local} vs ${pick.visitante} → ${pick.resultado}`);
-  } catch (e) {
-    console.warn('⚠️ Airtable update error:', e.message);
-  }
-}
-
-async function loadPicksFromAirtable() {
-  if (!process.env.AIRTABLE_API_KEY || !process.env.AIRTABLE_BASE_ID) return null;
-  try {
-    const base = getAirtableBase();
-    const records = await base(AIRTABLE_PICKS_TABLE)
-      .select({ sort: [{ field: 'emitidoAt', direction: 'asc' }] })
-      .all();
-    return records.map(r => ({
-      _airtableId: r.id,
-      id:          r.fields.pick_id || r.id,
-      fecha:       r.fields.fecha || null,
-      liga:        r.fields.liga || null,
-      local:       r.fields.local || null,
-      visitante:   r.fields.visitante || null,
-      mercado:     r.fields.mercado || null,
-      seleccion:   r.fields.seleccion || null,
-      cuota:       r.fields.cuota || null,
-      stake:       r.fields.stake || null,
-      resultado:   r.fields.resultado || null,
-      scoresFinal: r.fields.score_final ? { raw: r.fields.score_final } : null,
-      fixtureId:   r.fields.fixtureId || null,
-      emitidoAt:   r.fields.emitidoAt || null,
-    }));
-  } catch (e) {
-    if (e.message?.includes('TABLE_NOT_FOUND') || e.message?.includes('not authorized')) {
-      console.warn(`⚠️ Airtable Picks: tabla no existe aún — usando JSON local`);
-    } else {
-      console.warn('⚠️ Airtable load error:', e.message);
-    }
-    return null;
-  }
-}
-
-// ── Airtable Picks — funciones completas de persistencia ─────────────────────
-
-async function ensurePicksTable() {
-  const baseId = process.env.AIRTABLE_BASE_ID;
-  const apiKey = process.env.AIRTABLE_API_KEY;
-  if (!baseId || !apiKey) return;
-  try {
-    const res = await axios.get(
-      `https://api.airtable.com/v0/meta/bases/${baseId}/tables`,
-      { headers: { Authorization: `Bearer ${apiKey}` }, timeout: 10000 }
-    );
-    if (res.data.tables.some(t => t.name === AIRTABLE_PICKS_TABLE)) {
-      console.log('✅ Airtable Picks table ya existe');
-      return;
-    }
-    await axios.post(
-      `https://api.airtable.com/v0/meta/bases/${baseId}/tables`,
-      {
-        name: AIRTABLE_PICKS_TABLE,
-        fields: [
-          { name: 'pick_id',      type: 'singleLineText' },
-          { name: 'emitidoAt',    type: 'singleLineText' },
-          { name: 'fecha',        type: 'singleLineText' },
-          { name: 'liga',         type: 'singleLineText' },
-          { name: 'local',        type: 'singleLineText' },
-          { name: 'visitante',    type: 'singleLineText' },
-          { name: 'mercado',      type: 'singleLineText' },
-          { name: 'seleccion',    type: 'singleLineText' },
-          { name: 'linea',        type: 'number', options: { precision: 2 } },
-          { name: 'cuota',        type: 'number', options: { precision: 2 } },
-          { name: 'stake',        type: 'number', options: { precision: 0 } },
-          { name: 'resultado',    type: 'singleLineText' },
-          { name: 'esCombinada',  type: 'checkbox', options: { color: 'yellowBright', icon: 'check' } },
-          { name: 'fixtureId',    type: 'number', options: { precision: 0 } },
-          { name: 'score_final',  type: 'singleLineText' },
-        ],
-      },
-      { headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' }, timeout: 15000 }
-    );
-    console.log('✅ Airtable Picks table creada automáticamente');
-  } catch (e) {
-    console.warn('⚠️ ensurePicksTable:', e.response?.data?.error?.message || e.message);
-  }
-}
-
-async function getPicksFromAirtable(period = 'total') {
-  if (!process.env.AIRTABLE_API_KEY) return [];
-  try {
-    const base = getAirtableBase();
-    const today   = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
-    const ayer    = new Date(); ayer.setDate(ayer.getDate() - 1);
-    const ayerStr = ayer.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
-    const semana  = new Date(); semana.setDate(semana.getDate() - 7);
-    const semStr  = semana.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
-
-    let formula = '';
-    if (period === 'hoy')   formula = `{fecha} = '${today}'`;
-    else if (period === 'ayer')   formula = `{fecha} = '${ayerStr}'`;
-    else if (period === 'semana') formula = `{fecha} >= '${semStr}'`;
-    else if (period === 'mes') {
-      const mes = new Date(); mes.setDate(mes.getDate() - 30);
-      formula = `{fecha} >= '${mes.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' })}'`;
-    }
-
-    const records = await base(AIRTABLE_PICKS_TABLE).select({
-      ...(formula && { filterByFormula: formula }),
-      sort: [{ field: 'emitidoAt', direction: 'desc' }],
-      maxRecords: 1000,
-    }).all();
-    return records.map(r => ({ _airtableId: r.id, ...r.fields }));
-  } catch (e) {
-    console.error('getPicksFromAirtable:', e.message);
-    return [];
-  }
-}
-
-async function updatePickResultInAirtable(airtableId, resultado, scoresFinal) {
-  if (!process.env.AIRTABLE_API_KEY || !airtableId) return;
-  try {
-    const base = getAirtableBase();
-    await base(AIRTABLE_PICKS_TABLE).update(airtableId, {
-      resultado,
-      score_final: scoresFinal ? `${scoresFinal.home}-${scoresFinal.away}` : '',
-    });
-  } catch (e) {
-    console.error('updatePickResultInAirtable:', e.message);
-  }
-}
+// ─── Picks — persistencia en Railway Persistent Volume (/data/picks.json) ─────
+// Airtable se eliminó: las picks ahora viven en el volumen persistente de Railway.
 
 async function getHistoricalWinRates() {
   try {
-    const picks = await getPicksFromAirtable('total');
+    const picks = loadPicks();
     const resolved = picks.filter(p => ['W', 'L', 'V', 'P'].includes(p.resultado));
     if (!resolved.length) return null;
 
@@ -4490,17 +4308,12 @@ async function recordPicks(analysisText, matchesCtx) {
 
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
 
-    // Cargar picks existentes de HOY desde Airtable para evitar duplicados entre sesiones/deploys
-    const existingAirtable = process.env.AIRTABLE_API_KEY
-      ? await getPicksFromAirtable('hoy').catch(() => [])
-      : [];
     const existingLocal = loadPicks();
 
     // Clave de dedup: fecha + local + visitante + mercado
-    const existingKeys = new Set([
-      ...existingAirtable.map(p => `${p.fecha}|${(p.local||'').toLowerCase()}|${(p.visitante||'').toLowerCase()}|${p.mercado}`),
-      ...existingLocal.map(p =>    `${p.fecha}|${(p.local||'').toLowerCase()}|${(p.visitante||'').toLowerCase()}|${p.mercado}`),
-    ]);
+    const existingKeys = new Set(
+      existingLocal.map(p => `${p.fecha}|${(p.local||'').toLowerCase()}|${(p.visitante||'').toLowerCase()}|${p.mercado}`)
+    );
 
     const newPicks = extracted
       .map(p => {
@@ -4540,9 +4353,7 @@ async function recordPicks(analysisText, matchesCtx) {
     }
 
     persistPicks([...existingLocal, ...newPicks]);
-    console.log(`📝 ${newPicks.length} picks nuevos guardados`);
-    // Solo guardar picks NUEVOS en Airtable (ya no los existentes)
-    savePicksToAirtable(newPicks).catch(e => console.warn('Airtable picks:', e.message));
+    console.log(`📝 ${newPicks.length} picks nuevos guardados en ${PICKS_FILE}`);
   } catch (e) {
     console.error('recordPicks error:', e.message);
   }
@@ -4755,14 +4566,7 @@ async function fetchMatchById(fixtureId) {
 }
 
 async function evaluatePendingPicks() {
-  // Fuente primaria: Airtable (sobrevive deploys). Fallback: JSON local.
-  let picks;
-  if (process.env.AIRTABLE_API_KEY) {
-    const fromAirtable = await getPicksFromAirtable('total').catch(() => []);
-    picks = fromAirtable.length ? fromAirtable : loadPicks();
-  } else {
-    picks = loadPicks();
-  }
+  const picks = loadPicks();
 
   // Re-evaluar también picks recientes (últimos 7 días) con W/L por si fueron mal evaluados.
   // Solo afecta picks dentro de la ventana de corrección para no cambiar resultados históricos.
@@ -4809,14 +4613,7 @@ async function evaluatePendingPicks() {
   }
 
   if (actualizados.length) {
-    persistPicks(picks.filter(p => !p._airtableId)); // solo persiste picks locales
-    for (const pick of actualizados) {
-      if (pick._airtableId) {
-        updatePickResultInAirtable(pick._airtableId, pick.resultado, pick.scoresFinal).catch(() => {});
-      } else {
-        updatePickInAirtable(pick).catch(() => {}); // fallback picks locales sin ID Airtable
-      }
-    }
+    persistPicks(picks);
   }
   return picks;
 }
@@ -4824,17 +4621,9 @@ async function evaluatePendingPicks() {
 async function handleEstadisticas(chatId, period = 'hoy') {
   await bot.sendMessage(chatId, '📊 Evaluando resultados de tus picks...');
 
-  // Siempre evaluar picks pendientes primero (actualiza Airtable con resultados reales)
   await evaluatePendingPicks().catch(e => console.error('evaluatePendingPicks:', e.message));
 
-  // Leer picks actualizados desde Airtable (o JSON local si no hay Airtable)
-  let allPicks;
-  if (process.env.AIRTABLE_API_KEY) {
-    allPicks = await getPicksFromAirtable(period).catch(() => null);
-  }
-  if (!allPicks || !allPicks.length) {
-    allPicks = loadPicks();
-  }
+  const allPicks = loadPicks();
 
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
 
@@ -8591,14 +8380,14 @@ bot.onText(/\/debugevaluar/, async (msg) => {
   if (!ADMIN_IDS.has(telegramId)) return;
   const chatId = String(msg.chat.id);
 
-  await bot.sendMessage(chatId, '🔍 Revisando picks pendientes en Airtable...');
+  await bot.sendMessage(chatId, '🔍 Revisando picks pendientes en /data/picks.json...');
   try {
-    const picks = await getPicksFromAirtable('total').catch(() => []);
+    const picks = loadPicks();
     const pending = picks.filter(p => (!p.resultado || p.resultado === '?') && p.fixtureId);
     const fixtureIds = [...new Set(pending.map(p => p.fixtureId))];
 
     await bot.sendMessage(chatId,
-      `📊 Total Airtable: ${picks.length} | Pendientes con fixtureId: ${pending.length} | Fixtures únicos: ${fixtureIds.length}\n` +
+      `📊 Total picks: ${picks.length} | Pendientes con fixtureId: ${pending.length} | Fixtures únicos: ${fixtureIds.length}\n` +
       `Sin fixtureId: ${picks.filter(p => (!p.resultado || p.resultado === '?') && !p.fixtureId).length}`
     );
 
@@ -9467,4 +9256,4 @@ app.listen(WEBHOOK_PORT, '0.0.0.0', () => {
 // Auto-fetch árbitros de StatsHub al arrancar y cada 6 horas
 fetchStatsHubReferees();
 setInterval(fetchStatsHubReferees, 6 * 60 * 60 * 1000);
-if (process.env.AIRTABLE_API_KEY) ensurePicksTable().catch(e => console.error('ensurePicksTable:', e.message));
+// Picks persisten en Railway Persistent Volume — no se necesita inicializar tabla externa.
