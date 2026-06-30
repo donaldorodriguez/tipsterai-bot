@@ -4132,7 +4132,9 @@ async function detectIntent(message) {
 
 // ─── Pick Tracking ────────────────────────────────────────────────────────────
 
-const PICKS_FILE = path.join(__dirname, 'picks.json');
+// /data es el Persistent Volume de Railway (sobrevive deploys y reinicios).
+// En local __dirname funciona igual porque /data no existe — fallback transparente.
+const PICKS_FILE = fs.existsSync('/data') ? '/data/picks.json' : path.join(__dirname, 'picks.json');
 
 function loadPicks() {
   try { return JSON.parse(fs.readFileSync(PICKS_FILE, 'utf8')); }
