@@ -2071,18 +2071,19 @@ function calcLiveGoalLines(currentGoals, elapsed, homeFor = 1.3, awayFor = 1.0) 
     // Límite 55%: por encima el mercado cobra ~1.35-1.48 (con margen) → sin valor real
     const overHasValue  = pOver  >= 20 && pOver  <= 55;
     const underHasValue = pUnder >= 20 && pUnder <= 55;
-    const cuotaOver  = pOver  > 0 ? +(100 / pOver).toFixed(2)  : null;
-    const cuotaUnder = pUnder > 0 ? +(100 / pUnder).toFixed(2) : null;
+    const cuotaJustaOver  = pOver  > 0 ? +(100 / pOver).toFixed(2)  : null;
+    const cuotaJustaUnder = pUnder > 0 ? +(100 / pUnder).toFixed(2) : null;
     lines.push({
       linea: `${totalLine}`,
       overProb: pOver, underProb: pUnder,
-      cuotaOver, cuotaUnder,
+      cuotaJustaOver, cuotaJustaUnder,
+      _aviso: 'cuotaJustaOver/Under son cuotas de breakeven del modelo (100/prob) — NO son cuotas reales de bookmaker. Usa cuotasVivo para la cuota real.',
       overValor: overHasValue, underValor: underHasValue,
       nota: pOver > 55
         ? `Over ${totalLine} muy probable (${pOver}%) — el mercado cobra ~${+(100/(pOver*1.12)).toFixed(2)}, sin valor`
         : pOver < 20
         ? `Over ${totalLine} muy improbable — sin valor`
-        : `Over ${totalLine} (${pOver}%, cuota ~${cuotaOver}) | Under ${totalLine} (${pUnder}%, cuota ~${cuotaUnder})`,
+        : `Over ${totalLine} (${pOver}%, cuota justa ~${cuotaJustaOver}) | Under ${totalLine} (${pUnder}%, cuota justa ~${cuotaJustaUnder})`,
     });
   }
 
@@ -2128,18 +2129,19 @@ function calcLiveCornersLines(currentCorners, elapsed, chaseFactor = 1.08) {
     const pUnder      = +(100 - pOver).toFixed(1);
     const overHasValue  = pOver  >= 20 && pOver  <= 55;
     const underHasValue = pUnder >= 20 && pUnder <= 55;
-    const cuotaOver  = pOver  > 0 ? +(100 / pOver).toFixed(2)  : null;
-    const cuotaUnder = pUnder > 0 ? +(100 / pUnder).toFixed(2) : null;
+    const cuotaJustaOver  = pOver  > 0 ? +(100 / pOver).toFixed(2)  : null;
+    const cuotaJustaUnder = pUnder > 0 ? +(100 / pUnder).toFixed(2) : null;
     lines.push({
       linea: `${totalLine}`,
       overProb: pOver, underProb: pUnder,
-      cuotaOver, cuotaUnder,
+      cuotaJustaOver, cuotaJustaUnder,
+      _aviso: 'cuotaJustaOver/Under son cuotas de breakeven del modelo — NO son cuotas reales de bookmaker.',
       overValor: overHasValue, underValor: underHasValue,
       nota: pOver > 55
         ? `Over ${totalLine} muy probable (${pOver}%) — el mercado cobra ~${+(100/(pOver*1.12)).toFixed(2)}, sin valor`
         : pOver < 20
         ? `Over ${totalLine} muy improbable — sin valor`
-        : `Over ${totalLine} (${pOver}%, cuota est. ~${cuotaOver}) | Under ${totalLine} (${pUnder}%, cuota est. ~${cuotaUnder})`,
+        : `Over ${totalLine} (${pOver}%, cuota justa ~${cuotaJustaOver}) | Under ${totalLine} (${pUnder}%, cuota justa ~${cuotaJustaUnder})`,
     });
   }
 
@@ -2183,18 +2185,19 @@ function calcLiveCardsLines(currentCards, elapsed, regressionFactor = 0.85) {
     const pUnder      = +(100 - pOver).toFixed(1);
     const overHasValue  = pOver  >= 20 && pOver  <= 55;
     const underHasValue = pUnder >= 20 && pUnder <= 55;
-    const cuotaOver  = pOver  > 0 ? +(100 / pOver).toFixed(2)  : null;
-    const cuotaUnder = pUnder > 0 ? +(100 / pUnder).toFixed(2) : null;
+    const cuotaJustaOver  = pOver  > 0 ? +(100 / pOver).toFixed(2)  : null;
+    const cuotaJustaUnder = pUnder > 0 ? +(100 / pUnder).toFixed(2) : null;
     lines.push({
       linea: `${totalLine}`,
       overProb: pOver, underProb: pUnder,
-      cuotaOver, cuotaUnder,
+      cuotaJustaOver, cuotaJustaUnder,
+      _aviso: 'cuotaJustaOver/Under son cuotas de breakeven del modelo — NO son cuotas reales de bookmaker.',
       overValor: overHasValue, underValor: underHasValue,
       nota: pOver > 55
         ? `Over ${totalLine} muy probable (${pOver}%) — el mercado cobra ~${+(100/(pOver*1.12)).toFixed(2)}, sin valor`
         : pOver < 20
         ? `Over ${totalLine} muy improbable — sin valor`
-        : `Over ${totalLine} (${pOver}%, cuota est. ~${cuotaOver}) | Under ${totalLine} (${pUnder}%, cuota est. ~${cuotaUnder})`,
+        : `Over ${totalLine} (${pOver}%, cuota justa ~${cuotaJustaOver}) | Under ${totalLine} (${pUnder}%, cuota justa ~${cuotaJustaUnder})`,
     });
   }
 
@@ -3851,13 +3854,16 @@ INSTRUCCIÓN ESPECIAL IN-PLAY:
 Eres un tipster en vivo. Siempre das picks concretos y accionables — NUNCA terminas un análisis diciendo "sin picks de valor" si hay tiempo de partido por delante y contexto claro.
 
 CUOTAS EN VIVO:
+⛔ PROHIBIDO escribir "cuota real verificada" o "cuota real disponible" basándote en lineasXxxVivo — esas son cuotas matemáticas de breakeven del modelo (campo "cuotaJustaOver"), NO cuotas reales. Solo puedes decir "cuota real" si el dato viene de cuotasVivo.
+⛔ PROHIBIDO añadir "⏰ Actúa antes del min X" — no tenemos datos de ventanas de cuotas en el mercado. Ese dato es inventado.
+
 - Si cuotasVivo tiene datos → úsalos para el pick.
   ⛔ REGLA DURA DE VALOR: Si la cuota real en cuotasVivo es < 1.50 para un mercado → ese mercado NO tiene valor y está PROHIBIDO recomendarlo. Busca otro pick.
   ⛔ PROHIBIDO recomendar "gana [equipo]" cuando ese equipo ya va ganando — la cuota cae a 1.10-1.30 y no hay ningún valor.
   ⛔ PROHIBIDO recomendar "siguiente gol [equipo]" a cuota < 1.45 — solo tiene valor si hay argumento muy sólido Y cuota ≥ 1.50.
   Cuota mínima aceptable para cualquier pick en vivo: 1.50.
 - Si cuotasVivo es null → da el pick igual. En el campo "Cuota estimada":
-  • Para mercados de goles/corners/tarjetas: usa "est. ~X.XX" tomado literalmente de cuotaOver/cuotaUnder del campo lineasXxxVivo. Es una estimación matemática, NO la cuota real del mercado — siempre escribe "est. ~".
+  • Para mercados de goles/corners/tarjetas: usa "est. ~X.XX" tomado del campo "cuotaJustaOver"/"cuotaJustaUnder" de lineasXxxVivo. Es una cuota de breakeven del modelo, NO la cuota real del mercado — siempre escribe "est. ~".
   • Para mercados de resultado (1X2, BTTS, DNB, Double Chance): NO inventes un número. Escribe "verifica en casa" o "n/d — revisa en tu bookmaker".
   • NUNCA escribas un número específico para mercados de resultado sin cuotasVivo reales.
 
