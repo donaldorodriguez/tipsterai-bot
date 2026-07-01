@@ -3886,9 +3886,15 @@ PROYECCIONES EN TIEMPO REAL:
   líneas con probabilidad 20-67% — es decir, cuotas reales entre 1.50 y 5.0. Si está vacío, NO hagas
   pick de corners. La proyección general (proyeccionCorners.projected) es solo contexto — nunca base
   para elegir la línea directamente.
+  ⛔ PROHIBIDO recomendar cualquier línea de córners que NO aparezca en lineasCornersVivo.lineasConValor — aunque cuotasVivo muestre una cuota atractiva. La cuota atractiva en un mercado imposible es una trampa.
+  ⛔ PROHIBIDO recomendar Under X.5 córners si cornersActuales >= X - 2 (quedan ≤2 córners para superar la línea → el Under es casi imposible). Ejemplo: 6 córners → Under 8.5 está a solo 3 córners de perderse → no recomendarlo.
+  ⛔ PROHIBIDO recomendar Under X.5 córners cuando el equipo perdedor necesita 2+ goles — atacará masivamente en el 2T generando muchos córners adicionales.
+
 - TARJETAS: usa ÚNICAMENTE las líneas de "lineasCardsVivo.lineasConValor". Mismo criterio.
+  ⛔ PROHIBIDO recomendar cualquier línea de tarjetas que NO aparezca en lineasCardsVivo.lineasConValor — aunque cuotasVivo muestre una cuota atractiva.
   ⛔ PROHIBIDO multiplicar por 2 los datos del 1T para proyectar el partido completo.
   ⛔ PROHIBIDO recomendar Over X tarjetas si ya hay X-1 o X tarjetas — la cuota real sería < 1.25.
+  ⛔ PROHIBIDO recomendar Under X.5 tarjetas cuando el equipo perdedor necesita 2+ goles en el 2T — la desesperación genera más faltas y tarjetas que el modelo histórico no captura.
 - BTTS: si el equipo perdedor tiene que atacar → BTTS gana probabilidad real.
   ⛔ PROHIBIDO recomendar "BTTS Sí" / "Ambos Marcan Sí" si el marcador actual muestra que AMBOS equipos ya marcaron (ej: 1-1, 2-1, 1-2, 2-2, 3-1, etc.) — el resultado ya está cumplido, no hay cuota que dar. Este es el error más grave porque el usuario ve un pick que ya pasó. Busca otro mercado.
   ⛔ PROHIBIDO recomendar "BTTS No" si solo uno de los equipos marcó y el equipo perdedor tiene tiempo y necesidad de atacar en 2T.
@@ -3899,6 +3905,14 @@ Antes de emitir los picks de un partido, verifica que no sean mutuamente excluye
 - Si recomiendas Over X.5 goles → NO puedes recomendar Under X.5 o menos en el mismo partido.
 - Si recomiendas Victoria Local → NO recomiendes BTTS No si el visitante tiene que marcar para empatar.
 Si hay conflicto, elige el pick con mayor evidencia cuantitativa (Poisson + H2H) y descarta el otro.
+
+⛔ PARTIDOS CON EQUIPO PERSIGUIENDO (marcador 2-0, 3-0, 3-1, etc.) — REGLA CRÍTICA:
+Cuando un equipo pierde por 2+ goles y necesita remontar en el 2T, el Poisson histórico subestima la intensidad real del partido. Aplica estas correcciones OBLIGATORIAS:
+- El equipo perseguidor generará muchos más CÓRNERS de lo normal → prohíbete recomendar cualquier Under de córners.
+- El equipo perseguidor cometerá más FALTAS buscando el balón → la tasa de tarjetas sube → prohíbete Under de tarjetas.
+- El equipo ganador puede gestionar el partido → sus ataques bajan → el modelo puede sobrestimar goles del ganador.
+- Los mercados de valor real son: Over córners (el perseguidor genera corners), Next Goal del perseguidor, Over goles si la defensa del ganador se relaja.
+- NUNCA recomiendes Under córners o Under tarjetas cuando hay un equipo persiguiendo 2+ goles en el 2T.
 
 ⛔ UNA SOLA FUENTE DE PROBABILIDAD POR PICK:
 El partido está en VIVO → la probabilidad oficial es la del modelo Poisson en tiempo real (lineasGolesVivo, lineasCornersVivo, lineasCardsVivo o probsVivo).
