@@ -29,6 +29,14 @@ const API = axios.create({
   timeout: 15000,
 });
 
+// ─── API-Football (api-sports.io) — solo para partidos en vivo en tiempo real ─
+// Highlightly no tiene endpoint live; API-Football sí: /fixtures?live=all
+const APIF = process.env.APIFOOTBALL_KEY ? axios.create({
+  baseURL: 'https://v3.football.api-sports.io',
+  headers: { 'x-apisports-key': process.env.APIFOOTBALL_KEY },
+  timeout: 10000,
+}) : null;
+
 API.interceptors.request.use(req => {
   const params = new URLSearchParams(req.params || {}).toString();
   console.log(`🔍 API: ${req.baseURL}${req.url}${params ? '?' + params : ''}`);
@@ -520,22 +528,52 @@ async function getFixturesByDate(date) {
 
 async function fetchLiveRaw() {
   if (Date.now() - liveCache.ts < 30000 && liveCache.raw) return liveCache.raw;
-  // Bypass dateCache — dateCache never expires so it can be hours old, causing
-  // fetchLiveRaw to return matches that are actually finished but still show as
-  // "First half"/"Second half" in the stale state.description fields.
+  // Usar API-Football /fixtures?live=all cuando está disponible — es la única fuente
+  // que devuelve partidos en juego EN ESTE INSTANTE. Highlightly solo tiene /matches?date=X
+  // con estado desactualizado que puede mostrar partidos de ayer como "en vivo".
+  if (APIF) {
+    try {
+      const { data } = await APIF.get('/fixtures', { params: { live: 'all' } });
+      const fixtures = data?.response || [];
+      console.log(`⚡ API-Football live: ${fixtures.length} partidos en vivo ahora`);
+      // Convertir formato API-Football → formato interno compatible con Highlightly
+      const raw = fixtures.map(f => ({
+        id:          f.fixture.id,
+        date:        f.fixture.date,
+        homeTeam:    { id: f.teams.home.id,  name: f.teams.home.name  },
+        awayTeam:    { id: f.teams.away.id,  name: f.teams.away.name  },
+        league:      { id: f.league.id, name: f.league.name, country: f.league.country },
+        state: {
+          description: { '1H': 'First half', 'HT': 'Half time', '2H': 'Second half',
+                         'ET': 'Extra time', 'P': 'Penalties', 'BT': 'Break time' }[f.fixture.status.short] || f.fixture.status.short,
+          clock:       f.fixture.status.elapsed,
+          score: {
+            current:  `${f.goals.home ?? 0} - ${f.goals.away ?? 0}`,
+            home:     f.goals.home,
+            away:     f.goals.away,
+          },
+        },
+      }));
+      liveCache = { raw, ts: Date.now() };
+      return raw;
+    } catch (e) {
+      console.warn(`⚠️ API-Football live falló (${e.message}), fallback a Highlightly`);
+    }
+  }
+
+  // Fallback: Highlightly con fecha actual + filtro de tiempo (partidos < 5h de antigüedad)
   const today = new Date().toISOString().split('T')[0];
   let allToday = [];
   try {
-    const pages = await Promise.allSettled([
-      API.get('/matches', { params: { date: today, limit: 200 } }),
-      // Also fetch tomorrow UTC to catch evening games in western timezones
-      (() => { const d = new Date(today + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); return API.get('/matches', { params: { date: d.toISOString().split('T')[0], limit: 100 } }); })(),
-    ]);
-    for (const p of pages) {
-      if (p.status === 'fulfilled') allToday.push(...(p.value.data?.data || []));
-    }
+    const { data } = await API.get('/matches', { params: { date: today, limit: 200 } });
+    allToday = data.data || [];
   } catch {}
-  const raw = allToday.filter(m => LIVE_DESCS.has(m.state?.description));
+  const fiveHoursAgo = Date.now() - 5 * 60 * 60 * 1000;
+  const raw = allToday.filter(m => {
+    if (!LIVE_DESCS.has(m.state?.description)) return false;
+    const startTime = m.date ? new Date(m.date).getTime() : 0;
+    return startTime >= fiveHoursAgo;
+  });
   liveCache = { raw, ts: Date.now() };
   return raw;
 }
