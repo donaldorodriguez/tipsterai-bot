@@ -528,32 +528,63 @@ async function getFixturesByDate(date) {
 
 async function fetchLiveRaw() {
   if (Date.now() - liveCache.ts < 30000 && liveCache.raw) return liveCache.raw;
-  // Usar API-Football /fixtures?live=all cuando está disponible — es la única fuente
-  // que devuelve partidos en juego EN ESTE INSTANTE. Highlightly solo tiene /matches?date=X
-  // con estado desactualizado que puede mostrar partidos de ayer como "en vivo".
+  // API-Football /fixtures?live=all es la única fuente que devuelve partidos
+  // en juego EN ESTE INSTANTE. Highlightly /matches?date=X tiene estados desactualizados.
+  // Después de obtener la lista live de APIF, se cruza con los datos de Highlightly
+  // para obtener los IDs correctos que usan los endpoints de stats/cuotas de Highlightly.
+  const today = new Date().toISOString().split('T')[0];
+  // Fetch Highlightly today en paralelo (siempre lo necesitamos para IDs o como fallback)
+  const hlTodayPromise = API.get('/matches', { params: { date: today, limit: 200 } })
+    .then(r => r.data?.data || []).catch(() => []);
+
   if (APIF) {
     try {
-      const { data } = await APIF.get('/fixtures', { params: { live: 'all' } });
-      const fixtures = data?.response || [];
+      const [apifData, hlToday] = await Promise.all([
+        APIF.get('/fixtures', { params: { live: 'all' } }),
+        hlTodayPromise,
+      ]);
+      const fixtures = apifData.data?.response || [];
       console.log(`⚡ API-Football live: ${fixtures.length} partidos en vivo ahora`);
-      // Convertir formato API-Football → formato interno compatible con Highlightly
-      const raw = fixtures.map(f => ({
-        id:          f.fixture.id,
-        date:        f.fixture.date,
-        homeTeam:    { id: f.teams.home.id,  name: f.teams.home.name  },
-        awayTeam:    { id: f.teams.away.id,  name: f.teams.away.name  },
-        league:      { id: f.league.id, name: f.league.name, country: f.league.country },
-        state: {
-          description: { '1H': 'First half', 'HT': 'Half time', '2H': 'Second half',
-                         'ET': 'Extra time', 'P': 'Penalties', 'BT': 'Break time' }[f.fixture.status.short] || f.fixture.status.short,
-          clock:       f.fixture.status.elapsed,
-          score: {
-            current:  `${f.goals.home ?? 0} - ${f.goals.away ?? 0}`,
-            home:     f.goals.home,
-            away:     f.goals.away,
+
+      // Función de normalización para comparar nombres de equipos entre APIs
+      const normName = s => s.toLowerCase()
+        .normalize('NFD').replace(/[̀-ͯ]/g, '')
+        .replace(/[^a-z0-9]/g, ' ').trim().split(/\s+/)[0]; // primera palabra
+
+      const STATUS_MAP = { '1H': 'First half', 'HT': 'Half time', '2H': 'Second half',
+                           'ET': 'Extra time', 'P': 'Penalties', 'BT': 'Break time' };
+
+      const raw = fixtures.map(f => {
+        const apifH = normName(f.teams.home.name);
+        const apifA = normName(f.teams.away.name);
+        // Buscar el fixture equivalente en Highlightly por nombre de equipo
+        const hlMatch = hlToday.find(m => {
+          const hlH = normName(m.homeTeam?.name || '');
+          const hlA = normName(m.awayTeam?.name || '');
+          return (hlH === apifH || hlH.startsWith(apifH) || apifH.startsWith(hlH)) &&
+                 (hlA === apifA || hlA.startsWith(apifA) || apifA.startsWith(hlA));
+        });
+        if (hlMatch) {
+          console.log(`🔗 Live cross: "${f.teams.home.name} vs ${f.teams.away.name}" → HL id=${hlMatch.id}`);
+        }
+        return {
+          // IDs de Highlightly si se encontró el partido, sino IDs de API-Football
+          id:       hlMatch?.id       ?? f.fixture.id,
+          date:     f.fixture.date,
+          homeTeam: { id: hlMatch?.homeTeam?.id ?? f.teams.home.id, name: f.teams.home.name },
+          awayTeam: { id: hlMatch?.awayTeam?.id ?? f.teams.away.id, name: f.teams.away.name },
+          league:   { id: hlMatch?.league?.id   ?? f.league.id, name: f.league.name, country: f.league.country },
+          state: {
+            description: STATUS_MAP[f.fixture.status.short] || f.fixture.status.short,
+            clock:       f.fixture.status.elapsed,
+            score: {
+              current: `${f.goals.home ?? 0} - ${f.goals.away ?? 0}`,
+              home:    f.goals.home,
+              away:    f.goals.away,
+            },
           },
-        },
-      }));
+        };
+      });
       liveCache = { raw, ts: Date.now() };
       return raw;
     } catch (e) {
@@ -561,13 +592,8 @@ async function fetchLiveRaw() {
     }
   }
 
-  // Fallback: Highlightly con fecha actual + filtro de tiempo (partidos < 5h de antigüedad)
-  const today = new Date().toISOString().split('T')[0];
-  let allToday = [];
-  try {
-    const { data } = await API.get('/matches', { params: { date: today, limit: 200 } });
-    allToday = data.data || [];
-  } catch {}
+  // Fallback: Highlightly con filtro de 5h (partidos que no pueden llevar más de 5h jugados)
+  const allToday = await hlTodayPromise;
   const fiveHoursAgo = Date.now() - 5 * 60 * 60 * 1000;
   const raw = allToday.filter(m => {
     if (!LIVE_DESCS.has(m.state?.description)) return false;
