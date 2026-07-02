@@ -520,8 +520,21 @@ async function getFixturesByDate(date) {
 
 async function fetchLiveRaw() {
   if (Date.now() - liveCache.ts < 30000 && liveCache.raw) return liveCache.raw;
+  // Bypass dateCache — dateCache never expires so it can be hours old, causing
+  // fetchLiveRaw to return matches that are actually finished but still show as
+  // "First half"/"Second half" in the stale state.description fields.
   const today = new Date().toISOString().split('T')[0];
-  const allToday = await fetchFixturesByDate(today);
+  let allToday = [];
+  try {
+    const pages = await Promise.allSettled([
+      API.get('/matches', { params: { date: today, limit: 200 } }),
+      // Also fetch tomorrow UTC to catch evening games in western timezones
+      (() => { const d = new Date(today + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() + 1); return API.get('/matches', { params: { date: d.toISOString().split('T')[0], limit: 100 } }); })(),
+    ]);
+    for (const p of pages) {
+      if (p.status === 'fulfilled') allToday.push(...(p.value.data?.data || []));
+    }
+  } catch {}
   const raw = allToday.filter(m => LIVE_DESCS.has(m.state?.description));
   liveCache = { raw, ts: Date.now() };
   return raw;
@@ -943,10 +956,27 @@ function scoreTeamResult(t, q, country = '', isNationalSearch = false) {
   return s;
 }
 
+// Nombres alternativos que Highlightly puede usar para selecciones nacionales
+const TEAM_SEARCH_ALTERNATES = {
+  'United States': ['USA', 'US', 'United States of America'],
+  'South Korea':   ['Korea Republic', 'Republic of Korea', 'Korea'],
+  'Czech Republic':['Czechia', 'Czech Rep'],
+  'IR Iran':       ['Iran'],
+  'Ivory Coast':   ['Côte d\'Ivoire', 'Cote d\'Ivoire'],
+  'Netherlands':   ['Holland'],
+};
+
 async function searchTeam(name, countryHint = '') {
   const apiName = translateTeamName(name);
-  const { data } = await API.get('/teams', { params: { name: apiName, limit: 20 } });
-  const results = data.data || [];
+  let results = [];
+  const namesToTry = [apiName, ...(TEAM_SEARCH_ALTERNATES[apiName] || [])];
+  for (const tryName of namesToTry) {
+    try {
+      const { data } = await API.get('/teams', { params: { name: tryName, limit: 20 } });
+      results = data.data || [];
+      if (results.length > 0) break;
+    } catch {}
+  }
   if (results.length === 0) return null;
 
   const q = normalizeTeamName(apiName);
@@ -991,8 +1021,15 @@ async function getTeamPlayingPriority(teamId) {
 
 async function findTeamWithButtons(chatId, name, countryHint = '', intent = null) {
   const apiName = translateTeamName(name);
-  const { data } = await API.get('/teams', { params: { name: apiName, limit: 20 } });
-  const results = data.data || [];
+  let results = [];
+  const namesToTry = [apiName, ...(TEAM_SEARCH_ALTERNATES[apiName] || [])];
+  for (const tryName of namesToTry) {
+    try {
+      const { data } = await API.get('/teams', { params: { name: tryName, limit: 20 } });
+      results = data.data || [];
+      if (results.length > 0) break;
+    } catch {}
+  }
   if (results.length === 0) return null;
 
   const q = normalizeTeamName(apiName);
@@ -2531,10 +2568,31 @@ function buildPickCandidates(enrichedFixtures) {
 
       // ── Cuota real o cuota justa implícita (abre DC, DNB, HT, team corners) ──
       // Sin cuota real, usamos 1/(prob × 0.93) que refleja breakeven con margen 7%.
-      // Estas "implied" odss no tienen valor real sobre el mercado — el stake se limita.
+      // Estas "implied" odds no tienen valor real sobre el mercado — el stake se limita.
       const hasRealOdds = m.oddsVal != null && m.oddsVal > 1;
-      const impliedFair = m.prob > 0.10 ? +(1 / (m.prob * 0.93)).toFixed(2) : null;
-      const o = hasRealOdds ? m.oddsVal : impliedFair;
+      let impliedFair = m.prob > 0.10 ? +(1 / (m.prob * 0.93)).toFixed(2) : null;
+
+      // ── DNB: si no hay cuota real de DNB, derivar desde cuotas 1X2 reales del mercado ──
+      // El DNB nunca puede pagar más que la victoria directa — si la cuota sintética
+      // es mayor que la cuota real de victoria, el pick es matemáticamente imposible.
+      if (!hasRealOdds && (m.key === 'dnb_home' || m.key === 'dnb_away')) {
+        const hw = odds.homeWin, aw = odds.awayWin, dr = odds.draw;
+        if (hw && aw && dr) {
+          // Derivar DNB real desde precios 1X2 del bookmaker (más preciso que Poisson)
+          const pH = 1/hw, pA = 1/aw, pX = 1/dr, tot = pH + pA + pX;
+          const pHt = pH/tot, pAt = pA/tot;
+          impliedFair = +(m.key === 'dnb_home'
+            ? (pHt + pAt) / pHt   // DNB local = 1 / (P_home / (P_home + P_away))
+            : (pHt + pAt) / pAt   // DNB visitante
+          ).toFixed(2);
+        } else if (m.key === 'dnb_home' && hw && impliedFair != null && impliedFair >= hw) {
+          continue; // DNB no puede costar más que victoria directa — pick inválido
+        } else if (m.key === 'dnb_away' && aw && impliedFair != null && impliedFair >= aw) {
+          continue;
+        }
+      }
+
+      let o = hasRealOdds ? m.oddsVal : impliedFair;
       if (!o || o <= 1) continue;
 
       // Piso mínimo por mercado: usa el minOdds definido en cada mercado.
@@ -3138,7 +3196,6 @@ FORMATO OBLIGATORIO:
 🎯 Pick: *[market]*
 📊 Probabilidad: *[pGoal]%*
 💰 Cuota estimada: *~[impliedOdds]*
-⏱️ Apostar antes del min: *[minuto límite concreto]*
 📈 Contexto: [razon — usa tiros a puerta, goles con jugador, cambios tácticos, minuto para explicar por qué AHORA]
 🏆 Stake: *[X]/10*
 ━━━━━━━━━━━━━━━━━━━
@@ -3149,7 +3206,7 @@ STAKE (rango 5-10 únicamente):
 - Stake 5-6: prob 55-62%
 - Omite alertas con prob < 55% o cuota ≤ 1.50 (sin valor real)
 
-MINUTO LÍMITE: siempre concreto. En 1T apuesta antes del min 30. En HT decide antes de que empiece el 2T. En 2T nunca más allá del min 75.
+⛔ PROHIBIDO añadir "⏱️ Apostar antes del min X" o cualquier urgencia temporal — el sistema no puede calcular cuándo cambian las cuotas del bookmaker.
 
 IMPORTANTE:
 - Si una alerta no cumple criterios (prob < 55% o cuota ≤ 1.50), simplemente NO la incluyas. Nada de "omitida", nada de notas explicativas. Solo las alertas válidas.
@@ -3387,6 +3444,7 @@ Si el JSON de datos incluye el campo "probabilidadesCalculadas", DEBES usarlo co
 - cuotasReales: cuotas reales de Bet365. Usa ESTAS cuotas para el campo "Cuota mínima" del pick (no inventes cuotas). Si no hay cuotas reales, mantén las estimadas.
 - prediccionAPI: predicción del modelo de API-Football. Úsala como señal de confirmación — si coincide con tu análisis, sube el stake en 0.5. Si contradice, baja el stake en 1.
 - picksMotorJS: picks pre-calculados por el motor Poisson. Si un pick tiene "_syntheticOdds": true, el campo "odds" ya contiene la cuota justa estimada — úsala como "est. ~X.XX" en el formato. Si encuentras la cuota real en cuotasReales, úsala en su lugar (sin "est. ~"). Los picks con _syntheticOdds son válidos matemáticamente.
+  ⛔ REGLA DNB/DC con cuota sintética: si cuotasReales muestra la cuota de victoria directa (homeWin/awayWin), el DNB SIEMPRE tiene una cuota más baja que la victoria directa. Si el pick DNB tiene "_syntheticOdds": true y la cuota estimada es MAYOR que la cuota real de victoria directa en cuotasReales → DESCARTA ese pick (es matemáticamente imposible). Ejemplo: si homeWin real = 1.44 y el pick DNB_local tiene odds: 1.65 → ese pick es inválido, no lo incluyas.
 - soccerBuddy: señales del modelo ZCode Soccer Buddy (simulación Monte Carlo de miles de partidos). Son externas y complementan el Poisson propio.
   * Si soccerBuddy.btts_pct ≥ 70 Y nuestro probBTTS ≥ 60 → confirmación doble → sube stake en 1.
   * Si soccerBuddy.over25_pct ≥ 70 Y nuestro probOver25 ≥ 60 → confirmación doble → sube stake en 1.
