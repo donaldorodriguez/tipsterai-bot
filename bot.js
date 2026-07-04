@@ -1530,6 +1530,150 @@ async function getLiveOdds(hlFixtureId) {
   }
 }
 
+// ─── Alineaciones y lesionados REALES — API-Football ──────────────────────────
+// Highlightly no tiene estos endpoints (stubs null desde la migración). APIF sí:
+// /fixtures/lineups (XI confirmado ~40 min pre-kickoff) y /injuries por fixture.
+// El cruce de IDs se hace por fecha + nombres de equipo (1 llamada/día cacheada).
+const _apifDateCache = new Map(); // dateStr → Map('local|visita' → apif fixture id)
+function _apifNorm(s) {
+  return String(s || '').toLowerCase()
+    .normalize('NFD').replace(/[̀-ͯ]/g, '')
+    .replace(/[^a-z0-9]/g, ' ').trim().split(/\s+/)[0] || '';
+}
+
+async function apifFixtureIdByTeams(dateIso, homeName, awayName) {
+  if (!APIF || !dateIso) return null;
+  const dateStr = String(dateIso).split('T')[0];
+  if (!_apifDateCache.has(dateStr)) {
+    try {
+      const { data } = await APIF.get('/fixtures', { params: { date: dateStr } });
+      const m = new Map();
+      for (const f of (data?.response || [])) {
+        m.set(`${_apifNorm(f.teams.home.name)}|${_apifNorm(f.teams.away.name)}`, f.fixture.id);
+      }
+      _apifDateCache.set(dateStr, m);
+      if (_apifDateCache.size > 5) _apifDateCache.delete(_apifDateCache.keys().next().value);
+    } catch (e) {
+      console.warn(`apifFixtureIdByTeams(${dateStr}): ${e.message}`);
+      return null;
+    }
+  }
+  const map = _apifDateCache.get(dateStr);
+  if (!map) return null;
+  const nh = _apifNorm(homeName), na = _apifNorm(awayName);
+  if (map.has(`${nh}|${na}`)) return map.get(`${nh}|${na}`);
+  for (const [k, id] of map) {
+    const [h, a] = k.split('|');
+    if ((h.startsWith(nh) || nh.startsWith(h)) && (a.startsWith(na) || na.startsWith(a))) return id;
+  }
+  return null;
+}
+
+async function getLineupsAPIF(dateIso, homeName, awayName) {
+  try {
+    const fid = await apifFixtureIdByTeams(dateIso, homeName, awayName);
+    if (!fid) return null;
+    const { data } = await APIF.get('/fixtures/lineups', { params: { fixture: fid } });
+    const resp = data?.response || [];
+    if (!resp.length) return null; // XI aún no confirmado (aparece ~40 min antes)
+    console.log(`📋 Lineups APIF: ${homeName} vs ${awayName} confirmados`);
+    return resp.map(t => ({
+      equipo:    t.team?.name,
+      formacion: t.formation || null,
+      dt:        t.coach?.name || null,
+      titulares: (t.startXI || []).map(p => `${p.player?.name}${p.player?.pos ? ` (${p.player.pos})` : ''}`),
+    }));
+  } catch (e) { console.warn(`getLineupsAPIF: ${e.message}`); return null; }
+}
+
+async function getFixtureInjuriesAPIF(dateIso, homeName, awayName) {
+  const out = { local: [], visitante: [] };
+  try {
+    const fid = await apifFixtureIdByTeams(dateIso, homeName, awayName);
+    if (!fid) return out;
+    const { data } = await APIF.get('/injuries', { params: { fixture: fid } });
+    const nh = _apifNorm(homeName), na = _apifNorm(awayName);
+    for (const item of (data?.response || [])) {
+      const rec = {
+        nombre: item.player?.name,
+        equipo: item.team?.name,
+        tipo:   item.player?.type   || 'Baja',
+        razon:  item.player?.reason || null,
+      };
+      const tn = _apifNorm(item.team?.name);
+      if (tn === nh || tn.startsWith(nh) || nh.startsWith(tn))      out.local.push(rec);
+      else if (tn === na || tn.startsWith(na) || na.startsWith(tn)) out.visitante.push(rec);
+      // equipo no identificable → se descarta (nunca adivinar)
+    }
+    if (out.local.length + out.visitante.length) {
+      console.log(`🩹 APIF injuries ${homeName} vs ${awayName}: ${out.local.length} local / ${out.visitante.length} visitante`);
+    }
+  } catch (e) { console.warn(`getFixtureInjuriesAPIF: ${e.message}`); }
+  return out;
+}
+
+// ─── Elo de selecciones (eloratings.net) — prior de calidad real ──────────────
+// Los promedios de goles de clasificatorias comparan contextos incomparables
+// (CONMEBOL vs goleadas a San Marino). El Elo pondera la calidad del rival y es
+// el mejor predictor individual gratuito para selecciones.
+// Clave Elo: sin conectores ("Bosnia & Herzegovina" y "Bosnia and Herzegovina" → misma clave)
+function _eloKey(name) {
+  return normalizeTeamName(String(name || ''))
+    .replace(/\b(and|of|the|de|el|la)\b/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+
+let _eloCache = { map: null, ts: 0 };
+async function getEloMap() {
+  if (_eloCache.map && Date.now() - _eloCache.ts < 24 * 60 * 60 * 1000) return _eloCache.map;
+  try {
+    // World.tsv: rank\trank\tCODE\trating\t... | en.teams.tsv: CODE\tNombre\tAlias...
+    const HDRS = { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0' } };
+    const [ratingsRes, teamsRes] = await Promise.all([
+      axios.get('https://www.eloratings.net/World.tsv', HDRS),
+      axios.get('https://www.eloratings.net/en.teams.tsv', HDRS),
+    ]);
+    const codeToNames = new Map();
+    for (const line of String(teamsRes.data).split('\n')) {
+      const cols = line.split('\t').map(c => (c || '').trim()).filter(Boolean);
+      if (cols.length >= 2) codeToNames.set(cols[0], cols.slice(1));
+    }
+    const map = new Map();
+    for (const line of String(ratingsRes.data).split('\n')) {
+      const cols = line.split('\t').map(c => (c || '').trim());
+      if (cols.length < 4) continue;
+      const code   = cols[2];
+      const rating = parseFloat(cols[3]);
+      if (!code || !(rating >= 1000 && rating <= 2400)) continue;
+      for (const name of (codeToNames.get(code) || [])) {
+        map.set(_eloKey(name), rating);
+      }
+    }
+    if (map.size < 50) throw new Error(`solo ${map.size} equipos parseados — formato inesperado`);
+    console.log(`🏅 Elo ratings: ${map.size} nombres de selecciones cargados`);
+    _eloCache = { map, ts: Date.now() };
+    return map;
+  } catch (e) {
+    console.warn(`getEloMap: ${e.message}`);
+    return _eloCache.map || null; // mejor cache viejo que nada
+  }
+}
+
+// Ajuste multiplicativo de lambdas por diferencia de Elo (~100 pts ≈ ±6% goles).
+// Devuelve null si algún equipo no se encuentra — sin datos no se ajusta nada.
+function eloAdjust(eloMap, homeName, awayName) {
+  if (!eloMap) return null;
+  const eH = eloMap.get(_eloKey(translateTeamName(homeName)));
+  const eA = eloMap.get(_eloKey(translateTeamName(awayName)));
+  if (!eH || !eA) return null;
+  const dr = Math.max(-400, Math.min(400, eH - eA));
+  return {
+    eloHome: eH, eloAway: eA, diff: dr,
+    hMult: 1 + dr * 0.0006,
+    aMult: 1 - dr * 0.0006,
+  };
+}
+
 async function prefetchOddsApi(fixtures, _date) {
   const map = new Map();
   const top = fixtures.slice(0, 30);
@@ -1964,21 +2108,37 @@ function calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
   const awayLambda = (cl(awayFor, 1.0) + cl(homeAgainst, 1.0)) / 2;
 
   const MAX = 9;
+  // Corrección Dixon-Coles: el Poisson independiente subestima 0-0 y 1-1 y
+  // sobreestima 1-0/0-1 (correlación negativa en marcadores bajos). τ ajusta
+  // esas 4 celdas con rho ≈ -0.10 (valor empírico estándar en fútbol).
+  const DC_RHO = -0.10;
+  const dcTau = (h, a) => {
+    if (h === 0 && a === 0) return 1 - homeLambda * awayLambda * DC_RHO;
+    if (h === 0 && a === 1) return 1 + homeLambda * DC_RHO;
+    if (h === 1 && a === 0) return 1 + awayLambda * DC_RHO;
+    if (h === 1 && a === 1) return 1 - DC_RHO;
+    return 1;
+  };
+
   let pHomeWin = 0, pDraw = 0, pAwayWin = 0;
   let pBtts = 0, pOver05 = 0, pOver15 = 0, pOver25 = 0, pOver35 = 0, pOver45 = 0;
   let pUnder15 = 0, pUnder25 = 0, pUnder35 = 0;
   let pHomeScore = 0, pAwayScore = 0;
+  let pHomeZero = 0, pAwayZero = 0, totalP = 0;
 
   for (let h = 0; h < MAX; h++) {
     for (let a = 0; a < MAX; a++) {
-      const p = poissonPMF(homeLambda, h) * poissonPMF(awayLambda, a);
+      const p = poissonPMF(homeLambda, h) * poissonPMF(awayLambda, a) * dcTau(h, a);
       const total = h + a;
+      totalP += p;
       if (h > a) pHomeWin += p;
       else if (h === a) pDraw += p;
       else pAwayWin += p;
       if (h > 0 && a > 0) pBtts += p;
       if (h > 0) pHomeScore += p;
       if (a > 0) pAwayScore += p;
+      if (h === 0) pHomeZero += p;
+      if (a === 0) pAwayZero += p;
       if (total >= 1) pOver05 += p;
       if (total >= 2) pOver15 += p;
       if (total >= 3) pOver25 += p;
@@ -1990,9 +2150,18 @@ function calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
     }
   }
 
-  // Portería a cero: P(equipo no recibe goles) = Poisson(lambda, 0) = e^(-lambda)
-  const pCleanSheetHome = poissonPMF(awayLambda, 0);
-  const pCleanSheetAway = poissonPMF(homeLambda, 0);
+  // Renormalizar: τ y el truncado de la malla desvían la suma ligeramente de 1
+  if (totalP > 0) {
+    pHomeWin /= totalP; pDraw /= totalP; pAwayWin /= totalP;
+    pBtts /= totalP; pHomeScore /= totalP; pAwayScore /= totalP;
+    pHomeZero /= totalP; pAwayZero /= totalP;
+    pOver05 /= totalP; pOver15 /= totalP; pOver25 /= totalP; pOver35 /= totalP; pOver45 /= totalP;
+    pUnder15 /= totalP; pUnder25 /= totalP; pUnder35 /= totalP;
+  }
+
+  // Portería a cero desde la matriz DC (consistente con el resto de probs)
+  const pCleanSheetHome = pAwayZero;
+  const pCleanSheetAway = pHomeZero;
 
   const pDnbHome = pHomeWin / (pHomeWin + pAwayWin);
   const pDnbAway = pAwayWin / (pHomeWin + pAwayWin);
@@ -5331,6 +5500,9 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     if (i + 6 < statsPairs.length) await new Promise(r => setTimeout(r, 500));
   }
 
+  // Elo de selecciones (solo se usa en torneos de selecciones; 1 fetch/24h)
+  const eloMap = await getEloMap();
+
   // Construir enriched con probabilidades extendidas (HT + corners)
   const enriched = selected.map((f, i) => {
     const hStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
@@ -5348,10 +5520,21 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     const hFormFact = formMultiplier(hStats?.forma5);
     const aFormFact = formMultiplier(aStats?.forma5);
     const blend = 0.50; // peso de la forma reciente (vs. media de temporada)
-    const hForAdj = hFor * (1 - blend + blend * hFormFact);   // ataque local según forma
-    const aForAdj = aFor * (1 - blend + blend * aFormFact);   // ataque visitante según forma
+    let hForAdj = hFor * (1 - blend + blend * hFormFact);   // ataque local según forma
+    let aForAdj = aFor * (1 - blend + blend * aFormFact);   // ataque visitante según forma
     const hAgtAdj = hAgt * (1 - blend + blend * aFormFact);   // defensa local = cuánto hace el ataque visitante
     const aAgtAdj = aAgt * (1 - blend + blend * hFormFact);   // defensa visit = cuánto hace el ataque local
+
+    // ── Elo de selecciones: corrige lambdas por calidad real del rival ──
+    let _elo = null;
+    if (NATIONAL_LEAGUES_HOY.has(f.leagueId)) {
+      _elo = eloAdjust(eloMap, f.homeTeam, f.awayTeam);
+      if (_elo) {
+        hForAdj *= _elo.hMult;
+        aForAdj *= _elo.aMult;
+        console.log(`🏅 Elo ${f.homeTeam}(${_elo.eloHome}) vs ${f.awayTeam}(${_elo.eloAway}) diff=${_elo.diff} → λ×${_elo.hMult.toFixed(3)}/${_elo.aMult.toFixed(3)}`);
+      }
+    }
     const extProbs = calcExtendedProbs(hForAdj, hAgtAdj, aForAdj, aAgtAdj, f.leagueName || '');
 
     return {
@@ -5367,6 +5550,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       fechaPartido:   f.date,
       statsLocal:     withHomeContext(hStats),
       statsVisitante: withAwayContext(aStats),
+      ...(_elo && { eloLocal: _elo.eloHome, eloVisitante: _elo.eloAway }),
       _extendedProbs: extProbs,
       _statsSource:   (hStats && aStats) ? 'real' : hStats ? 'local_only' : aStats ? 'away_only' : 'fallback',
       _formFactors:   { hFormFact, aFormFact }, // útil para debug
@@ -5581,17 +5765,21 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   if (topPicks.length > 0) {
     try {
       const injResults = await Promise.allSettled(
-        topPicks.map(pick => getFixtureInjuries(pick.fixtureId))
+        topPicks.map(pick => {
+          const match = enriched.find(e => e.fixtureId === pick.fixtureId);
+          return match
+            ? getFixtureInjuriesAPIF(match.fechaPartido, match.local, match.visitante)
+            : Promise.resolve({ local: [], visitante: [] });
+        })
       );
       injResults.forEach((res, idx) => {
         if (res.status !== 'fulfilled') return;
-        const allInjuries = res.value;  // [{nombre, equipoId, equipo, tipo, razon}]
-        const pick   = topPicks[idx];
-        const match  = enriched.find(e => e.fixtureId === pick.fixtureId);
-        if (!match || !allInjuries.length) return;
+        const inj  = res.value;
+        const pick = topPicks[idx];
+        if (!inj || (!inj.local.length && !inj.visitante.length)) return;
 
-        pick.lesionadosLocal     = allInjuries.filter(i => i.equipoId === match.homeId);
-        pick.lesionadosVisitante = allInjuries.filter(i => i.equipoId === match.awayId);
+        pick.lesionadosLocal     = inj.local;
+        pick.lesionadosVisitante = inj.visitante;
 
         // Reducir stake si algún equipo tiene ≥2 bajas confirmadas
         const bajasLocal = pick.lesionadosLocal.length;
@@ -6068,13 +6256,16 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const fixtureDate = nextRaw.fixture.date.split('T')[0];
 
   // Fase 1: todas las llamadas paralelas independientes
+  // Lineups y lesionados vienen de API-Football (Highlightly no los tiene);
+  // el cruce de IDs es por fecha + nombres, 1 llamada de fixtures/día cacheada.
+  const _injPromise = getFixtureInjuriesAPIF(nextRaw.fixture.date, homeTeam, awayTeam);
   const requests = [
     getH2H(homeId, awayId),                                    // 0
     getTeamStats(homeId, leagueId),                            // 1
     getTeamStats(awayId, leagueId),                            // 2
-    getLineups(nextRaw.fixture.id),                            // 3
-    getInjuries(homeId, leagueId),                             // 4
-    getInjuries(awayId, leagueId),                             // 5
+    getLineupsAPIF(nextRaw.fixture.date, homeTeam, awayTeam),  // 3
+    _injPromise.then(r => r.local),                            // 4
+    _injPromise.then(r => r.visitante),                        // 5
     getApiPrediction(nextRaw.fixture.id),                      // 6
     getLeagueStandings(leagueId).catch(() => ({ teams: [] })), // 7
     getTeamLastFixtures(homeId, 20),                           // 8
@@ -6357,10 +6548,25 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   // Usar la mejor fuente disponible para el motor de probabilidades
   const _bestHomeStats = homeDomStats || homeBaseForNat || homeStatsData;
   const _bestAwayStats = awayDomStats || awayBaseForNat || awayStatsData;
-  const hFor = parseFloat(_bestHomeStats?.golesAnotadosHome) || 1.3;
+  let hFor = parseFloat(_bestHomeStats?.golesAnotadosHome) || 1.3;
   const hAgt = parseFloat(_bestHomeStats?.golesRecibidosHome) || 1.1;
-  const aFor = parseFloat(_bestAwayStats?.golesAnotadosAway) || 1.0;
+  let aFor = parseFloat(_bestAwayStats?.golesAnotadosAway) || 1.0;
   const aAgt = parseFloat(_bestAwayStats?.golesRecibidosAway) || 1.3;
+
+  // Elo de selecciones: corrige lambdas por calidad real del rival
+  let _eloPartido = null;
+  if (isNationalTeamMatch) {
+    _eloPartido = eloAdjust(await getEloMap(), homeTeam, awayTeam);
+    if (_eloPartido) {
+      hFor *= _eloPartido.hMult;
+      aFor *= _eloPartido.aMult;
+      analysisData.eloRatings = {
+        [homeTeam]: _eloPartido.eloHome,
+        [awayTeam]: _eloPartido.eloAway,
+        nota: 'World Football Elo Ratings — pondera calidad real del rival',
+      };
+    }
+  }
   const extProbs = calcExtendedProbs(hFor, hAgt, aFor, aAgt, nextRaw.league?.name || '');
 
   const fixtureForEngine = {
@@ -6661,15 +6867,16 @@ async function handleEspecifica(chatId, intent) {
   await bot.sendMessage(chatId, `📊 Recopilando datos históricos...`);
 
   const fixtureDate2 = nextRaw.fixture.date.split('T')[0];
+  const _injPromise2 = getFixtureInjuriesAPIF(nextRaw.fixture.date, homeTeam, awayTeam);
   const [h2hRes, homeStatsRes, awayStatsRes, predRes2, standRes2, lineupsRes2, injHomeRes2, injAwayRes2] = await Promise.allSettled([
     getH2H(homeId, awayId),
     getTeamStats(homeId, leagueId),
     getTeamStats(awayId, leagueId),
     getApiPrediction(nextRaw.fixture.id),
     getLeagueStandings(leagueId),
-    getLineups(nextRaw.fixture.id),
-    getInjuries(homeId, leagueId),
-    getInjuries(awayId, leagueId),
+    getLineupsAPIF(nextRaw.fixture.date, homeTeam, awayTeam),
+    _injPromise2.then(r => r.local),
+    _injPromise2.then(r => r.visitante),
   ]);
 
   const h2hData2       = h2hRes.status === 'fulfilled'       ? h2hRes.value       : [];
