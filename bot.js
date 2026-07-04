@@ -2470,8 +2470,87 @@ function buildProbBlock(homeStats, awayStats, h2h = [], leagueId = null, homeFal
  * evalúa todos los mercados disponibles y retorna candidatos con EV positivo,
  * ordenados de mayor a menor EV.
  */
+
+// ─── Autocalibración: el motor aprende de sus propios resultados ──────────────
+// Agrupa el historial de picks.json por familia de mercado y compara el hit rate
+// real contra la probabilidad implícita de las cuotas tomadas. Si un mercado
+// acierta sistemáticamente menos de lo que sus cuotas implicaban, sus
+// probabilidades se encogen; si su ROI histórico es < -15% con muestra
+// suficiente, se desactiva por completo.
+function marketFamily(key) {
+  if (/^over/.test(key))         return 'OVER_GOALS';
+  if (/^under/.test(key))        return 'UNDER_GOALS';
+  if (key === 'btts')            return 'BTTS_YES';
+  if (key === 'bttsNo')          return 'BTTS_NO';
+  if (key === 'homeWin')         return 'HOME_WIN';
+  if (key === 'awayWin')         return 'AWAY_WIN';
+  if (/^dc_/.test(key))          return 'DC';
+  if (key === 'dnb_home')        return 'DNB_HOME';
+  if (key === 'dnb_away')        return 'DNB_AWAY';
+  if (/^ah_home/.test(key))      return 'AH_HOME';
+  if (/^ah_away/.test(key))      return 'AH_AWAY';
+  if (/^ht_/.test(key))          return 'HT_OVER';
+  if (/^cornersOver/.test(key))  return 'OVER_CORNERS';
+  if (/^cornersUnder/.test(key)) return 'UNDER_CORNERS';
+  if (/Corners_/.test(key))      return 'OVER_CORNERS';   // team corners → misma familia
+  if (/^cardsOver/.test(key) || /CardsOver/.test(key)) return 'OVER_CARDS';
+  if (/^cardsUnder/.test(key))   return 'UNDER_CARDS';
+  return 'OTHER';
+}
+
+let _calibCache = { data: null, ts: 0 };
+const CALIB_TTL         = 6 * 60 * 60 * 1000;
+const CALIB_MIN_N       = 15;   // mínimo de picks evaluados para ajustar probs
+const CALIB_DISABLE_N   = 20;   // mínimo para auto-desactivar un mercado
+const CALIB_DISABLE_ROI = -15;  // ROI % por debajo del cual se desactiva
+
+function getMarketCalibration(force = false) {
+  if (!force && _calibCache.data && Date.now() - _calibCache.ts < CALIB_TTL) return _calibCache.data;
+  const out = {};
+  try {
+    const picks = loadPicks().filter(p =>
+      ['W', 'L'].includes(p.resultado) && !p.esCombinada && p.source !== 'alerta_gol'
+    );
+    const fam = {};
+    for (const p of picks) {
+      const fk = p.mercado || 'OTHER';
+      if (!fam[fk]) fam[fk] = { n: 0, w: 0, sumImplied: 0, nImplied: 0, roiUnits: 0, nRoi: 0, clvSum: 0, clvN: 0 };
+      const s = fam[fk];
+      s.n++;
+      if (p.resultado === 'W') s.w++;
+      const c = parseFloat(p.cuota);
+      if (c > 1 && c < 15) {
+        s.sumImplied += 1 / c; s.nImplied++;
+        s.roiUnits   += (p.resultado === 'W' ? c - 1 : -1); s.nRoi++;
+      }
+      if (typeof p.clv === 'number') { s.clvSum += p.clv; s.clvN++; }
+    }
+    for (const [fk, s] of Object.entries(fam)) {
+      const hitRate    = s.w / s.n;
+      const avgImplied = s.nImplied ? s.sumImplied / s.nImplied : null;
+      const roi        = s.nRoi ? (s.roiUnits / s.nRoi) * 100 : null;
+      let factor = 1.0;
+      if (s.n >= CALIB_MIN_N && avgImplied > 0) {
+        factor = Math.max(0.75, Math.min(1.10, hitRate / avgImplied));
+      }
+      const disabled = s.nRoi >= CALIB_DISABLE_N && roi !== null && roi < CALIB_DISABLE_ROI;
+      out[fk] = {
+        n: s.n, hitRate: +(hitRate * 100).toFixed(1),
+        avgImplied: avgImplied != null ? +(avgImplied * 100).toFixed(1) : null,
+        roi: roi != null ? +roi.toFixed(1) : null,
+        factor: +factor.toFixed(3), disabled,
+        clv: s.clvN ? +(s.clvSum / s.clvN).toFixed(2) : null, clvN: s.clvN,
+      };
+      if (disabled) console.log(`🚫 Mercado ${fk} auto-desactivado: ROI ${roi?.toFixed(1)}% en ${s.nRoi} picks`);
+    }
+  } catch (e) { console.error('getMarketCalibration:', e.message); }
+  _calibCache = { data: out, ts: Date.now() };
+  return out;
+}
+
 function buildPickCandidates(enrichedFixtures) {
   const candidates = [];
+  const calib = getMarketCalibration();
 
   for (const f of enrichedFixtures) {
     // 'fallback' = ningún equipo tiene stats reales → ya filtrado antes de llegar aquí
@@ -2652,6 +2731,14 @@ function buildPickCandidates(enrichedFixtures) {
                : m.key === 'awayCardsOver15' ? pAwayCardsO15
                : pCardsOver35;
       }
+
+      // ── Autocalibración con historial propio ─────────────────────────────────
+      // Si este mercado acierta históricamente menos de lo que sus cuotas
+      // implicaban, su probabilidad se encoge ANTES de todos los filtros.
+      const _fam = marketFamily(m.key);
+      const _cal = calib[_fam];
+      if (_cal?.disabled) continue; // ROI histórico < -15% en 20+ picks → desactivado
+      if (_cal && _cal.factor !== 1 && m.prob) m.prob = Math.min(0.97, m.prob * _cal.factor);
 
       if (!m.prob || m.prob < (m.minProb || 0.48)) continue; // prob insuficiente
 
@@ -2837,15 +2924,24 @@ function buildPickCandidates(enrichedFixtures) {
       const ev = +(evRaw * tierMult).toFixed(2);
       if (ev < -5) continue;
 
-      // Stake basado en EV.
+      // ── Umbral de valor profesional: con cuota real, solo publicar EV ≥ +3% ──
+      // Un pick sin edge medible no es un pick — es relleno. Días sin valor
+      // significan "sin picks hoy", no picks forzados.
+      if (hasRealOdds && ev < 3) continue;
+
+      // ── Stake por Kelly fraccionado (¼ Kelly) ─────────────────────────────────
+      // kelly% = edge / (cuota - 1). Stake = 5 + ¼Kelly redondeado, cap 10.
+      // Edge 3% @ 1.80 → ¼K 0.9 → stake 6 | edge 8% → ¼K 2.5 → stake 8.
+      // Los stakes 9-10 quedan reservados a edges excepcionales (como debe ser).
       let stake;
-      if      (ev > 15 && m.prob >= 0.52) stake = 10;
-      else if (ev > 10 && m.prob >= 0.52) stake = 9;
-      else if (ev >  6 && m.prob >= 0.50) stake = 8;
-      else if (ev >  3 && m.prob >= 0.50) stake = 7;
-      else if (ev >  0 && m.prob >= 0.50) stake = 6;
-      else if (ev >= -3)                  stake = 5;  // stake 5 = pick válido con valor marginal
-      else                                stake = 4;  // descartado
+      if (hasRealOdds) {
+        const kellyPct    = ((m.prob * o - 1) / (o - 1)) * 100;
+        const quarterK    = Math.max(0, kellyPct / 4);
+        stake = Math.min(10, 5 + Math.round(quarterK));
+      } else {
+        // Sin cuota real no hay edge medible: heurística conservadora (cap 6 más abajo)
+        stake = ev > 3 ? 6 : ev >= -3 ? 5 : 4;
+      }
 
       // Si el partido tiene stats parciales (solo un equipo), bajar stake 1 nivel por confianza.
       if (partialStats && stake > 4) stake = Math.max(4, stake - 1);
@@ -3647,7 +3743,7 @@ Factores clave para partidos de selecciones:
   • H2H histórico: cómo se han enfrentado históricamente (incluye amistosos)
   • Contexto de grupo (si hay standings del torneo): posición, puntos, gol diferencia, si ya clasificaron o necesitan resultado
   • Renombre táctico: si conoces el sistema táctico del seleccionador (4-3-3 ofensivo, 5-3-2 defensivo) → úsalo
-  • Bajas importantes: si hay jugadores estelares ausentes (lesionados/sancionados del JSON injuriesLocal/Visitante)
+  • Bajas: SOLO si el JSON incluye el campo lesionadosLocal/Visitante con datos. Si el campo NO existe, NO menciones lesionados ni bajas — ni siquiera "sin datos de lesionados". Simplemente omite el tema.
 Picks recomendados en Mundial:
   • Under 2.5 / Under 1.5: partidos con selecciones defensivas o de menor nivel
   • BTTS No: cuando alguno de los dos equipos raramente marca (cleanSheet > 40%)
@@ -3863,7 +3959,7 @@ PRINCIPIOS DEL ANALISTA DE ÉLITE
    - arbitroStats: si el árbitro da 4.2/partido, ese dato cambia el análisis de tarjetas
    - diasDescansoLocal/Visitante: si un equipo jugó hace 3 días, hay riesgo de rotación
    - contextoPartido: lo que está en juego, urgencia táctica
-   - lesionadosLocal/Visitante: bajas que cambian el equipo titular
+   - lesionadosLocal/Visitante: SOLO si el campo existe en el JSON. Si no existe, omite el tema por completo — no escribas "sin datos de lesionados".
    - H2H: los patrones históricos entre estos dos equipos
    - prediccionAPI.goals_home/goals_away: proyección de la API para este partido
 
@@ -3910,10 +4006,11 @@ BASE RATES DE LIGA (baseRatesLiga) — USO OBLIGATORIO:
 - ⛔ REGLA DURA TARJETAS: Si arbitroStats es null O arbitroStats._derivado=true, el pick de tarjetas tiene MÁXIMO stake 6/10 — nunca 7, 8, 9 o 10. Sin datos reales del árbitro, la incertidumbre es demasiado alta para alta confianza.
 - ⛔ REGLA DURA TARJETAS FIN DE TEMPORADA: Si ambos equipos tienen motivacionLocal/Visitante con estado "nada_en_juego" o "clasifica_champions_posible_asegurado", los partidos relajados producen MENOS tarjetas que el promedio de temporada. En ese contexto, picks de Over tarjetas tienen stake máximo 5/10 y deben mencionarse como "contexto de baja intensidad esperada".
 
-BAJAS (lesionadosLocal/lesionadosVisitante):
+BAJAS (lesionadosLocal/lesionadosVisitante) — SOLO si el campo existe en el JSON:
 - 1 baja relevante: mencionarla brevemente.
 - ≥2 bajas: bloque propio con 🩹, mención en Riesgo.
 - Si un portero titular está lesionado → impacto enorme en goles esperados → menciónalo.
+- ⛔ Si el campo NO aparece en el JSON: omite el tema por completo. NO escribas "sin datos de lesionados", NO inventes bajas de tu conocimiento previo (puede estar desactualizado).
 
 DESCANSO (diasDescansoLocal/Visitante):
 - 3-4 días de descanso: "partido de mitad de semana → posibles rotaciones"
@@ -4326,6 +4423,65 @@ function persistPicks(picks) {
 
 // ─── Picks — persistencia en Railway Persistent Volume (/data/picks.json) ─────
 // Airtable se eliminó: las picks ahora viven en el volumen persistente de Railway.
+
+// ─── CLV (Closing Line Value): la métrica profesional de edge real ────────────
+// W/L es ruido con muestras pequeñas; si la cuota tomada supera consistentemente
+// la cuota de cierre del mercado, hay edge real. Un interval captura la cuota
+// ~45 min antes del kickoff para cada pick emitido con cuota real.
+function closingOddsFor(pick, odds) {
+  if (!odds) return null;
+  const L = v => pick.linea != null && Math.abs(parseFloat(pick.linea) - v) < 0.01;
+  switch (pick.mercado) {
+    case 'BTTS_YES':      return odds.bttsYes;
+    case 'BTTS_NO':       return odds.bttsNo;
+    case 'HOME_WIN':      return odds.homeWin;
+    case 'AWAY_WIN':      return odds.awayWin;
+    case 'DRAW':          return odds.draw;
+    case 'DNB_HOME':      return odds.dnb_home;
+    case 'DNB_AWAY':      return odds.dnb_away;
+    case 'OVER_GOALS':    return L(0.5) ? odds.over05 : L(1.5) ? odds.over15 : L(2.5) ? odds.over25 : L(3.5) ? odds.over35 : L(4.5) ? odds.over45 : null;
+    case 'UNDER_GOALS':   return L(1.5) ? odds.under15 : L(2.5) ? odds.under25 : L(3.5) ? odds.under35 : L(4.5) ? odds.under45 : null;
+    case 'OVER_CORNERS':  return L(6.5) ? odds.cornersOver65 : L(7.5) ? odds.cornersOver75 : L(8.5) ? odds.cornersOver85 : L(9.5) ? odds.cornersOver95 : L(10.5) ? odds.cornersOver105 : null;
+    case 'UNDER_CORNERS': return L(6.5) ? odds.cornersUnder65 : L(7.5) ? odds.cornersUnder75 : L(8.5) ? odds.cornersUnder85 : L(9.5) ? odds.cornersUnder95 : null;
+    case 'OVER_CARDS':    return L(2.5) ? odds.cardsOver25 : L(3.5) ? odds.cardsOver35 : L(4.5) ? odds.cardsOver45 : null;
+    case 'UNDER_CARDS':   return L(2.5) ? odds.cardsUnder25 : null;
+    case 'HT_OVER':       return L(0.5) ? odds.over05_1T : L(1.5) ? odds.over15_1T : null;
+    default:              return null;
+  }
+}
+
+async function snapshotClosingOdds() {
+  try {
+    const picks = loadPicks();
+    const now = Date.now();
+    const targets = picks.filter(p => {
+      if (!p.fixtureId || !(parseFloat(p.cuota) > 1) || p.cuotaCierre != null || !p.fechaPartido) return false;
+      const diff = new Date(p.fechaPartido).getTime() - now;
+      return diff < 45 * 60 * 1000 && diff > -15 * 60 * 1000; // ventana: 45 min antes a 15 min después
+    });
+    if (!targets.length) return;
+    const ids = [...new Set(targets.map(p => p.fixtureId))].slice(0, 10);
+    const oddsMap = {};
+    for (const id of ids) {
+      oddsMap[id] = await getRealOdds(id).catch(() => null);
+      await new Promise(r => setTimeout(r, 300));
+    }
+    let updated = 0;
+    for (const p of targets) {
+      const close = closingOddsFor(p, oddsMap[p.fixtureId]);
+      if (close > 1) {
+        p.cuotaCierre = close;
+        p.clv = +(((parseFloat(p.cuota) / close) - 1) * 100).toFixed(2);
+        updated++;
+      }
+    }
+    if (updated) {
+      persistPicks(picks);
+      console.log(`📸 CLV: ${updated} cuotas de cierre capturadas`);
+    }
+  } catch (e) { console.error('snapshotClosingOdds:', e.message); }
+}
+setInterval(snapshotClosingOdds, 20 * 60 * 1000);
 
 async function getHistoricalWinRates() {
   try {
@@ -8277,7 +8433,7 @@ async function enviarRemarketingTelegram(adminChatId, fecha, mensajeCustom) {
   const mensaje = mensajeCustom ||
 `⚽ *Los picks de hoy ya están listos*
 
-Análisis con datos reales, lesionados confirmados y motivación de equipos.
+Análisis con datos reales, cuotas del mercado y motivación de equipos.
 
 Escríbeme *"picks de hoy"* para verlos.
 
@@ -8379,7 +8535,7 @@ async function checkAccess(chatId, telegramId, isImage = false) {
       const linkPro30 = wompiLink(WOMPI_LINKS.pro30, telegramId, 'pro30');
       await bot.sendMessage(chatId,
         `⏳ *Tu prueba gratuita terminó*\n\n` +
-        `Viste lo que puede hacer TipsterAI: picks con datos reales, motivación de equipos, lesionados confirmados y análisis en vivo.\n\n` +
+        `Viste lo que puede hacer TipsterAI: picks con datos reales, motivación de equipos, cuotas del mercado y análisis en vivo.\n\n` +
         `Para seguir accediendo elige tu plan:\n\n` +
         `━━━━━━━━━━━━━━━━━━━\n` +
         `⚡ *VIP 15 días — $59.900 COP*\n` +
@@ -8561,6 +8717,37 @@ bot.onText(/\/api[-_]?debug/, async (msg) => {
 });
 
 // ─── Command: /debugevaluar — muestra raw de Highlightly para picks pendientes ─
+// ─── Command: /calibracion — tabla de calibración por mercado + CLV ──────────
+bot.onText(/\/calibracion/, async (msg) => {
+  const telegramId = String(msg.from.id);
+  if (!ADMIN_IDS.has(telegramId)) return;
+  const chatId = String(msg.chat.id);
+
+  try {
+    await evaluatePendingPicks().catch(() => {});
+    const calib = getMarketCalibration(true); // fuerza recálculo
+    const rows = Object.entries(calib).sort((a, b) => b[1].n - a[1].n);
+    if (!rows.length) return bot.sendMessage(chatId, '😔 Sin picks evaluados aún para calibrar.');
+
+    let text = '🎛 *CALIBRACIÓN POR MERCADO*\n_(hit real vs implícita de cuota tomada)_\n━━━━━━━━━━━━━━━━━━━\n';
+    for (const [fam, s] of rows) {
+      const estado = s.disabled ? '🚫 DESACTIVADO'
+        : s.factor < 0.95 ? `🔻 encogido ×${s.factor}`
+        : s.factor > 1.02 ? `🔺 ampliado ×${s.factor}`
+        : '✅ neutro';
+      text += `\n*${fam}* (${s.n} picks)\n`;
+      text += `├ Acierto real: ${s.hitRate}%${s.avgImplied != null ? ` | implícita: ${s.avgImplied}%` : ''}\n`;
+      if (s.roi != null) text += `├ ROI: ${s.roi > 0 ? '+' : ''}${s.roi}%\n`;
+      if (s.clv != null) text += `├ CLV medio: ${s.clv > 0 ? '+' : ''}${s.clv}% (${s.clvN} picks)\n`;
+      text += `└ ${estado}\n`;
+    }
+    text += `\n━━━━━━━━━━━━━━━━━━━\n_Factor aplica con ≥${CALIB_MIN_N} picks; desactivación con ROI < ${CALIB_DISABLE_ROI}% en ≥${CALIB_DISABLE_N}._\n_CLV positivo = tomamos mejor cuota que el cierre → edge real._`;
+    await sendLong(chatId, text, { parse_mode: 'Markdown' });
+  } catch (e) {
+    await bot.sendMessage(chatId, `❌ Error: ${e.message}`);
+  }
+});
+
 bot.onText(/\/debugevaluar/, async (msg) => {
   const telegramId = String(msg.from.id);
   if (!ADMIN_IDS.has(telegramId)) return;
