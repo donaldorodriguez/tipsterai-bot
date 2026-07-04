@@ -2589,23 +2589,26 @@ function buildPickCandidates(enrichedFixtures) {
 
     // Lambda de tarjetas: promedio de ambos equipos, ajustado por árbitro si disponible
     let cardsLambda;
+    const _isIntlCards = /world cup|mundial|copa am[eé]rica|euro\b|eurocopa|nations league|gold cup|copa oro|friendl/i.test(f.liga || '');
+    // Normalización del árbitro:
+    // - Liga doméstica: refAvg / promedio de ESA liga (el árbitro pita en ese contexto).
+    // - Torneo internacional: la carrera del árbitro viene de su liga doméstica, no
+    //   del torneo → normalizar vs promedio global 4.2. Sin esto, un árbitro de
+    //   LaLiga (4.9) en el Mundial (base 3.4) daba factor 1.44 e inflaba todo.
+    const refNorm = _isIntlCards ? 4.2 : leagueCardsAvg;
+    const refFactor = refCardsAvg != null ? refCardsAvg / refNorm : 0.90;
     if (homeCardsAvg != null && awayCardsAvg != null) {
       // Datos reales de equipo disponibles
       const teamAvg = homeCardsAvg + awayCardsAvg;
-      // Árbitro: normalizar vs promedio liga → factor de corrección
-      // Sin datos de árbitro: usamos factor 0.90 (penalización por incertidumbre, no 1.0 neutro)
-      const refFactor = refCardsAvg != null ? refCardsAvg / leagueCardsAvg : 0.90;
       cardsLambda = teamAvg * Math.max(0.60, Math.min(1.60, refFactor)) * motivFactor;
     } else {
       // Sin datos de equipo → usar base rate de liga ajustada por árbitro
-      const refFactor = refCardsAvg != null ? refCardsAvg / leagueCardsAvg : 0.90;
       cardsLambda = leagueCardsAvg * Math.max(0.60, Math.min(1.60, refFactor)) * motivFactor;
     }
     // Torneos internacionales: los datos de equipo vienen de clasificatorias
-    // (CONMEBOL ~5.5 tarjetas/partido) y los de árbitro de ligas domésticas.
-    // En Mundial/Euro/Copa América la FIFA instruye contención → el modelo
-    // sobreestima sistemáticamente. Amortiguar lambda 15%.
-    if (/world cup|mundial|copa am[eé]rica|euro\b|eurocopa|nations league|gold cup|copa oro|friendl/i.test(f.liga || '')) {
+    // (CONMEBOL ~5.5 tarjetas/partido). En Mundial/Euro/Copa América la FIFA
+    // instruye contención → amortiguar lambda 15%.
+    if (_isIntlCards) {
       cardsLambda *= 0.85;
     }
     // P(X >= N) usando Poisson con lambda = cardsLambda
