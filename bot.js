@@ -2586,6 +2586,13 @@ function buildPickCandidates(enrichedFixtures) {
       const refFactor = refCardsAvg != null ? refCardsAvg / leagueCardsAvg : 0.90;
       cardsLambda = leagueCardsAvg * Math.max(0.60, Math.min(1.60, refFactor)) * motivFactor;
     }
+    // Torneos internacionales: los datos de equipo vienen de clasificatorias
+    // (CONMEBOL ~5.5 tarjetas/partido) y los de árbitro de ligas domésticas.
+    // En Mundial/Euro/Copa América la FIFA instruye contención → el modelo
+    // sobreestima sistemáticamente. Amortiguar lambda 15%.
+    if (/world cup|mundial|copa am[eé]rica|euro\b|eurocopa|nations league|gold cup|copa oro|friendl/i.test(f.liga || '')) {
+      cardsLambda *= 0.85;
+    }
     // P(X >= N) usando Poisson con lambda = cardsLambda
     const pCardsOver25   = poissonCDF_above(cardsLambda, 3);
     const pCardsOver35   = poissonCDF_above(cardsLambda, 4);
@@ -2656,22 +2663,32 @@ function buildPickCandidates(enrichedFixtures) {
         }
       }
 
+      // ── Calibración contra el mercado ─────────────────────────────────────────
+      // La prob del modelo se mezcla con la prob implícita del bookmaker (devig ~5%).
+      // Sin esto, ordenar por EV del modelo hace que ganen justo los mercados donde
+      // el modelo más se equivoca (tarjetas, corners) — "winner's curse". Con la
+      // mezcla, el EV inflado se desinfla y la diversidad de mercados emerge sola.
+      if (hasRealOdds) {
+        const pMarket = Math.min(0.97, (1 / m.oddsVal) * 0.95);
+        const wModel  = ['cards', 'team_cards', 'corners', 'team_corners'].includes(m.cat) ? 0.35 : 0.50;
+        m.prob = wModel * m.prob + (1 - wModel) * pMarket;
+        if (m.prob < (m.minProb || 0.48) * 0.92) continue; // re-check con 8% de tolerancia
+      }
+
       let o = hasRealOdds ? m.oddsVal : impliedFair;
       if (!o || o <= 1) continue;
 
-      // Piso mínimo por mercado: usa el minOdds definido en cada mercado.
-      // El antiguo techo fijo de 1.65 eliminaba BTTS (~1.60) y Over 2.5 (~1.55) mientras
-      // que corners/cards con cuotas 1.70-1.90 pasaban siempre — solo corners y tarjetas salían.
-      if (hasRealOdds) {
-        const catFloor = m.minOdds || (['dc', 'dnb'].includes(m.cat) ? 1.30 : 1.50);
-        if (o < catFloor) continue;
-      }
-
-      // ── Tarjetas: no hay modelo propio → solo evaluar si la cuota tiene valor ─
-      // usamos prob heurística directamente (ya definida en cada tarjeta arriba)
+      // Piso mínimo por mercado — aplica a cuotas reales Y sintéticas.
+      // Antes solo aplicaba con hasRealOdds: los picks sintéticos (ej. DNB derivado
+      // a ~1.10 cuando el favorito paga 1.14) se saltaban el piso y salían publicados.
+      const catFloor = m.minOdds || (['dc', 'dnb'].includes(m.cat) ? 1.30 : 1.50);
+      if (o < catFloor) continue;
 
       let evRaw = calcEV(m.prob, o);
       if (evRaw === null || evRaw < -5) continue;
+      // Edge real en fútbol raramente supera 10-15%. Un EV enorme contra cuota real
+      // significa modelo mal calibrado en ese mercado, no valor genuino.
+      if (hasRealOdds && evRaw > 20) continue;
 
       // ── ZCode Soccer Buddy: boost de EV por confirmación externa ─────────────
       if (_zb) {
