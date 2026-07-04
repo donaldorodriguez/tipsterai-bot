@@ -347,6 +347,13 @@ const LEAGUE_BASE_RATES = {
   262041:{ over25: 57, btts: 60, cards: 3.9, corners:  9.8, name: 'Saudi Pro League' },
   84182: { over25: 55, btts: 58, cards: 3.2, corners: 10.2, name: 'J1 League' },
   249276:{ over25: 53, btts: 56, cards: 3.5, corners:  9.6, name: 'K League 1' },
+  // ── Torneos de selecciones (históricos: WC 2018/2022, Euro 2024, Copa Am 2024) ──
+  // Sin estas entradas, el modelo caía al default cards=4.0 → sesgo Over tarjetas.
+  1635:  { over25: 49, btts: 47, cards: 3.4, corners:  9.4, name: 'World Cup' },
+  4188:  { over25: 52, btts: 49, cards: 3.3, corners:  9.6, name: 'UEFA Euro' },
+  8443:  { over25: 45, btts: 42, cards: 4.6, corners:  8.9, name: 'Copa America' },
+  5039:  { over25: 53, btts: 51, cards: 3.6, corners:  9.5, name: 'Nations League' },
+  29718: { over25: 47, btts: 44, cards: 5.0, corners:  8.8, name: 'Clasif. CONMEBOL' },
 };
 
 // ─── Plans config ─────────────────────────────────────────────────────────────
@@ -1852,11 +1859,15 @@ function poissonCDF_above(lambda, threshold) {
 }
 
 // Añade alias semánticos a stats de equipo local (jugando en casa)
+// tarjetasAmPG es el campo de getNationalTeamRecentStats (selecciones): sin el
+// fallback, las selecciones quedaban con amarillasPorPartido=null y el modelo
+// de tarjetas usaba el default de liga 4.0 — por eso salía Tarjetas Over en
+// todos los partidos del Mundial sin haber visto un dato real.
 function withHomeContext(stats) {
   if (!stats) return null;
   return {
     ...stats,
-    amarillasPorPartido: stats.tarjetasAmHome ?? null,
+    amarillasPorPartido: stats.tarjetasAmHome ?? stats.tarjetasAmPG ?? null,
     cornersxP:           stats.cornersPerGameHome ?? stats.cornersPerGame ?? null,
   };
 }
@@ -1866,7 +1877,7 @@ function withAwayContext(stats) {
   if (!stats) return null;
   return {
     ...stats,
-    amarillasPorPartido: stats.tarjetasAmAway ?? null,
+    amarillasPorPartido: stats.tarjetasAmAway ?? stats.tarjetasAmPG ?? null,
     cornersxP:           stats.cornersPerGameAway ?? stats.cornersPerGame ?? null,
   };
 }
@@ -1897,10 +1908,14 @@ function formMultiplier(forma5) {
 }
 
 function calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
-  const homeLambda = ((homeFor || 1.2) + (awayAgainst || 1.2)) / 2;
-  const awayLambda = ((awayFor || 1.0) + (homeAgainst || 1.0)) / 2;
+  // Clamp de inputs: promedios fuera de [0.35, 3.0] son artefactos de muestra
+  // (goleadas a rivales débiles en clasificatorias, muestras de 1-2 partidos)
+  // y no son proyectables a un partido competitivo.
+  const cl = (v, d) => Math.max(0.35, Math.min(3.0, v || d));
+  const homeLambda = (cl(homeFor, 1.2) + cl(awayAgainst, 1.2)) / 2;
+  const awayLambda = (cl(awayFor, 1.0) + cl(homeAgainst, 1.0)) / 2;
 
-  const MAX = 7;
+  const MAX = 9;
   let pHomeWin = 0, pDraw = 0, pAwayWin = 0;
   let pBtts = 0, pOver05 = 0, pOver15 = 0, pOver25 = 0, pOver35 = 0, pOver45 = 0;
   let pUnder15 = 0, pUnder25 = 0, pUnder35 = 0;
@@ -4763,14 +4778,21 @@ async function evaluatePendingPicks() {
   }));
 
   const actualizados = [];
+  const pendingSet = new Set(pending);
   for (const pick of picks) {
-    if ((pick.resultado && pick.resultado !== '?') || !pick.fixtureId) continue;
+    // Evaluar pendientes Y re-evaluar los recientes ya calificados (ventana 7 días).
+    // Antes este loop saltaba todo pick con W/L → la re-evaluación era código muerto
+    // que gastaba llamadas API sin corregir nada.
+    if (!pendingSet.has(pick) || !pick.fixtureId) continue;
     const entry = fixtureMap[pick.fixtureId];
     if (!entry) continue;
+    const prev = pick.resultado;
     pick.resultado = await evaluatePickResult(pick, entry.fixture, entry.stats);
     pick.scoresFinal = { home: entry.fixture.goals?.home, away: entry.fixture.goals?.away };
-    console.log(`📊 Pick evaluado: ${pick.local} vs ${pick.visitante} — ${pick.seleccion} → ${pick.resultado}`);
-    actualizados.push(pick);
+    if (pick.resultado !== prev) {
+      console.log(`📊 Pick evaluado: ${pick.local} vs ${pick.visitante} — ${pick.seleccion} → ${pick.resultado}${prev && prev !== '?' ? ` (corregido, era ${prev})` : ''}`);
+      actualizados.push(pick);
+    }
   }
 
   if (actualizados.length) {
