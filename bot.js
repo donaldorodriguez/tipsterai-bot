@@ -463,6 +463,7 @@ function parseFixture(m) {
   }
   return {
     fixtureId:  m.id,
+    _apifId:    m._apifId ?? null,   // ID de API-Football si vino del cruce live
     date:       m.date,
     status:     HL_STATUS[m.state?.description] || 'NS',
     elapsed:    m.state?.clock || null,
@@ -577,6 +578,7 @@ async function fetchLiveRaw() {
         return {
           // IDs de Highlightly si se encontró el partido, sino IDs de API-Football
           id:       hlMatch?.id       ?? f.fixture.id,
+          _apifId:  f.fixture.id,     // ID API-Football — necesario para /odds/live
           date:     f.fixture.date,
           homeTeam: { id: hlMatch?.homeTeam?.id ?? f.teams.home.id, name: f.teams.home.name },
           awayTeam: { id: hlMatch?.awayTeam?.id ?? f.teams.away.id, name: f.teams.away.name },
@@ -1478,8 +1480,54 @@ async function getRealOdds(fixtureId) {
   }
 }
 
-async function getLiveOdds(fixtureId) {
-  return getRealOdds(fixtureId);
+// ─── Cuotas EN VIVO reales — API-Football /odds/live ──────────────────────────
+// Highlightly /odds solo tiene cuotas pre-partido congeladas: mostrarlas durante
+// el partido como "cuotasVivo" era mentirle al LLM (Over 2.5 pre-partido no
+// existe al minuto 60 con 1-1). APIF /odds/live devuelve las cuotas in-play
+// reales del bookmaker. Si no hay datos → null (los prompts lo manejan honesto).
+async function getLiveOdds(hlFixtureId) {
+  if (!APIF) return null;
+  try {
+    // Mapear ID Highlightly → ID API-Football usando la lista live vigente
+    const live = await fetchLiveRaw();
+    const match = live.find(m => m.id === hlFixtureId);
+    const apifId = match?._apifId;
+    if (!apifId) return null;
+
+    const { data } = await APIF.get('/odds/live', { params: { fixture: apifId } });
+    const entry = data?.response?.[0];
+    if (!entry?.odds?.length) return null;
+
+    const out = { _source: 'apifootball-live', _nota: 'Cuotas EN VIVO reales del bookmaker (in-play, no pre-partido)' };
+    for (const mkt of entry.odds) {
+      const name = (mkt.name || '').toLowerCase();
+      const vals = (mkt.values || []).filter(v => !v.suspended);
+      const get = re => { const v = vals.find(x => re.test(String(x.value))); return v ? parseFloat(v.odd) : null; };
+      if (/fulltime result|match winner|^1x2/.test(name)) {
+        out.homeWin = out.homeWin ?? get(/^home$/i);
+        out.draw    = out.draw    ?? get(/^draw$/i);
+        out.awayWin = out.awayWin ?? get(/^away$/i);
+      } else if (/over\/under/.test(name) && !/corner|card|asian|half/.test(name)) {
+        for (const v of vals) {
+          const line = parseFloat(v.handicap ?? String(v.value).match(/([\d.]+)\s*$/)?.[1]);
+          if (!line || Math.abs((line % 1) - 0.5) > 0.01) continue; // solo líneas .5
+          const key = String(line).replace('.', '');
+          if (/^over/i.test(String(v.value)))  out['over' + key]  = out['over' + key]  ?? parseFloat(v.odd);
+          if (/^under/i.test(String(v.value))) out['under' + key] = out['under' + key] ?? parseFloat(v.odd);
+        }
+      } else if (/both teams to score/.test(name)) {
+        out.bttsYes = out.bttsYes ?? get(/^yes$/i);
+        out.bttsNo  = out.bttsNo  ?? get(/^no$/i);
+      }
+    }
+    const numeric = Object.keys(out).filter(k => typeof out[k] === 'number');
+    if (!numeric.length) return null;
+    console.log(`📡 Live odds APIF[${apifId}]: ${numeric.map(k => `${k}=${out[k]}`).join(' ')}`);
+    return out;
+  } catch (e) {
+    console.warn(`getLiveOdds(${hlFixtureId}): ${e.message}`);
+    return null;
+  }
 }
 
 async function prefetchOddsApi(fixtures, _date) {
@@ -6489,7 +6537,7 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
         .map(([k]) => k);
       if (sinValor.length > 0) {
         enriched[i].cuotasVivo._mercadosSinValor = sinValor;
-        enriched[i].cuotasVivo._nota = `Mercados con cuota < ${LIVE_MIN_ODDS} (sin valor): ${sinValor.join(', ')}. PROHIBIDO recomendar estos mercados.`;
+        enriched[i].cuotasVivo._notaSinValor = `Mercados con cuota < ${LIVE_MIN_ODDS} (sin valor): ${sinValor.join(', ')}. PROHIBIDO recomendar estos mercados.`;
         console.log(`⚠️ Live odds sin valor (< ${LIVE_MIN_ODDS}): ${enriched[i].homeTeam} vs ${enriched[i].awayTeam} — ${sinValor.join(', ')}`);
       }
     } else {
