@@ -2227,6 +2227,55 @@ async function getPlayerPropsForGames(gameIds, { minOdds = 1.45, maxOdds = 3.2, 
     .slice(0, limit);
 }
 
+// Tendencias por EQUIPO con cuota real (goles y tarjetas de equipo — mercados
+// que Highlightly casi nunca cotiza). Misma API de StatsHub, statTypes: goals/cards.
+async function getTeamTrendsForGames(gameIds, { minOdds = 1.45, maxOdds = 3.5, minTrendPct = 75, minWindow = 5, limit = 6 } = {}) {
+  if (!gameIds.length) return [];
+  const trends = [];
+  for (const statType of ['goals', 'cards']) {
+    try {
+      const qs = new URLSearchParams();
+      qs.set('games', gameIds.join(','));
+      qs.set('statTypes', statType);
+      qs.set('oddsRange[from]', String(minOdds));
+      qs.set('oddsRange[to]', String(maxOdds));
+      qs.set('page', '1'); qs.set('pageSize', '25');
+      qs.set('sorting[column]', 'trendPercentage'); qs.set('sorting[direction]', 'desc');
+      qs.set('minWindow', String(minWindow));
+      const { data } = await axios.get(
+        'https://www.statshub.com/api/props/team-trends?' + qs.toString(),
+        { timeout: 15000, headers: SH_HDRS }
+      );
+      for (const t of (data?.data || [])) {
+        const window = t.trendWindow || 0, hits = t.trendHits || 0;
+        const pct = window > 0 ? (hits / window) * 100 : 0;
+        if (window < minWindow || pct < minTrendPct) continue;
+        const best = (t.bookmakers || []).reduce((b, x) => ((x.oddsValue || 0) > (b?.oddsValue || 0) ? x : b), null);
+        if (!best || best.oddsValue < minOdds || best.oddsValue > maxOdds) continue;
+        trends.push({
+          equipo:       t.teamName,
+          rival:        t.opponentTeamName,
+          mercado:      `${t.teamName}: ${t.oddsType === 'over' ? 'Más' : 'Menos'} de ${t.line} ${t.statType === 'cards' ? 'tarjetas' : 'goles'} del equipo`,
+          statType:     t.statType,
+          linea:        t.line,
+          direccion:    t.oddsType,
+          cuotaReal:    best.oddsValue,
+          bookmaker:    best.bookmakerName,
+          racha:        `cumplió en ${hits}/${window} últimos`,
+          promedioStat: t.trendAvg ?? null,
+          rivalHitRate: t.opponentHitRate ?? null,
+          _shEventId:   t.eventId,
+          _fuente:      'StatsHub team-trends (cuota real)',
+        });
+      }
+    } catch (e) { console.warn(`getTeamTrendsForGames(${statType}): ${e.message}`); }
+  }
+  const seen = new Set();
+  return trends
+    .filter(t => { const k = `${t.equipo}|${t.mercado}`; if (seen.has(k)) return false; seen.add(k); return true; })
+    .slice(0, limit);
+}
+
 // ─── Probability & Analytics Engine ──────────────────────────────────────────
 
 // Factorial helper para Poisson (limitado a n<=20 para evitar overflow)
@@ -4399,6 +4448,12 @@ PRINCIPIOS DEL ANALISTA DE ÉLITE
    - Estas cuotas SÍ son reales y verificadas multi-bookmaker — no escribas "est." ni "verifica".
    - ⛔ PROHIBIDO inventar props que no estén en propsJugador. Si el campo no existe, no hay sección de props.
 
+9. TENDENCIA DE EQUIPO (tendenciasEquipo) — SOLO si el campo existe en el pick:
+   - Añade después del prop (o al final del bloque):
+     "📈 TENDENCIA: [mercado] | Cuota real: [cuotaReal] ([bookmaker]) | [racha] (promedio [promedioStat])"
+   - Son mercados de goles/tarjetas POR EQUIPO con cuota real — mercados alternativos que diversifican los picks.
+   - ⛔ PROHIBIDO inventar tendencias fuera de tendenciasEquipo.
+
 ═══════════════════════════════════════
 CÓMO USAR CADA CAMPO DE DATOS
 ═══════════════════════════════════════
@@ -4524,7 +4579,8 @@ REGLAS IRROMPIBLES:
 - La sección 📊 ANÁLISIS siempre muestra AMBOS equipos (▸ Local y ▸ Visitante) — nunca solo uno
 - Si motivacionLocal.estado o motivacionVisitante.estado es "desconocido" → no escribas "Sin datos de posición" — usa posicionLocal/posicionVisitante directamente o infiere del contexto
 - LA CUOTA: si "_syntheticOdds" es false (cuota real) → escribe exactamente el número del campo "odds", sin texto adicional. Si "_syntheticOdds" es true (cuota estimada) → escribe "est. ~X.XX" usando el valor del campo "odds" como referencia. Si odds es null → escribe "n/d". NUNCA inventes un número fuera de estos casos.
-- PROPS DE JUGADOR (propsJugador): si el campo existe, añade una sección "💥 PROP DE JUGADOR" después de los picks con: jugador, mercado, cuotaReal (es REAL, multi-bookmaker — escríbela sin "est."), bookmaker, racha y contextoRival. Máximo 2 props. ⛔ PROHIBIDO inventar props de jugador que no estén en ese campo.
+- PROPS DE JUGADOR (propsJugador) — SOLO si el campo existe: añade al final una sección "💥 PROP DE JUGADOR" con: [jugador] — [mercado] | Cuota real: [cuotaReal] ([bookmaker]) | [racha]. Estas cuotas SÍ son reales multi-bookmaker — sin "est." ni "verifica en tu book". ⛔ PROHIBIDO inventar props que no estén en propsJugador.
+- TENDENCIAS DE EQUIPO (tendenciasEquipo) — SOLO si existe: sección "📈 TENDENCIA DE EQUIPO" con [mercado] | Cuota real: [cuotaReal] ([bookmaker]) | [racha]. Cuota real verificada. ⛔ PROHIBIDO inventar tendencias fuera del campo.
 - NO cambies el stake ni la cuota que viene en los datos
 - CUOTA MÍNIMA 1.65: NUNCA recomiendes un pick donde la cuota sea < 1.65. Si en el JSON llega un pick con odds < 1.65, omítelo completamente y no lo publiques. Una cuota de 1.15 (ej: DNB Real Madrid), 1.20 o 1.40 no tiene valor real — el motor ya los filtra pero si por error llegan, descártalos en silencio.
 - DNB/DC (Draw No Bet, Doble Oportunidad) son mercados legítimos CUANDO la cuota ≥ 1.65. Explica el valor: "el visitante gana a 2.50 pero el DNB a 1.75 nos da cobertura con buen EV". NUNCA digas que un DNB es "seguro" o "cómodo" — explica por qué el equipo tiene capacidad de ganar Y por qué la cuota tiene valor.
@@ -6150,14 +6206,20 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
         if (shId) idByFixture.set(pick.fixtureId, shId);
       }
       if (idByFixture.size > 0) {
-        const allProps = await getPlayerPropsForGames([...new Set(idByFixture.values())]);
+        const shIds = [...new Set(idByFixture.values())];
+        const [allProps, allTrends] = await Promise.all([
+          getPlayerPropsForGames(shIds),
+          getTeamTrendsForGames(shIds),
+        ]);
         for (const pick of topPicks) {
           const shId = idByFixture.get(pick.fixtureId);
           if (!shId) continue;
           const own = allProps.filter(p => p._shEventId === shId).slice(0, 2);
           if (own.length) pick.propsJugador = own;
+          const ownT = allTrends.filter(t => t._shEventId === shId).slice(0, 2);
+          if (ownT.length) pick.tendenciasEquipo = ownT;
         }
-        console.log(`🎯 Props de jugador: ${allProps.length} encontrados para ${idByFixture.size} fixtures`);
+        console.log(`🎯 StatsHub: ${allProps.length} props jugador + ${allTrends.length} tendencias equipo para ${idByFixture.size} fixtures`);
       }
     } catch (e) { console.warn('props jugador:', e.message); }
   }
@@ -6807,15 +6869,22 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   }).catch(() => null);
   if (realOdds) analysisData.cuotasReales = realOdds;
 
-  // Props de jugador con cuota real multi-bookmaker (StatsHub)
+  // Props de jugador + tendencias de equipo con cuota real multi-bookmaker (StatsHub)
   try {
     const shGames = await getStatsHubGames(fixtureDate);
     const shId = shGameIdFor(shGames, homeTeam, awayTeam);
     if (shId) {
-      const props = await getPlayerPropsForGames([shId], { limit: 3 });
+      const [props, trends] = await Promise.all([
+        getPlayerPropsForGames([shId], { limit: 3 }),
+        getTeamTrendsForGames([shId], { limit: 3 }),
+      ]);
       if (props.length) {
         analysisData.propsJugador = props;
         console.log(`🎯 Props: ${props.map(p => `${p.jugador} ${p.mercado} @${p.cuotaReal}`).join(' | ')}`);
+      }
+      if (trends.length) {
+        analysisData.tendenciasEquipo = trends;
+        console.log(`📈 Tendencias equipo: ${trends.map(t => `${t.mercado} @${t.cuotaReal}`).join(' | ')}`);
       }
     }
   } catch (e) { console.warn('propsJugador:', e.message); }
