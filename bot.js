@@ -1489,8 +1489,22 @@ async function getRealOddsAPIF(dateIso, homeName, awayName) {
   try {
     const fid = await apifFixtureIdByTeams(dateIso, homeName, awayName);
     if (!fid) return null;
-    const { data } = await APIF.get('/odds', { params: { fixture: fid, bookmaker: 8 } }); // 8 = Bet365
-    const bets = data?.response?.[0]?.bookmakers?.[0]?.bets || [];
+    let { data } = await APIF.get('/odds', { params: { fixture: fid, bookmaker: 8 } }); // 8 = Bet365
+    // APIF devuelve errores del plan en body con HTTP 200 — loguearlos para diagnóstico
+    if (data?.errors && Object.keys(data.errors).length) {
+      console.warn(`⚠️ APIF /odds error (plan?): ${JSON.stringify(data.errors)}`);
+    }
+    let bets = data?.response?.[0]?.bookmakers?.[0]?.bets || [];
+    if (!bets.length) {
+      // Fallback: sin filtro de bookmaker — tomar la primera casa con datos
+      const r2 = await APIF.get('/odds', { params: { fixture: fid } });
+      if (r2.data?.errors && Object.keys(r2.data.errors).length) {
+        console.warn(`⚠️ APIF /odds (sin bookmaker) error: ${JSON.stringify(r2.data.errors)}`);
+      }
+      const bk = (r2.data?.response?.[0]?.bookmakers || []).find(b => (b.bets || []).length);
+      bets = bk?.bets || [];
+      if (bets.length) console.log(`💱 APIF odds via ${bk.name} (Bet365 no disponible)`);
+    }
     if (!bets.length) return null;
     const val = (names, re) => {
       for (const n of names) {
@@ -3014,6 +3028,10 @@ function getMarketCalibration(force = false) {
   return out;
 }
 
+// Piso de producto: un analista profesional no vende cuotas sueltas < 1.65.
+// Los favoritos sólidos por debajo del piso se rescatan como base de COMBINADA.
+const PUBLISH_MIN_ODDS = 1.65;
+
 function buildPickCandidates(enrichedFixtures) {
   const candidates = [];
   const calib = getMarketCalibration();
@@ -3022,6 +3040,11 @@ function buildPickCandidates(enrichedFixtures) {
     // 'fallback' = ningún equipo tiene stats reales → ya filtrado antes de llegar aquí
     // 'local_only' / 'away_only' = un equipo sin datos → stake máximo 5 por _maxStake
     if (!f._extendedProbs) continue;
+
+    // Candidatos de este fixture que pasaron todo (para armar combinadas)
+    const fixtureCands = [];
+    // Candidatos que pasaron calidad pero quedaron bajo el piso 1.65
+    const subFloor = [];
 
     // ── Filtro fin de temporada: ambos equipos sin nada en juego y ≤3 jornadas restantes ──
     {
@@ -3452,7 +3475,7 @@ function buildPickCandidates(enrichedFixtures) {
       if (hasRealOdds && oddsDisplayed != null && oddsDisplayed > 2.65) continue; // Cuota máxima real
       if (stake < 5) continue;            // Stake mínimo publicable: 5/10
 
-      candidates.push({
+      const _cand = {
         fixtureId:    f.fixtureId,
         liga:         f.liga,
         country:      f.country,
@@ -3500,7 +3523,66 @@ function buildPickCandidates(enrichedFixtures) {
           corners: baseRates.corners,
           liga:    baseRates.name,
         } : null,
-      });
+      };
+
+      // ── PISO DE PRODUCTO 1.65 ────────────────────────────────────────────
+      // Bajo el piso: no se publica suelto. Favoritos sólidos van a subFloor
+      // como posible base/pata de combinada; el resto también queda disponible
+      // solo como pata secundaria.
+      if (_cand.odds != null && _cand.odds < PUBLISH_MIN_ODDS) {
+        _cand._probRaw = m.prob;
+        subFloor.push(_cand);
+        continue;
+      }
+      _cand._probRaw = m.prob;
+      candidates.push(_cand);
+      fixtureCands.push(_cand);
+    }
+
+    // ── COMBINADAS AUTOMÁTICAS: favorito aplastante + mercado del mismo partido ──
+    // "España X2 @1.44" solo no es vendible; "España X2 + Over 1.5 = ~1.90" sí.
+    {
+      const bases = subFloor
+        .filter(c => ['result', 'dc', 'dnb'].includes(c.category) && c._probRaw >= 0.60)
+        .sort((a, b) => b._probRaw - a._probRaw);
+      if (bases.length) {
+        const base = bases[0];
+        const PARTNER_CATS = new Set(['goals', 'btts', 'teamgoal', 'ht_goals', 'cards', 'team_cards', 'corners', 'team_corners', 'both_halves']);
+        const partners = [...fixtureCands, ...subFloor].filter(c =>
+          c !== base && c.odds != null && PARTNER_CATS.has(c.category)
+        );
+        let best = null;
+        for (const p of partners) {
+          const comboOdds = +(base.odds * p.odds).toFixed(2);
+          if (comboOdds < PUBLISH_MIN_ODDS || comboOdds > 2.80) continue;
+          const comboProb = base._probRaw * p._probRaw;
+          const comboEV   = (comboProb * comboOdds - 1) * 100;
+          if (comboEV < 3) continue;
+          const score = comboEV + (p._syntheticOdds ? 0 : 5); // prefiere pata con cuota real
+          if (!best || score > best._score) best = { p, comboOdds, comboProb, comboEV, _score: score };
+        }
+        if (best) {
+          const kellyPct = 25 * (best.comboProb * best.comboOdds - 1) / (best.comboOdds - 1);
+          candidates.push({
+            ...base,
+            market:      'combinada',
+            marketLabel: `Combinada: ${base.marketLabel} + ${best.p.marketLabel}`,
+            category:    'combinada',
+            esCombinada: true,
+            legs: [
+              { mercado: base.marketLabel,   cuota: base.odds,   cuotaSintetica: !!base._syntheticOdds },
+              { mercado: best.p.marketLabel, cuota: best.p.odds, cuotaSintetica: !!best.p._syntheticOdds },
+            ],
+            prob:  +(best.comboProb * 100).toFixed(1),
+            odds:  best.comboOdds,
+            _syntheticOdds: !!(base._syntheticOdds || best.p._syntheticOdds),
+            ev:    +best.comboEV.toFixed(2),
+            stake: Math.max(5, Math.min(7, 5 + Math.round(kellyPct))),
+            _notaCombo: `El favorito solo paga ${base.odds} — combinado con "${best.p.marketLabel}" (${best.p.odds}) alcanza cuota vendible ${best.comboOdds}.`,
+          });
+          console.log(`🎰 Combinada ${f.local} vs ${f.visitante}: ${base.marketLabel} (${base.odds}) + ${best.p.marketLabel} (${best.p.odds}) = ${best.comboOdds} | EV ${best.comboEV.toFixed(1)}%`);
+        }
+      }
     }
   }
 
@@ -4240,8 +4322,9 @@ FORMATO OBLIGATORIO — sigue este formato exacto, sin variaciones:
 [Si hay advertenciaStats o contexto de playoff → primera línea con ⚠️]
 
 📊 *ANÁLISIS*
-▸ [Local] (local): [goles anotados casa]/p | Forma: [forma — ver regla] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
-▸ [Visitante] (visit): [goles anotados fuera]/p | Forma: [forma — ver regla] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
+▸ [Local] (local): [goles anotados casa]/p | Forma: [forma — ver regla] | 🟨 [amarillasPorPartido] tarj/p
+▸ [Visitante] (visit): [goles anotados fuera]/p | Forma: [forma — ver regla] | 🟨 [amarillasPorPartido] tarj/p
+(Si amarillasPorPartido es null → OMITE el segmento "| 🟨 ..." por completo. Nunca escribas "s/d". Si cancha_neutral=true → sin "(local)"/"(visit)": escribe "(últimos partidos internacionales)".)
 [Regla de forma: si statsLocal.forma5 es objeto → usa statsLocal.forma5.forma. Si es string → directo. Si no existe → statsLocal.forma. Si nada → "s/d"]
 [Ambas líneas SIEMPRE obligatorias]
 [Si H2H ≥3 partidos]: ▸ H2H: [patrón en máx 1 línea]
@@ -4454,6 +4537,15 @@ PRINCIPIOS DEL ANALISTA DE ÉLITE
    - Son mercados de goles/tarjetas POR EQUIPO con cuota real — mercados alternativos que diversifican los picks.
    - ⛔ PROHIBIDO inventar tendencias fuera de tendenciasEquipo.
 
+10. PICK COMBINADO (esCombinada=true, campo legs):
+   - Encabezado del pick: "🎰 COMBINADA: [pata 1] + [pata 2]"
+   - Detalla cada pata con su cuota individual: "▸ [mercado] @ [cuota]" (si cuotaSintetica=true, escribe "est. ~[cuota]")
+   - La cuota del pick es la COMBINADA (campo odds). Usa _notaCombo para explicar por qué se combina: el favorito solo no alcanza cuota vendible.
+   - Razona AMBAS patas: por qué el favorito domina Y por qué la segunda pata es probable.
+   - ⛔ NUNCA presentes una pata de cuota < 1.65 como pick individual.
+
+11. ⛔ CUOTA MÍNIMA ABSOLUTA 1.65: ningún pick individual con cuota (real o estimada) menor a 1.65 puede aparecer en tu respuesta. Si llega en el JSON un pick así, descártalo en silencio (excepto combinadas, cuya cuota combinada ya cumple). Un analista profesional no vende cuotas 1.2x-1.5x sueltas.
+
 ═══════════════════════════════════════
 CÓMO USAR CADA CAMPO DE DATOS
 ═══════════════════════════════════════
@@ -4526,8 +4618,9 @@ FORMATO OBLIGATORIO (Telegram Markdown)
 [Si hay loQueSeJuega → incorpóralo en esas 2 líneas]
 
 📊 *ANÁLISIS*
-▸ [Local] (local): [golesAnotadosHome]/p | Forma: [forma — ver regla abajo] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
-▸ [Visitante] (visit): [golesAnotadosAway]/p | Forma: [forma — ver regla abajo] | 🟨 [amarillasPorPartido o "s/d"] tarj/p
+▸ [Local] (local): [golesAnotadosHome]/p | Forma: [forma — ver regla abajo] | 🟨 [amarillasPorPartido] tarj/p
+▸ [Visitante] (visit): [golesAnotadosAway]/p | Forma: [forma — ver regla abajo] | 🟨 [amarillasPorPartido] tarj/p
+(Si amarillasPorPartido es null → OMITE el segmento "| 🟨 ..." por completo. Nunca escribas "s/d". Si cancha_neutral=true → sin "(local)"/"(visit)": escribe "(últimos partidos internacionales)".)
 [Regla de goles/p: si statsLocal es null O statsLocal.partidosJugados === 0 → escribe "s/d". Si golesAnotadosHome existe y es > 0 → escríbelo. Si es "0" o "0.00" y partidosJugados = 0 → escribe "s/d". NUNCA escribas "0 goles/p registrados en bd" — si no hay datos reales escribe "s/d".]
 [Regla de forma: si statsLocal.forma5 es un objeto → usa statsLocal.forma5.forma (ej: "G-P-E-G-P"). Si statsLocal.forma5 es string → úsalo directo. Si no existe → usa statsLocal.forma. Si ninguno → "s/d". NUNCA escribas "E-E-E-E-E" si todos los resultados son empate — eso indica datos corruptos; escribe "s/d".]
 [AMBAS LÍNEAS OBLIGATORIAS siempre]
@@ -4585,6 +4678,7 @@ REGLAS IRROMPIBLES:
 - CUOTA MÍNIMA 1.65: NUNCA recomiendes un pick donde la cuota sea < 1.65. Si en el JSON llega un pick con odds < 1.65, omítelo completamente y no lo publiques. Una cuota de 1.15 (ej: DNB Real Madrid), 1.20 o 1.40 no tiene valor real — el motor ya los filtra pero si por error llegan, descártalos en silencio.
 - DNB/DC (Draw No Bet, Doble Oportunidad) son mercados legítimos CUANDO la cuota ≥ 1.65. Explica el valor: "el visitante gana a 2.50 pero el DNB a 1.75 nos da cobertura con buen EV". NUNCA digas que un DNB es "seguro" o "cómodo" — explica por qué el equipo tiene capacidad de ganar Y por qué la cuota tiene valor.
 - PUBLICA EXACTAMENTE los picks que recibes en el JSON — ni uno más, ni uno menos. PROHIBIDO añadir picks de partidos que NO están en el JSON. PROHIBIDO inventar un tercer pick si solo recibes 2. Si recibes 2 picks, publicas 2. Si recibes 3, publicas 3.
+  ÚNICA EXCEPCIÓN (tiene prioridad sobre esta regla): un pick con cuota < 1.65 se OMITE en silencio — mejor publicar menos picks que publicar cuotas invendibles. ⛔ PROHIBIDO crear tú un pick nuevo desde cuotasReales para reemplazarlo.
 - El razonamiento debe conectar los números con la situación real del partido
 - Responde en español`;
 
@@ -4596,6 +4690,8 @@ Eres un tipster en vivo. Siempre das picks concretos y accionables — NUNCA ter
 
 CUOTAS EN VIVO:
 ⛔ PROHIBIDO escribir "cuota real verificada" o "cuota real disponible" basándote en lineasXxxVivo — esas son cuotas matemáticas de breakeven del modelo (campo "cuotaJustaOver"), NO cuotas reales. Solo puedes decir "cuota real" si el dato viene de cuotasVivo.
+⛔ COHERENCIA CUOTA-PROBABILIDAD: la cuota estimada DEBE ser exactamente el valor del campo cuotaJustaOver/cuotaJustaUnder del JSON (= 100/probabilidad). PROHIBIDO escribir una cuota estimada distinta a ese campo. Si citas "53.4% de probabilidad", la cuota estimada coherente es ~1.87 (100/53.4) — nunca 2.15 ni otro número inventado.
+⛔ BANDAS DE STAKE DURAS (nunca las excedas): prob 55-62% → stake máx 6 | prob 62-68% → stake máx 8 | prob > 68% → stake máx 10. Un pick con 58% de probabilidad JAMÁS lleva stake 7+.
 ⛔ PROHIBIDO añadir "⏰ Actúa antes del min X" — no tenemos datos de ventanas de cuotas en el mercado. Ese dato es inventado.
 
 - Si cuotasVivo tiene datos → úsalos para el pick.
@@ -5116,6 +5212,24 @@ async function applyStakeGate(picksText, enriched, matchesCtx) {
       }
     }
 
+    // ── GATE DURO DE CUOTA MÍNIMA: elimina picks < 1.65 aunque el LLM los publique ──
+    // Las reglas de prompt no bastan (el LLM las viola bajo instrucciones en
+    // conflicto). Si detectamos un pick individual con cuota < 1.65, se pide
+    // una reescritura quirúrgica que lo elimina del texto.
+    const invalid = extracted.filter(x =>
+      !x.esCombinada && x.cuota != null && x.cuota > 1 && x.cuota < PUBLISH_MIN_ODDS
+    );
+    if (invalid.length) {
+      console.log(`🚫 Gate cuota mínima: ${invalid.length} pick(s) < ${PUBLISH_MIN_ODDS} detectado(s): ${invalid.map(p => `${p.seleccion}@${p.cuota}`).join(', ')}`);
+      const rewritten = await haiku(
+        `Eres un editor de texto quirúrgico. Recibes un análisis de picks deportivos y una lista de picks INVÁLIDOS a eliminar. Devuelve el MISMO texto, palabra por palabra, con la única diferencia de que los bloques completos de los picks inválidos (desde su encabezado "🎯 PICK..." hasta su última línea "└ ⚠️ Riesgo...") desaparecen. No renumeres, no resumas, no añadas notas ni explicaciones. Si todos los picks son inválidos, devuelve solo la parte de contexto/análisis con la línea "⛔ Sin picks de valor con cuota ≥ 1.65 en este partido."`,
+        `PICKS INVÁLIDOS A ELIMINAR (cuota < ${PUBLISH_MIN_ODDS}):\n${invalid.map(p => `- ${p.seleccion} (cuota ${p.cuota}) del partido ${p.local} vs ${p.visitante}`).join('\n')}\n\nTEXTO:\n${correctedText}`
+      ).catch(() => null);
+      if (rewritten && rewritten.length > correctedText.length * 0.3) {
+        correctedText = rewritten;
+      }
+    }
+
     return correctedText;
   } catch (e) {
     console.error('applyStakeGate:', e.message);
@@ -5398,6 +5512,7 @@ async function evaluatePendingPicks() {
   const pending = picks.filter(p => {
     if (!p.fixtureId) return false;
     if (p.mercado === 'PLAYER_PROP') return false; // stats de jugador no evaluables con marcador
+    if (p.esCombinada) return false; // combinadas: requieren evaluar ambas patas — no auto-evaluables
     if (!p.resultado || p.resultado === '?') return true;
     if (['W', 'L', 'V'].includes(p.resultado) && p.emitidoAt && new Date(p.emitidoAt) >= cutoff) return true;
     return false;
@@ -6944,6 +7059,9 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     PARTIDO_DEEP_SYSTEM,
     `Analiza este partido en profundidad (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}`
   );
+
+  // Gate duro pre-publicación: valida stakes y elimina picks con cuota < 1.65
+  analysis = await applyStakeGate(analysis, [fixtureForEngine], [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]);
 
   try {
     await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
