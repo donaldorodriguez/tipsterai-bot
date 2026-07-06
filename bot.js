@@ -1356,7 +1356,7 @@ function summarizeEvents(events, homeTeam, awayTeam) {
 async function getInjuries(teamId, leagueId) { return []; }
 async function getFixtureInjuries(fixtureId) { return []; }
 
-async function getRealOdds(fixtureId) {
+async function getRealOddsHL(fixtureId) {
   try {
     const { data } = await API.get('/odds', { params: { matchId: fixtureId } });
     const items = data?.data;
@@ -1478,6 +1478,97 @@ async function getRealOdds(fixtureId) {
     console.warn(`getRealOdds(${fixtureId}): ${e.message}`);
     return null;
   }
+}
+
+// ─── Cuotas pre-match de API-Football (Bet365) — rellena lo que HL no cubre ──
+// Highlightly solo devuelve ~10 mercados básicos y a veces ninguno → los picks
+// nacían sintéticos ("est. ~X"). APIF /odds trae 20+ mercados reales por fixture:
+// DNB, Double Chance, 1er tiempo, líneas de corners/tarjetas, AH, team-to-score.
+async function getRealOddsAPIF(dateIso, homeName, awayName) {
+  if (!APIF) return null;
+  try {
+    const fid = await apifFixtureIdByTeams(dateIso, homeName, awayName);
+    if (!fid) return null;
+    const { data } = await APIF.get('/odds', { params: { fixture: fid, bookmaker: 8 } }); // 8 = Bet365
+    const bets = data?.response?.[0]?.bookmakers?.[0]?.bets || [];
+    if (!bets.length) return null;
+    const val = (names, re) => {
+      for (const n of names) {
+        const bet = bets.find(b => (b.name || '').toLowerCase() === n.toLowerCase());
+        const v = bet?.values?.find(x => re.test(String(x.value)));
+        if (v) return parseFloat(v.odd);
+      }
+      return null;
+    };
+    const r = {};
+    r.homeWin = val(['Match Winner'], /^Home$/i);
+    r.draw    = val(['Match Winner'], /^Draw$/i);
+    r.awayWin = val(['Match Winner'], /^Away$/i);
+    for (const L of ['0.5', '1.5', '2.5', '3.5', '4.5']) {
+      const key = L.replace('.', '');
+      const reO = new RegExp(`^Over ${L.replace('.', '\\.')}$`, 'i');
+      const reU = new RegExp(`^Under ${L.replace('.', '\\.')}$`, 'i');
+      r[`over${key}`]  = val(['Goals Over/Under'], reO);
+      r[`under${key}`] = val(['Goals Over/Under'], reU);
+    }
+    r.bttsYes = val(['Both Teams Score', 'Both Teams To Score'], /^Yes$/i);
+    r.bttsNo  = val(['Both Teams Score', 'Both Teams To Score'], /^No$/i);
+    r.dc_1X   = val(['Double Chance'], /^Home\/Draw$/i);
+    r.dc_X2   = val(['Double Chance'], /^Draw\/Away$/i);
+    r.dc_12   = val(['Double Chance'], /^Home\/Away$/i);
+    r.dnb_home = val(['Draw No Bet', 'Home/Away'], /^Home$/i);
+    r.dnb_away = val(['Draw No Bet', 'Home/Away'], /^Away$/i);
+    r.homeWin_1T = val(['First Half Winner'], /^Home$/i);
+    r.draw_1T    = val(['First Half Winner'], /^Draw$/i);
+    r.awayWin_1T = val(['First Half Winner'], /^Away$/i);
+    r.over05_1T  = val(['Goals Over/Under First Half'], /^Over 0\.5$/i);
+    r.under05_1T = val(['Goals Over/Under First Half'], /^Under 0\.5$/i);
+    r.over15_1T  = val(['Goals Over/Under First Half'], /^Over 1\.5$/i);
+    r.under15_1T = val(['Goals Over/Under First Half'], /^Under 1\.5$/i);
+    for (const L of ['6.5', '7.5', '8.5', '9.5', '10.5']) {
+      const key = L.replace('.', '');
+      const reO = new RegExp(`^Over ${L.replace('.', '\\.')}$`, 'i');
+      const reU = new RegExp(`^Under ${L.replace('.', '\\.')}$`, 'i');
+      r[`cornersOver${key}`]  = val(['Corners Over Under', 'Total Corners'], reO);
+      r[`cornersUnder${key}`] = val(['Corners Over Under', 'Total Corners'], reU);
+    }
+    r.cardsOver25  = val(['Cards Over/Under', 'Total Cards'], /^Over 2\.5$/i);
+    r.cardsOver35  = val(['Cards Over/Under', 'Total Cards'], /^Over 3\.5$/i);
+    r.cardsOver45  = val(['Cards Over/Under', 'Total Cards'], /^Over 4\.5$/i);
+    r.cardsUnder25 = val(['Cards Over/Under', 'Total Cards'], /^Under 2\.5$/i);
+    r.ah_home_m05 = val(['Asian Handicap'], /^Home -0\.5$/i);
+    r.ah_away_m05 = val(['Asian Handicap'], /^Away -0\.5$/i);
+    r.ah_home_m15 = val(['Asian Handicap'], /^Home -1\.5$/i);
+    r.ah_away_m15 = val(['Asian Handicap'], /^Away -1\.5$/i);
+    r.homeToScore = val(['Home Team Score a Goal'], /^Yes$/i);
+    r.awayToScore = val(['Away Team Score a Goal'], /^Yes$/i);
+    Object.keys(r).forEach(k => { if (r[k] == null || !(r[k] > 1)) delete r[k]; });
+    if (!Object.keys(r).length) return null;
+    console.log(`💱 APIF odds ${homeName} vs ${awayName}: ${Object.keys(r).length} mercados reales`);
+    return r;
+  } catch (e) {
+    console.warn(`getRealOddsAPIF: ${e.message}`);
+    return null;
+  }
+}
+
+// getRealOdds unificado: Highlightly como base + APIF rellena mercados faltantes.
+// fxCtx = { date, homeTeam, awayTeam } — sin contexto solo se usa Highlightly.
+async function getRealOdds(fixtureId, fxCtx = null) {
+  const hl = await getRealOddsHL(fixtureId).catch(() => null);
+  let apif = null;
+  if (fxCtx?.date && fxCtx?.homeTeam && fxCtx?.awayTeam) {
+    apif = await getRealOddsAPIF(fxCtx.date, fxCtx.homeTeam, fxCtx.awayTeam).catch(() => null);
+  }
+  if (!hl && !apif) return null;
+  const result = { ...(hl || {}) };
+  if (apif) {
+    for (const [k, v] of Object.entries(apif)) {
+      if (typeof v === 'number' && v > 1 && result[k] == null) result[k] = v;
+    }
+    result._source = hl ? 'highlightly+apifootball' : 'apifootball';
+  }
+  return result;
 }
 
 // ─── Cuotas EN VIVO reales — API-Football /odds/live ──────────────────────────
@@ -1674,14 +1765,30 @@ function eloAdjust(eloMap, homeName, awayName) {
   };
 }
 
+// Goles esperados derivados del Elo puro. Los promedios de clasificatorias
+// comparan contextos incomparables (CONMEBOL vs goleadas a San Marino); el Elo
+// es el mejor predictor individual para selecciones. We = expectativa de
+// victoria; el mapeo We → goles usa base 1.30 por lado (total ~2.6, típico WC).
+function eloExpectedLambdas(diff) {
+  const dr = Math.max(-400, Math.min(400, diff));
+  const we = 1 / (1 + Math.pow(10, -dr / 400));
+  return {
+    h: Math.max(0.45, 1.30 + 2.4 * (we - 0.5)),
+    a: Math.max(0.45, 1.30 - 2.4 * (we - 0.5)),
+    we: +we.toFixed(3),
+  };
+}
+
 async function prefetchOddsApi(fixtures, _date) {
   const map = new Map();
   const top = fixtures.slice(0, 30);
-  await Promise.allSettled(top.map(async f => {
-    const odds = await getRealOdds(f.fixtureId);
+  // APIF merge solo para los primeros 12 fixtures (presupuesto: plan free = 100 req/día)
+  await Promise.allSettled(top.map(async (f, i) => {
+    const ctx = i < 12 ? { date: f.date, homeTeam: f.homeTeam, awayTeam: f.awayTeam } : null;
+    const odds = await getRealOdds(f.fixtureId, ctx);
     if (odds) map.set(f.fixtureId, odds);
   }));
-  console.log(`📊 Highlightly odds: ${map.size}/${top.length} partidos`);
+  console.log(`📊 Odds (HL+APIF): ${map.size}/${top.length} partidos`);
   return map;
 }
 async function getLastMatchDate(teamId) { return null; }
@@ -2025,6 +2132,99 @@ async function getNationalTeamRecentStats(teamId, last = 20) {
     console.warn(`⚠️ getNationalTeamRecentStats(${teamId}): ${e.message}`);
     return null;
   }
+}
+
+// ─── StatsHub Player Props — tendencias de jugador con CUOTAS REALES ─────────
+// /api/props/player-trends devuelve props (remates, goleador) con cuotas de
+// 8 bookmakers reales (Bet365, Unibet...), racha del jugador (hits/window),
+// promedio y contexto del rival. statTypes soportados: 'shots', 'goals'.
+const SH_HDRS = { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' };
+let _shGamesCache = { date: null, list: [], ts: 0 };
+
+async function getStatsHubGames(dateStr) {
+  if (_shGamesCache.date === dateStr && Date.now() - _shGamesCache.ts < 30 * 60 * 1000) return _shGamesCache.list;
+  try {
+    const s = Math.floor(new Date(`${dateStr}T00:00:00-05:00`).getTime() / 1000);
+    const e = Math.floor(new Date(`${dateStr}T23:59:59-05:00`).getTime() / 1000);
+    const { data } = await axios.get(
+      `https://www.statshub.com/api/event/by-date?startOfDay=${s}&endOfDay=${e}`,
+      { timeout: 15000, headers: SH_HDRS }
+    );
+    const list = (data?.data || [])
+      .map(g => ({ id: g.events?.id, home: g.homeTeam?.name || '', away: g.awayTeam?.name || '' }))
+      .filter(g => g.id);
+    _shGamesCache = { date: dateStr, list, ts: Date.now() };
+    return list;
+  } catch (e) {
+    console.warn(`getStatsHubGames(${dateStr}): ${e.message}`);
+    return _shGamesCache.list || [];
+  }
+}
+
+function shGameIdFor(games, homeName, awayName) {
+  const nh = _apifNorm(homeName), na = _apifNorm(awayName);
+  const hit = games.find(g => {
+    const gh = _apifNorm(g.home), ga = _apifNorm(g.away);
+    return (gh === nh || gh.startsWith(nh) || nh.startsWith(gh)) &&
+           (ga === na || ga.startsWith(na) || na.startsWith(ga));
+  });
+  return hit?.id || null;
+}
+
+async function getPlayerPropsForGames(gameIds, { minOdds = 1.45, maxOdds = 3.2, minTrendPct = 75, minWindow = 5, limit = 6 } = {}) {
+  if (!gameIds.length) return [];
+  const props = [];
+  for (const statType of ['shots', 'goals']) {
+    try {
+      const qs = new URLSearchParams();
+      qs.set('games', gameIds.join(','));
+      qs.set('statTypes', statType);
+      qs.set('oddsRange[from]', String(minOdds));
+      qs.set('oddsRange[to]', String(maxOdds));
+      qs.set('page', '1'); qs.set('pageSize', '25');
+      qs.set('sorting[column]', 'trendPercentage'); qs.set('sorting[direction]', 'desc');
+      qs.set('minWindow', String(minWindow));
+      const { data } = await axios.get(
+        'https://www.statshub.com/api/props/player-trends?' + qs.toString(),
+        { timeout: 15000, headers: SH_HDRS }
+      );
+      for (const p of (data?.data || [])) {
+        const window = p.trendWindow || 0, hits = p.trendHits || 0;
+        const pct = window > 0 ? (hits / window) * 100 : 0;
+        if (window < minWindow || pct < minTrendPct) continue;
+        const best = (p.bookmakers || []).reduce((b, x) => ((x.oddsValue || 0) > (b?.oddsValue || 0) ? x : b), null);
+        if (!best || best.oddsValue < minOdds || best.oddsValue > maxOdds) continue;
+        const mercado = p.marketName === 'Player Shots'
+          ? `${p.oddsType === 'over' ? 'Más de' : 'Menos de'} ${p.line} remates totales`
+          : p.marketName === 'Anytime Goalscorer'
+            ? 'Marca en cualquier momento'
+            : `${p.oddsType} ${p.line} ${p.marketName}`;
+        props.push({
+          jugador:      p.playerName,
+          equipo:       p.teamName,
+          rival:        p.opponentTeamName,
+          mercado,
+          statType:     p.statType,
+          linea:        p.line,
+          cuotaReal:    best.oddsValue,
+          bookmaker:    best.bookmakerName,
+          racha:        `${hits}/${window} últimos partidos cumplió esta línea`,
+          promedioStat: p.trendAvg ?? null,
+          contextoRival: p.opponentAverage != null
+            ? `el rival permite ${p.opponentAverage} de este stat/partido (media liga: ${p.leagueAverage})`
+            : null,
+          _shEventId:   p.eventId,
+          _fuente:      'StatsHub (cuota real multi-bookmaker)',
+        });
+      }
+    } catch (e) { console.warn(`getPlayerPropsForGames(${statType}): ${e.message}`); }
+  }
+  // Mejor combinación de racha × cuota primero; dedup por jugador+mercado
+  const seen = new Set();
+  return props
+    .sort((a, b) => (parseFloat(b.racha) * b.cuotaReal) - (parseFloat(a.racha) * a.cuotaReal))
+    .filter(p => { const k = `${p.jugador}|${p.mercado}`; if (seen.has(k)) return false; seen.add(k); return true; })
+    .slice(0, limit);
 }
 
 // ─── Probability & Analytics Engine ──────────────────────────────────────────
@@ -4185,6 +4385,19 @@ PRINCIPIOS DEL ANALISTA DE ÉLITE
 5. NO MENCIONES TECNICISMOS — Nunca escribas EV%, lambda, Poisson, xG como términos. Escribe el resultado de los cálculos, no el método.
 
 6. ESTADÍSTICAS SON PROMEDIOS DE TEMPORADA — NUNCA etiquetes una estadística del JSON como "en este torneo", "en su debut", "en jornada X", "en la Champions", "en el Mundial" u otro contexto específico. Son promedios de TEMPORADA COMPLETA en todas las competiciones. Escribe "promedia X goles/partido" no "anotó X en el primer partido del torneo".
+   ⛔ Tampoco superlativos de torneo: "la mejor defensa DEL TORNEO", "el más goleador DEL MUNDIAL" — los datos son de los últimos 20 partidos en TODAS las competiciones (amistosos y clasificatorias incluidos), no del torneo actual.
+
+7. ANFITRIONES Y SEDES (torneos de selecciones):
+   - Si contextoPartido.anfitriones existe → esa línea es LA VERDAD sobre quiénes son anfitriones. ⛔ PROHIBIDO llamar "sede", "anfitrión", "juega en casa" o atribuir "presión de local/sede" a CUALQUIER otro equipo (ej: "Brasil como sede genera presión" es una alucinación grave).
+   - Si contextoPartido.ventajaLocalReal existe → ese equipo SÍ juega en su país; puedes mencionar el ambiente a favor.
+   - Si cancha_neutral=true → las etiquetas (local)/(visitante) son solo administrativas: escribe "▸ [Equipo]: X goles/p (últimos partidos internacionales)" sin "(local)" ni "(visit)".
+
+8. PROP DE JUGADOR (propsJugador) — SOLO si el campo existe en el pick:
+   - Añade al final del bloque del pick:
+     "💥 PROP: [jugador] — [mercado] | Cuota real: [cuotaReal] ([bookmaker]) | Racha: [racha]"
+   - Si hay contextoRival, añádelo en una frase corta.
+   - Estas cuotas SÍ son reales y verificadas multi-bookmaker — no escribas "est." ni "verifica".
+   - ⛔ PROHIBIDO inventar props que no estén en propsJugador. Si el campo no existe, no hay sección de props.
 
 ═══════════════════════════════════════
 CÓMO USAR CADA CAMPO DE DATOS
@@ -4311,6 +4524,7 @@ REGLAS IRROMPIBLES:
 - La sección 📊 ANÁLISIS siempre muestra AMBOS equipos (▸ Local y ▸ Visitante) — nunca solo uno
 - Si motivacionLocal.estado o motivacionVisitante.estado es "desconocido" → no escribas "Sin datos de posición" — usa posicionLocal/posicionVisitante directamente o infiere del contexto
 - LA CUOTA: si "_syntheticOdds" es false (cuota real) → escribe exactamente el número del campo "odds", sin texto adicional. Si "_syntheticOdds" es true (cuota estimada) → escribe "est. ~X.XX" usando el valor del campo "odds" como referencia. Si odds es null → escribe "n/d". NUNCA inventes un número fuera de estos casos.
+- PROPS DE JUGADOR (propsJugador): si el campo existe, añade una sección "💥 PROP DE JUGADOR" después de los picks con: jugador, mercado, cuotaReal (es REAL, multi-bookmaker — escríbela sin "est."), bookmaker, racha y contextoRival. Máximo 2 props. ⛔ PROHIBIDO inventar props de jugador que no estén en ese campo.
 - NO cambies el stake ni la cuota que viene en los datos
 - CUOTA MÍNIMA 1.65: NUNCA recomiendes un pick donde la cuota sea < 1.65. Si en el JSON llega un pick con odds < 1.65, omítelo completamente y no lo publiques. Una cuota de 1.15 (ej: DNB Real Madrid), 1.20 o 1.40 no tiene valor real — el motor ya los filtra pero si por error llegan, descártalos en silencio.
 - DNB/DC (Draw No Bet, Doble Oportunidad) son mercados legítimos CUANDO la cuota ≥ 1.65. Explica el valor: "el visitante gana a 2.50 pero el DNB a 1.75 nos da cobertura con buen EV". NUNCA digas que un DNB es "seguro" o "cómodo" — explica por qué el equipo tiene capacidad de ganar Y por qué la cuota tiene valor.
@@ -4680,7 +4894,8 @@ async function snapshotClosingOdds() {
     const ids = [...new Set(targets.map(p => p.fixtureId))].slice(0, 10);
     const oddsMap = {};
     for (const id of ids) {
-      oddsMap[id] = await getRealOdds(id).catch(() => null);
+      const pk = targets.find(p => p.fixtureId === id);
+      oddsMap[id] = await getRealOdds(id, pk ? { date: pk.fechaPartido, homeTeam: pk.local, awayTeam: pk.visitante } : null).catch(() => null);
       await new Promise(r => setTimeout(r, 300));
     }
     let updated = 0;
@@ -4734,7 +4949,8 @@ const EXTRACT_PICKS_SYSTEM = `Eres un extractor de picks de apuestas deportivas.
 Para cada pick devuelve un objeto JSON con estos campos:
 - local: nombre del equipo local (string)
 - visitante: nombre del equipo visitante (string)
-- mercado: tipo de mercado. Usa UNO de: BTTS_YES, BTTS_NO, OVER_GOALS, UNDER_GOALS, OVER_CORNERS, UNDER_CORNERS, OVER_CARDS, UNDER_CARDS, HOME_WIN, AWAY_WIN, DRAW, AH_HOME, AH_AWAY, HT_OVER, HT_RESULT, DNB_HOME, DNB_AWAY, OTHER
+- mercado: tipo de mercado. Usa UNO de: BTTS_YES, BTTS_NO, OVER_GOALS, UNDER_GOALS, OVER_CORNERS, UNDER_CORNERS, OVER_CARDS, UNDER_CARDS, HOME_WIN, AWAY_WIN, DRAW, AH_HOME, AH_AWAY, HT_OVER, HT_RESULT, DNB_HOME, DNB_AWAY, PLAYER_PROP, OTHER
+  (PLAYER_PROP = mercados de jugador individual: remates, goleador, asistencias)
 - seleccion: descripción exacta del pick tal como aparece en el texto (ej: "Over 2.5 goles FT", "BTTS Yes", "Atlético Madrid -1 AH")
 - linea: número de la línea si aplica (ej: 2.5 para Over 2.5, 7.5 para corners Over 7.5, null si no aplica)
 - handicap: valor del handicap si es AH (ej: -1, +0.5, null si no es AH)
@@ -5125,6 +5341,7 @@ async function evaluatePendingPicks() {
   const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 7);
   const pending = picks.filter(p => {
     if (!p.fixtureId) return false;
+    if (p.mercado === 'PLAYER_PROP') return false; // stats de jugador no evaluables con marcador
     if (!p.resultado || p.resultado === '?') return true;
     if (['W', 'L', 'V'].includes(p.resultado) && p.emitidoAt && new Date(p.emitidoAt) >= cutoff) return true;
     return false;
@@ -5360,9 +5577,23 @@ async function sendLong(chatId, text, options = {}) {
   if (chunk) await sendChunk(chunk);
 }
 
-function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTeams }) {
+function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTeams, leagueId }) {
   const ctx = {};
   if (round) ctx.jornada = round;
+
+  // ── Torneos de selecciones: sede neutral salvo que el "local" sea anfitrión ──
+  const NATIONAL_NEUTRAL = new Set([1635, 8443, 4188, 5039, 14400]);
+  const lid = leagueId ?? fixture?.leagueId;
+  if (NATIONAL_NEUTRAL.has(lid)) {
+    const homeName = String(fixture?.homeTeam || fixture?.local || '').trim();
+    const HOSTS_2026 = /^(usa|united states|estados unidos|mexico|méxico|canada|canadá)$/i;
+    const homeIsHost = lid === 1635 && HOSTS_2026.test(homeName);
+    ctx.cancha_neutral = !homeIsHost;
+    if (lid === 1635) {
+      ctx.anfitriones = 'Mundial 2026: los ÚNICOS anfitriones son Estados Unidos, Canadá y México. Ningún otro equipo es "sede" ni tiene "presión de local".';
+      if (homeIsHost) ctx.ventajaLocalReal = `${homeName} juega en su propio país — ventaja de local REAL`;
+    }
+  }
   const n = totalTeams || 20;
   const hRank = homeStanding?.rank;
   const aRank = awayStanding?.rank;
@@ -5522,17 +5753,22 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     const blend = 0.50; // peso de la forma reciente (vs. media de temporada)
     let hForAdj = hFor * (1 - blend + blend * hFormFact);   // ataque local según forma
     let aForAdj = aFor * (1 - blend + blend * aFormFact);   // ataque visitante según forma
-    const hAgtAdj = hAgt * (1 - blend + blend * aFormFact);   // defensa local = cuánto hace el ataque visitante
-    const aAgtAdj = aAgt * (1 - blend + blend * hFormFact);   // defensa visit = cuánto hace el ataque local
+    let hAgtAdj = hAgt * (1 - blend + blend * aFormFact);   // defensa local = cuánto hace el ataque visitante
+    let aAgtAdj = aAgt * (1 - blend + blend * hFormFact);   // defensa visit = cuánto hace el ataque local
 
-    // ── Elo de selecciones: corrige lambdas por calidad real del rival ──
+    // ── Elo de selecciones: lambdas 50% stats + 50% derivados del Elo ──
+    // El multiplicador suave (±6%/100pts) no alcanza a corregir baselines rotos
+    // (Noruega 3.15 goles/p contra San Marino vs Brasil 2.00 en CONMEBOL).
     let _elo = null;
     if (NATIONAL_LEAGUES_HOY.has(f.leagueId)) {
       _elo = eloAdjust(eloMap, f.homeTeam, f.awayTeam);
       if (_elo) {
-        hForAdj *= _elo.hMult;
-        aForAdj *= _elo.aMult;
-        console.log(`🏅 Elo ${f.homeTeam}(${_elo.eloHome}) vs ${f.awayTeam}(${_elo.eloAway}) diff=${_elo.diff} → λ×${_elo.hMult.toFixed(3)}/${_elo.aMult.toFixed(3)}`);
+        const eloLam = eloExpectedLambdas(_elo.diff);
+        hForAdj = 0.5 * hForAdj + 0.5 * eloLam.h;
+        aForAdj = 0.5 * aForAdj + 0.5 * eloLam.a;
+        hAgtAdj = 0.5 * hAgtAdj + 0.5 * eloLam.a;  // defensa local absorbe el ataque Elo del rival
+        aAgtAdj = 0.5 * aAgtAdj + 0.5 * eloLam.h;
+        console.log(`🏅 Elo ${f.homeTeam}(${_elo.eloHome}) vs ${f.awayTeam}(${_elo.eloAway}) We=${eloLam.we} → λ blend ${hForAdj.toFixed(2)}/${aForAdj.toFixed(2)}`);
       }
     }
     const extProbs = calcExtendedProbs(hForAdj, hAgtAdj, aForAdj, aAgtAdj, f.leagueName || '');
@@ -5904,6 +6140,28 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     }
   }
 
+  // ── Props de jugador con cuota real (StatsHub) para los fixtures elegidos ──
+  if (topPicks.length > 0) {
+    try {
+      const shGames = await getStatsHubGames(today);
+      const idByFixture = new Map();
+      for (const pick of topPicks) {
+        const shId = shGameIdFor(shGames, pick.local, pick.visitante);
+        if (shId) idByFixture.set(pick.fixtureId, shId);
+      }
+      if (idByFixture.size > 0) {
+        const allProps = await getPlayerPropsForGames([...new Set(idByFixture.values())]);
+        for (const pick of topPicks) {
+          const shId = idByFixture.get(pick.fixtureId);
+          if (!shId) continue;
+          const own = allProps.filter(p => p._shEventId === shId).slice(0, 2);
+          if (own.length) pick.propsJugador = own;
+        }
+        console.log(`🎯 Props de jugador: ${allProps.length} encontrados para ${idByFixture.size} fixtures`);
+      }
+    } catch (e) { console.warn('props jugador:', e.message); }
+  }
+
   const topPicksFinal = topPicks; // ZCode solo ajusta stakes, nunca filtra
 
   let picksText;
@@ -6060,7 +6318,9 @@ async function handleSistemaHoy(chatId) {
 
   // 5. Cuotas reales para calcular EV real
   await bot.sendMessage(chatId, '📈 Consultando cuotas pre-partido...');
-  const oddsResults = await Promise.allSettled(candidates.map(f => getRealOdds(f.fixtureId)));
+  const oddsResults = await Promise.allSettled(candidates.map((f, i) =>
+    getRealOdds(f.fixtureId, i < 8 ? { date: f.date, homeTeam: f.homeTeam, awayTeam: f.awayTeam } : null)
+  ));
   for (let i = 0; i < enriched.length; i++) {
     const odds = oddsResults[i].status === 'fulfilled' ? oddsResults[i].value : null;
     if (odds) enriched[i].cuotasReales = odds;
@@ -6542,8 +6802,23 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   }
 
   // ── Pre-partido → motor JS selecciona picks de valor, luego análisis profundo ─
-  const realOdds = await getRealOdds(nextRaw.fixture.id).catch(() => null);
+  const realOdds = await getRealOdds(nextRaw.fixture.id, {
+    date: nextRaw.fixture.date, homeTeam, awayTeam,
+  }).catch(() => null);
   if (realOdds) analysisData.cuotasReales = realOdds;
+
+  // Props de jugador con cuota real multi-bookmaker (StatsHub)
+  try {
+    const shGames = await getStatsHubGames(fixtureDate);
+    const shId = shGameIdFor(shGames, homeTeam, awayTeam);
+    if (shId) {
+      const props = await getPlayerPropsForGames([shId], { limit: 3 });
+      if (props.length) {
+        analysisData.propsJugador = props;
+        console.log(`🎯 Props: ${props.map(p => `${p.jugador} ${p.mercado} @${p.cuotaReal}`).join(' | ')}`);
+      }
+    }
+  } catch (e) { console.warn('propsJugador:', e.message); }
 
   // Usar la mejor fuente disponible para el motor de probabilidades
   const _bestHomeStats = homeDomStats || homeBaseForNat || homeStatsData;
@@ -6553,16 +6828,18 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   let aFor = parseFloat(_bestAwayStats?.golesAnotadosAway) || 1.0;
   const aAgt = parseFloat(_bestAwayStats?.golesRecibidosAway) || 1.3;
 
-  // Elo de selecciones: corrige lambdas por calidad real del rival
+  // Elo de selecciones: lambdas 50% stats + 50% derivados del Elo
   let _eloPartido = null;
   if (isNationalTeamMatch) {
     _eloPartido = eloAdjust(await getEloMap(), homeTeam, awayTeam);
     if (_eloPartido) {
-      hFor *= _eloPartido.hMult;
-      aFor *= _eloPartido.aMult;
+      const eloLam = eloExpectedLambdas(_eloPartido.diff);
+      hFor = 0.5 * hFor + 0.5 * eloLam.h;
+      aFor = 0.5 * aFor + 0.5 * eloLam.a;
       analysisData.eloRatings = {
         [homeTeam]: _eloPartido.eloHome,
         [awayTeam]: _eloPartido.eloAway,
+        expectativaVictoria: `${(eloLam.we * 100).toFixed(0)}% ${homeTeam}`,
         nota: 'World Football Elo Ratings — pondera calidad real del rival',
       };
     }
