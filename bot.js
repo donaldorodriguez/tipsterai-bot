@@ -1275,25 +1275,35 @@ async function getTeamLastFixtures(teamId, last = 15, venue = null) {
 }
 
 async function getLeagueStandings(leagueId) {
-  const season = LEAGUE_SEASONS[leagueId] || 2025;
-  try {
-    const { data } = await API.get('/standings', { params: { leagueId, season } });
-    const groups = data.groups || [];
-    const group = groups[0]?.standings || [];
-    return {
-      teams: group.map(s => ({
-        teamId:   s.team.id,
-        teamName: s.team.name,
-        rank:     s.position,
-        points:   s.points ?? null,
-        goalDiff: null,
-        played:   s.played ?? 0,
-        description: null,
-        form:     null,
-      })),
-      total: group.length,
-    };
-  } catch { return { teams: [], total: 0 }; }
+  const mapped = LEAGUE_SEASONS[leagueId];
+  // Ligas sin mapear: probar el año actual (ligas calendario: Kazajistán, Brasil,
+  // Noruega...) y caer al año anterior si esa temporada aún no tiene tabla jugada
+  // (ligas ago-may consultadas en verano). Antes el default fijo 2025 devolvía
+  // tablas de temporadas terminadas para las ligas calendario.
+  const year = new Date().getFullYear();
+  const seasonsToTry = mapped != null ? [mapped] : [year, year - 1];
+  for (const season of seasonsToTry) {
+    try {
+      const { data } = await API.get('/standings', { params: { leagueId, season } });
+      const group = (data.groups || [])[0]?.standings || [];
+      // El payload trae partidos jugados en total.games (no existe "played" plano)
+      if (!group.length || group.every(s => !((s.total?.games ?? s.played) > 0))) continue; // temporada sin arrancar
+      return {
+        teams: group.map(s => ({
+          teamId:   s.team.id,
+          teamName: s.team.name,
+          rank:     s.position,
+          points:   s.points ?? null,
+          goalDiff: null,
+          played:   s.total?.games ?? s.played ?? 0,
+          description: null,
+          form:     null,
+        })),
+        total: group.length,
+      };
+    } catch {}
+  }
+  return { teams: [], total: 0 };
 }
 function getTeamMotivation(standing, totalTeams) {
   if (!standing) return { estado: 'desconocido', texto: 'Sin datos de posición' };
@@ -2026,9 +2036,25 @@ async function getTeamStats(teamId, leagueId) {
     const { data } = await API.get('/teams/statistics/' + teamId, { params: { fromDate } });
     if (!data || data.length === 0) return null;
 
-    const leagueStat = data.find(s => s.leagueId === leagueId)
-      || data.sort((a, b) => (b.total?.games?.played || 0) - (a.total?.games?.played || 0))[0];
+    // Preferir la liga solicitada SOLO si tiene muestra útil (≥5 partidos).
+    // En fases previas de copas (UCL/UEL/UECL) la entrada del torneo existe con
+    // 1-2 partidos vacíos y tapaba la liga doméstica — el análisis salía "s/d"
+    // teniendo al equipo con 15+ partidos jugados en su campeonato local.
+    const _exact = data.find(s => s.leagueId === leagueId);
+    let leagueStat = (_exact && (_exact.total?.games?.played || 0) >= 5) ? _exact : null;
+    if (!leagueStat) {
+      // Mejor muestra disponible: la TEMPORADA MÁS RECIENTE con ≥5 partidos
+      // (normalmente la liga doméstica en curso); si ninguna llega a 5, la de
+      // más partidos a secas. Los amistosos solo se usan como último recurso —
+      // 9 amistosos de pretemporada no representan el nivel competitivo.
+      const _bySeason = (a, b) => (b.season || 0) - (a.season || 0) || (b.total?.games?.played || 0) - (a.total?.games?.played || 0);
+      const _conMuestra = data.filter(s => (s.total?.games?.played || 0) >= 5);
+      leagueStat = _conMuestra.filter(s => !/friendl|amistos/i.test(s.leagueName || '')).sort(_bySeason)[0]
+        || _conMuestra.sort(_bySeason)[0]
+        || [...data].sort((a, b) => (b.total?.games?.played || 0) - (a.total?.games?.played || 0))[0];
+    }
     if (!leagueStat) return null;
+    const _ligaFallback = leagueStat !== _exact; // stats vienen de otra liga (normalmente la doméstica)
 
     if (!_teamStatsLogged) {
       _teamStatsLogged = true;
@@ -2065,6 +2091,8 @@ async function getTeamStats(teamId, leagueId) {
 
     return {
       liga:      leagueStat.leagueName,
+      _leagueId: leagueStat.leagueId,   // liga real de la que salen las stats (para standings domésticos)
+      _ligaFallback,                    // true = la liga solicitada no tenía muestra; stats de la doméstica
       temporada: leagueStat.season,
       partidos:  { home: hP, away: aP, total: tP },
 
@@ -3292,6 +3320,13 @@ function buildPickCandidates(enrichedFixtures) {
     const _evRank       = _extra?.evTool?.rank  ?? null;      // posición en EV Tool (menor = mejor)
 
     for (const m of markets) {
+      // ⛔ Tarjetas en torneos de SELECCIONES: medido en el WC 2026 con 36-40% de
+      // acierto vs 47-56% implícita (ROI -34%/-39% en 19 picks) — FIFA instruye
+      // contención arbitral y los promedios de clasificatorias no proyectan al
+      // torneo. Veto duro SOLO aquí: en ligas de clubes el mercado sigue activo
+      // y lo vigila la autocalibración (auto-off con ROI < -15% en 20+ picks).
+      if (_isIntlCards && ['cards', 'team_cards'].includes(m.cat)) continue;
+
       // ── Inyectar prob real de tarjetas (antes del check de odds) ─────────────
       if (m._cardsBlock) {
         m.prob = m.key === 'cardsOver25'     ? pCardsOver25
@@ -4518,6 +4553,10 @@ Cuando el partido es de copa con pocos juegos en esa competición, el razonamien
 3. H2H histórico entre ambos equipos (sin importar la competición)
 4. Para Copa del Mundo o torneos sin historial reciente: usa ranking FIFA, nivel de la liga doméstica, y contexto del grupo
 Los datos de la copa actual son complementarios. Si hay menos de 5 partidos en esa copa pero sí hay datos de liga doméstica → analiza y publica si el pick cumple stake 7+. Solo descarta si no existe ninguna fuente de datos confiable.
+Si el partido incluye "faseCopa": es una RONDA PREVIA/CLASIFICATORIA europea. Reglas duras:
+- posicionLocal/posicionVisitante son la posición en la LIGA DOMÉSTICA de cada club (usa posicionLocalNota/posicionVisitanteNota como texto) — PROHIBIDO citarlas como posición en Champions/Europa/Conference y PROHIBIDO mencionar tablas o puntos del torneo europeo (serían de la edición anterior).
+- statsLocal/statsVisitante con "_ligaFallback" o cuyo campo "liga" NO sea el torneo europeo son de la liga doméstica del club: cítalas como "en su liga" — es la base estadística correcta, NO digas "sin datos" si existen.
+- El nivel relativo se infiere de: posición doméstica de cada club, nivel de sus ligas de origen y el H2H. Un 2° de la liga kazaja vs un club montenegrino de media tabla NO son "dos equipos igualmente débiles".
 
 ━━━━━━━━━━━━━━━━━━━
 🎰 *COMBINADA DEL DÍA*
@@ -5256,6 +5295,7 @@ async function applyStakeGate(picksText, enriched, matchesCtx) {
     let correctedText = picksText;
     let highStakeCount = 0;
     let cornerPickCount = 0;
+    const finalStakes = new Map(); // pick → stake tras validación (para el gate duro)
 
     for (const p of extracted.filter(x => !x.esCombinada)) {
       const f = enriched.find(e =>
@@ -5284,6 +5324,7 @@ async function applyStakeGate(picksText, enriched, matchesCtx) {
         }
       }
 
+      finalStakes.set(p, stakeValidado);
       if (stakeValidado !== p.stake) {
         console.log(`⚠️ Pre-publish gate: ${p.local} vs ${p.visitante} (${p.mercado}): ${p.stake}→${stakeValidado}`);
         // El texto puede tener formato Telegram: "Stake: *10/10*" o "Stake: 10/10"
@@ -5294,18 +5335,22 @@ async function applyStakeGate(picksText, enriched, matchesCtx) {
       }
     }
 
-    // ── GATE DURO DE CUOTA MÍNIMA: elimina picks < 1.65 aunque el LLM los publique ──
+    // ── GATE DURO: elimina picks con cuota < 1.65 O stake ≤ 5 aunque el LLM los publique ──
     // Las reglas de prompt no bastan (el LLM las viola bajo instrucciones en
-    // conflicto). Si detectamos un pick individual con cuota < 1.65, se pide
-    // una reescritura quirúrgica que lo elimina del texto.
-    const invalid = extracted.filter(x =>
-      !x.esCombinada && x.cuota != null && x.cuota > 1 && x.cuota < PUBLISH_MIN_ODDS
-    );
+    // conflicto). Antes solo se eliminaba por cuota: un pick "Stake: 5/10"
+    // (prohibido publicar) pasaba intacto si su cuota superaba el piso.
+    const invalid = extracted.filter(x => {
+      if (x.esCombinada) return false;
+      const cuotaBaja = x.cuota != null && x.cuota > 1 && x.cuota < PUBLISH_MIN_ODDS;
+      const st = finalStakes.get(x) ?? x.stake;
+      const stakeBajo = st != null && st <= 5;
+      return cuotaBaja || stakeBajo;
+    });
     if (invalid.length) {
-      console.log(`🚫 Gate cuota mínima: ${invalid.length} pick(s) < ${PUBLISH_MIN_ODDS} detectado(s): ${invalid.map(p => `${p.seleccion}@${p.cuota}`).join(', ')}`);
+      console.log(`🚫 Gate duro: ${invalid.length} pick(s) inválido(s) (cuota<${PUBLISH_MIN_ODDS} o stake≤5): ${invalid.map(p => `${p.seleccion}@${p.cuota} stake ${finalStakes.get(p) ?? p.stake}`).join(', ')}`);
       const rewritten = await haiku(
-        `Eres un editor de texto quirúrgico. Recibes un análisis de picks deportivos y una lista de picks INVÁLIDOS a eliminar. Devuelve el MISMO texto, palabra por palabra, con la única diferencia de que los bloques completos de los picks inválidos (desde su encabezado "🎯 PICK..." hasta su última línea "└ ⚠️ Riesgo...") desaparecen. No renumeres, no resumas, no añadas notas ni explicaciones. Si todos los picks son inválidos, devuelve solo la parte de contexto/análisis con la línea "⛔ Sin picks de valor con cuota ≥ 1.65 en este partido."`,
-        `PICKS INVÁLIDOS A ELIMINAR (cuota < ${PUBLISH_MIN_ODDS}):\n${invalid.map(p => `- ${p.seleccion} (cuota ${p.cuota}) del partido ${p.local} vs ${p.visitante}`).join('\n')}\n\nTEXTO:\n${correctedText}`
+        `Eres un editor de texto quirúrgico. Recibes un análisis de picks deportivos y una lista de picks INVÁLIDOS a eliminar. Devuelve el MISMO texto, palabra por palabra, con la única diferencia de que los bloques completos de los picks inválidos (desde su encabezado "🎯 PICK..." hasta su última línea "└ ⚠️ Riesgo...") desaparecen. No renumeres, no resumas, no añadas notas ni explicaciones. Si todos los picks son inválidos, devuelve solo la parte de contexto/análisis con la línea "⛔ Sin picks de valor en este partido."`,
+        `PICKS INVÁLIDOS A ELIMINAR (cuota < ${PUBLISH_MIN_ODDS} o stake ≤ 5):\n${invalid.map(p => `- ${p.seleccion} (cuota ${p.cuota}, stake ${finalStakes.get(p) ?? p.stake}) del partido ${p.local} vs ${p.visitante}`).join('\n')}\n\nTEXTO:\n${correctedText}`
       ).catch(() => null);
       if (rewritten && rewritten.length > correctedText.length * 0.3) {
         correctedText = rewritten;
@@ -6050,6 +6095,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     return {
       fixtureId:      f.fixtureId,
       _cornersOpts:   cornersOpts, // reutilizado al re-blendear con xG de la API
+      _domLeagueIds:  { h: hStats?._leagueId || null, a: aStats?._leagueId || null }, // liga real de las stats (doméstica si hubo fallback)
       homeId:         f.homeId,    // ← necesario para matching de lesionados
       awayId:         f.awayId,    // ← necesario para matching de lesionados
       leagueId:       f.leagueId,  // ← necesario para tier multiplier en buildPickCandidates
@@ -6070,7 +6116,20 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   // ── FASE 3: H2H, standings, predicciones y contexto ─────────────────────────
   await bot.sendMessage(chatId, `🔢 Consultando H2H, tabla de posiciones y contexto histórico...`);
-  const uniqueLeagueIds = [...new Set(selected.map(f => f.leagueId))];
+
+  // Fases previas de copas europeas: la tabla del torneo es la de la EDICIÓN
+  // ANTERIOR (ej. Kairat "#36 con 1 punto" = fase liga UCL 2025-26 terminada).
+  // Para esos partidos la posición útil es la de la liga doméstica de cada club.
+  const EURO_CUP_IDS = new Set([2486, 3337, 722432]); // UCL, UEL, UECL
+  const esFasePreviaCopa = (f) => EURO_CUP_IDS.has(f.leagueId) &&
+    (!f.round || /qualif|prelim|play.?off|ronda previa|clasificat/i.test(String(f.round)));
+
+  const uniqueLeagueIds = [...new Set([
+    ...selected.map(f => f.leagueId),
+    ...selected.flatMap((f, i) => esFasePreviaCopa(f)
+      ? [enriched[i]._domLeagueIds?.h, enriched[i]._domLeagueIds?.a].filter(id => id && id !== f.leagueId)
+      : []),
+  ])];
 
   // Standings en lotes de 5 para evitar rate limit (20+ llamadas simultáneas causan 429)
   async function fetchStandingsThrottled(leagueIds) {
@@ -6116,14 +6175,28 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     enriched[i].estadio = f.venue  || null;
     enriched[i].ciudad  = f.city   || null;
 
-    const standings    = standingsMap[f.leagueId] || [];
-    const totalEquipos = standingsTotalMap[f.leagueId] || 20;
-    const standingLocal = standings.find(s => s.teamId === f.homeId);
-    const standingVisit = standings.find(s => s.teamId === f.awayId);
+    let standingLocal, standingVisit, totalEquiposLocal, totalEquiposVisit;
+    if (esFasePreviaCopa(f)) {
+      // Posición en la liga DOMÉSTICA de cada club (la tabla de la copa es vieja)
+      const domHId = enriched[i]._domLeagueIds?.h, domAId = enriched[i]._domLeagueIds?.a;
+      standingLocal = domHId ? (standingsMap[domHId] || []).find(s => s.teamId === f.homeId) : null;
+      standingVisit = domAId ? (standingsMap[domAId] || []).find(s => s.teamId === f.awayId) : null;
+      totalEquiposLocal = standingsTotalMap[domHId] || 20;
+      totalEquiposVisit = standingsTotalMap[domAId] || 20;
+      enriched[i].faseCopa = 'Ronda previa/clasificatoria europea — la tabla del torneo NO aplica (correspondería a la edición anterior). posicionLocal/posicionVisitante = posición actual en la LIGA DOMÉSTICA de cada club.';
+      if (standingLocal) enriched[i].posicionLocalNota    = `#${standingLocal.rank} de ${totalEquiposLocal} en su liga doméstica`;
+      if (standingVisit) enriched[i].posicionVisitanteNota = `#${standingVisit.rank} de ${totalEquiposVisit} en su liga doméstica`;
+    } else {
+      const standings    = standingsMap[f.leagueId] || [];
+      standingLocal = standings.find(s => s.teamId === f.homeId);
+      standingVisit = standings.find(s => s.teamId === f.awayId);
+      totalEquiposLocal = totalEquiposVisit = standingsTotalMap[f.leagueId] || 20;
+    }
+    const totalEquipos = totalEquiposLocal; // compat con buildMatchContext (usa un solo total)
     if (standingLocal) enriched[i].posicionLocal    = standingLocal.rank;
     if (standingVisit) enriched[i].posicionVisitante = standingVisit.rank;
-    enriched[i].motivacionLocal     = getTeamMotivation(standingLocal, totalEquipos);
-    enriched[i].motivacionVisitante = getTeamMotivation(standingVisit, totalEquipos);
+    enriched[i].motivacionLocal     = getTeamMotivation(standingLocal, totalEquiposLocal);
+    enriched[i].motivacionVisitante = getTeamMotivation(standingVisit, totalEquiposVisit);
     enriched[i].arbitro = f.referee || null;
 
     // ── Predicción + venue/árbitro desde /matches/{id} ────────────────────────
@@ -6875,8 +6948,17 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const refereeStats = referee ? await getRefereeCardStats(referee).catch(() => null) : null;
 
   // Standings: extraer posición y motivación de cada equipo
-  const homeStanding = standingsData.teams.find(t => t.teamId === homeId) || null;
-  const awayStanding = standingsData.teams.find(t => t.teamId === awayId) || null;
+  let homeStanding = standingsData.teams.find(t => t.teamId === homeId) || null;
+  let awayStanding = standingsData.teams.find(t => t.teamId === awayId) || null;
+  // Fase previa de copa europea: la tabla del torneo es de la EDICIÓN ANTERIOR
+  // (ej. Kairat "#36 con 1 punto" = fase liga UCL 2025-26 ya terminada) —
+  // citarla desinforma. Se anula; el análisis usa statsLigaDomestica.
+  // round viene undefined en fases previas (verificado 8-jul con Kairat vs
+  // Sutjeska) — round ausente en copa europea se trata como fase previa.
+  const _roundEuro = String(nextRaw.league?.round || '');
+  const _esFasePreviaEuro = isEuropean &&
+    (!_roundEuro || /qualif|prelim|play.?off|ronda previa|clasificat/i.test(_roundEuro));
+  if (_esFasePreviaEuro) { homeStanding = null; awayStanding = null; }
   const totalTeams   = standingsData.total || standingsData.teams.length || 20;
   const motivLocal   = getTeamMotivation(homeStanding, totalTeams);
   const motivVisit   = getTeamMotivation(awayStanding, totalTeams);
@@ -7025,6 +7107,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       posicionVisitante:  awayStanding ? `${awayStanding.rank}º — ${awayStanding.points} pts` : 'sin datos de clasificación',
       jornadasRestantes:  motivLocal.jornadas_restantes ?? null,
       ...(isSingleLegFinal && { esPartidoUnico: 'FINAL DE COPA — partido único, no hay vuelta. Presión máxima para ambos.' }),
+      ...(_esFasePreviaEuro && { faseCopa: 'Ronda previa/clasificatoria europea — PROHIBIDO citar tabla o puntos del torneo europeo (serían de la edición anterior). El nivel de cada club se evalúa con statsLigaDomestica y el nivel de sus ligas de origen.' }),
     },
     ...(predData && { prediccionAPIFootball: predData }),
     h2h:            h2hData,
