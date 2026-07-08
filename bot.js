@@ -1039,7 +1039,47 @@ const TEAM_SEARCH_ALTERNATES = {
   'Netherlands':   ['Holland'],
 };
 
+// Resuelve un equipo contra los fixtures cacheados (en vivo + hoy/mañana/pasado).
+// La búsqueda /teams de Highlightly es sensible a tildes ("Operario" → 0 resultados,
+// "Operário" → ok) y devuelve homónimos sin país ("Athletic Club" Bilbao vs
+// Athletic-MG de Brasil). El equipo por el que pregunta el usuario casi siempre
+// juega pronto — su nombre real (con tildes) y su ID correcto están en el caché.
+async function findTeamInFixtureCache(query) {
+  const q = normalizeTeamName(translateTeamName(query));
+  if (!q) return null;
+  const pools = [liveCache.raw || []];
+  for (let d = -1; d <= 2; d++) { // ayer incluido: "¿cómo quedó X?" de partidos recién jugados
+    const ds = new Date(Date.now() + d * 86400000)
+      .toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    // fetchFixturesByDate cachea internamente — solo cuesta 1 llamada la primera vez
+    const fixtures = await fetchFixturesByDate(ds).catch(() => []);
+    pools.push(fixtures || []);
+  }
+  let best = null, bestScore = 0;
+  for (const pool of pools) {
+    for (const m of pool) {
+      for (const t of [m.homeTeam, m.awayTeam]) {
+        if (!t?.name || !t?.id) continue;
+        const tn = normalizeTeamName(t.name);
+        let s = 0;
+        if (tn === q) s = 100;
+        else if (tn.startsWith(q + ' ') || tn.endsWith(' ' + q)) s = 80;
+        else if (q.length >= 5 && tn.includes(q)) s = 60;
+        if (s > bestScore) { bestScore = s; best = { id: t.id, name: t.name }; }
+      }
+    }
+  }
+  return bestScore >= 60 ? best : null;
+}
+
 async function searchTeam(name, countryHint = '') {
+  // 0. El caché de fixtures resuelve tildes y desambigua homónimos por contexto
+  const cached = await findTeamInFixtureCache(name).catch(() => null);
+  if (cached) {
+    console.log(`🔎 searchTeam("${name}") resuelto vía caché de fixtures → ${cached.name} (${cached.id})`);
+    return { team: cached };
+  }
+
   const apiName = translateTeamName(name);
   let results = [];
   const namesToTry = [apiName, ...(TEAM_SEARCH_ALTERNATES[apiName] || [])];
@@ -1556,6 +1596,15 @@ async function getRealOddsAPIF(dateIso, homeName, awayName) {
     r.ah_away_m15 = val(['Asian Handicap'], /^Away -1\.5$/i);
     r.homeToScore = val(['Home Team Score a Goal'], /^Yes$/i);
     r.awayToScore = val(['Away Team Score a Goal'], /^Yes$/i);
+    // Corners por equipo (bet ids 57/58) — mismas keys que el parser Highlightly
+    // para que buildPickCandidates encuentre cuota real en vez de emitir "est. ~X"
+    r.homeCorners_over35 = val(['Home Corners Over/Under'], /^Over 3\.5$/i);
+    r.homeCorners_over45 = val(['Home Corners Over/Under'], /^Over 4\.5$/i);
+    r.awayCorners_over25 = val(['Away Corners Over/Under'], /^Over 2\.5$/i);
+    r.awayCorners_over35 = val(['Away Corners Over/Under'], /^Over 3\.5$/i);
+    // Tarjetas por equipo (bet ids 82/83, fallback amarillas 150/151)
+    r.homeCardsOver15 = val(['Home Team Total Cards', 'Home Team Yellow Cards'], /^Over 1\.5$/i);
+    r.awayCardsOver15 = val(['Away Team Total Cards', 'Away Team Yellow Cards'], /^Over 1\.5$/i);
     Object.keys(r).forEach(k => { if (r[k] == null || !(r[k] > 1)) delete r[k]; });
     if (!Object.keys(r).length) return null;
     console.log(`💱 APIF odds ${homeName} vs ${awayName}: ${Object.keys(r).length} mercados reales`);
@@ -2066,7 +2115,10 @@ async function getNationalTeamRecentStats(teamId, last = 20) {
     let bttsCount = 0, cleanSheets = 0, failedToScore = 0;
     let formStr = '';
 
-    for (const f of fixtures) {
+    // getTeamLastFixtures devuelve newest-first; iterar en orden cronológico
+    // para que formStr termine en el partido más reciente y slice(-5) capture
+    // la forma actual (antes mostraba los 5 partidos más VIEJOS de la ventana).
+    for (const f of [...fixtures].reverse()) {
       const isHome = f.homeId === teamId;
       const gF  = isHome ? f.goalsHome : f.goalsAway;
       const gC  = isHome ? f.goalsAway : f.goalsHome;
@@ -2470,7 +2522,7 @@ function calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst) {
  * Extiende calcPoissonProbs con probabilidades de 1er tiempo y corners.
  * Necesario para pick selection multi-mercado sin depender del LLM.
  */
-function calcExtendedProbs(homeFor, homeAgainst, awayFor, awayAgainst, liga = '') {
+function calcExtendedProbs(homeFor, homeAgainst, awayFor, awayAgainst, liga = '', cornersOpts = {}) {
   const base = calcPoissonProbs(homeFor, homeAgainst, awayFor, awayAgainst);
 
   // ── HT: escalar lambdas al primer tiempo (≈45% de los goles FT)
@@ -2491,17 +2543,32 @@ function calcExtendedProbs(homeFor, homeAgainst, awayFor, awayAgainst, liga = ''
     }
   }
 
-  // ── Corners: estimación basada en xG total
+  // ── Corners: datos reales del equipo si existen; si no, estimación desde xG
   // Internacionales (Mundial, Euros, Copa América, Nations League) promedian ~2 corners menos
   const _isIntl = /world cup|copa del mundo|mundial|copa am[eé]rica|nations league|euro\b|eurocopa|concacaf gold cup|gold cup|copa oro/i.test(liga);
   const _cornersBase = _isIntl ? 7.5 : 8.0;
   const _cornersMult = _isIntl ? 2.0 : 3.0;
-  const xGTotal       = base.homeLambda + base.awayLambda;
-  const cornersLambda = Math.max(5, Math.min(14, _cornersBase + (xGTotal - 2.0) * _cornersMult));
+  const xGTotal        = base.homeLambda + base.awayLambda;
+  const _xgCornersLam  = Math.max(5, Math.min(14, _cornersBase + (xGTotal - 2.0) * _cornersMult));
 
-  // Corners por equipo: local típicamente saca ~55% de los corners
-  const homeCornersLambda = cornersLambda * 0.55;
-  const awayCornersLambda = cornersLambda * 0.45;
+  // cornersOpts: { homeCornersPG, awayCornersPG, neutral } — promedios reales por
+  // partido del equipo (getTeamStats / getNationalTeamRecentStats) y bandera de
+  // sede neutral. Con datos reales de ambos: blend 60% real / 40% estimado xG
+  // (5-20 partidos de muestra son ruidosos, pero anclan mejor que el xG solo).
+  const _hPG = Number.isFinite(cornersOpts.homeCornersPG) ? cornersOpts.homeCornersPG : null;
+  const _aPG = Number.isFinite(cornersOpts.awayCornersPG) ? cornersOpts.awayCornersPG : null;
+  const _hasRealCorners = _hPG != null && _aPG != null && (_hPG + _aPG) > 0;
+  const cornersLambda = _hasRealCorners
+    ? Math.max(4, Math.min(15, 0.6 * (_hPG + _aPG) + 0.4 * _xgCornersLam))
+    : _xgCornersLam;
+
+  // Reparto por equipo: proporción real si hay datos; si no, 55/45 por localía
+  // (50/50 en cancha neutral — nadie tiene ventaja de local).
+  const _homeShare = _hasRealCorners
+    ? Math.max(0.35, Math.min(0.65, _hPG / (_hPG + _aPG)))
+    : (cornersOpts.neutral ? 0.50 : 0.55);
+  const homeCornersLambda = cornersLambda * _homeShare;
+  const awayCornersLambda = cornersLambda * (1 - _homeShare);
 
   return {
     ...base,
@@ -2511,6 +2578,8 @@ function calcExtendedProbs(homeFor, homeAgainst, awayFor, awayAgainst, liga = ''
     htOver05:       +(htOver05  * 100).toFixed(1),
     htOver15:       +(htOver15  * 100).toFixed(1),
     cornersLambda:  +cornersLambda.toFixed(1),
+    cornersSource:  _hasRealCorners ? 'real+xg' : 'solo_xg', // trazabilidad: con datos reales de equipo o pura heurística
+    cornersHomeShare: +_homeShare.toFixed(2),
     cornersOver65:  +(poissonCDF_above(cornersLambda,  7) * 100).toFixed(1),
     cornersOver75:  +(poissonCDF_above(cornersLambda,  8) * 100).toFixed(1),
     cornersOver85:  +(poissonCDF_above(cornersLambda,  9) * 100).toFixed(1),
@@ -5761,17 +5830,24 @@ async function sendLong(chatId, text, options = {}) {
   if (chunk) await sendChunk(chunk);
 }
 
+// ── Torneos de selecciones: sede neutral salvo que el "local" sea anfitrión ──
+// Compartido entre buildMatchContext (prompt) y calcExtendedProbs (reparto de corners).
+const NATIONAL_NEUTRAL_LEAGUES = new Set([1635, 8443, 4188, 5039, 14400]);
+function isNeutralVenue(leagueId, homeName) {
+  if (!NATIONAL_NEUTRAL_LEAGUES.has(leagueId)) return false;
+  const HOSTS_2026 = /^(usa|united states|estados unidos|mexico|méxico|canada|canadá)$/i;
+  const homeIsHost = leagueId === 1635 && HOSTS_2026.test(String(homeName || '').trim());
+  return !homeIsHost;
+}
+
 function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTeams, leagueId }) {
   const ctx = {};
   if (round) ctx.jornada = round;
 
-  // ── Torneos de selecciones: sede neutral salvo que el "local" sea anfitrión ──
-  const NATIONAL_NEUTRAL = new Set([1635, 8443, 4188, 5039, 14400]);
   const lid = leagueId ?? fixture?.leagueId;
-  if (NATIONAL_NEUTRAL.has(lid)) {
+  if (NATIONAL_NEUTRAL_LEAGUES.has(lid)) {
     const homeName = String(fixture?.homeTeam || fixture?.local || '').trim();
-    const HOSTS_2026 = /^(usa|united states|estados unidos|mexico|méxico|canada|canadá)$/i;
-    const homeIsHost = lid === 1635 && HOSTS_2026.test(homeName);
+    const homeIsHost = !isNeutralVenue(lid, homeName);
     ctx.cancha_neutral = !homeIsHost;
     if (lid === 1635) {
       ctx.anfitriones = 'Mundial 2026: los ÚNICOS anfitriones son Estados Unidos, Canadá y México. Ningún otro equipo es "sede" ni tiene "presión de local".';
@@ -5955,10 +6031,17 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
         console.log(`🏅 Elo ${f.homeTeam}(${_elo.eloHome}) vs ${f.awayTeam}(${_elo.eloAway}) We=${eloLam.we} → λ blend ${hForAdj.toFixed(2)}/${aForAdj.toFixed(2)}`);
       }
     }
-    const extProbs = calcExtendedProbs(hForAdj, hAgtAdj, aForAdj, aAgtAdj, f.leagueName || '');
+    // Corners reales del equipo (si la fuente los trae) + sede neutral
+    const cornersOpts = {
+      homeCornersPG: parseFloat(hStats?.cornersPerGameHome ?? hStats?.cornersPerGame) || null,
+      awayCornersPG: parseFloat(aStats?.cornersPerGameAway ?? aStats?.cornersPerGame) || null,
+      neutral:       isNeutralVenue(f.leagueId, f.homeTeam),
+    };
+    const extProbs = calcExtendedProbs(hForAdj, hAgtAdj, aForAdj, aAgtAdj, f.leagueName || '', cornersOpts);
 
     return {
       fixtureId:      f.fixtureId,
+      _cornersOpts:   cornersOpts, // reutilizado al re-blendear con xG de la API
       homeId:         f.homeId,    // ← necesario para matching de lesionados
       awayId:         f.awayId,    // ← necesario para matching de lesionados
       leagueId:       f.leagueId,  // ← necesario para tier multiplier en buildPickCandidates
@@ -6056,6 +6139,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
           blendedHomeLambda, currentProbs.homeLambda_agt ?? blendedHomeLambda,
           blendedAwayLambda, currentProbs.awayLambda_agt ?? blendedAwayLambda,
           enriched[i].liga || '',
+          enriched[i]._cornersOpts || {},
         );
         enriched[i]._extendedProbs = blendedProbs;
         enriched[i]._lambdaSource = 'blend_api_poisson';
@@ -6596,7 +6680,11 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
     const hAgt   = parseFloat(hStats?.golesRecibidosHome) || 0;
     const aFor   = parseFloat(aStats?.golesAnotadosAway) || 0;
     const aAgt   = parseFloat(aStats?.golesRecibidosAway) || 0;
-    const extProbs = (hFor > 0 || aFor > 0) ? calcExtendedProbs(hFor, hAgt, aFor, aAgt, f.leagueName || '') : null;
+    const extProbs = (hFor > 0 || aFor > 0) ? calcExtendedProbs(hFor, hAgt, aFor, aAgt, f.leagueName || '', {
+      homeCornersPG: parseFloat(hStats?.cornersPerGameHome ?? hStats?.cornersPerGame) || null,
+      awayCornersPG: parseFloat(aStats?.cornersPerGameAway ?? aStats?.cornersPerGame) || null,
+      neutral:       isNeutralVenue(f.leagueId, f.homeTeam),
+    }) : null;
     return {
       fixtureId:      f.fixtureId,
       liga:           f.leagueName,
@@ -7041,7 +7129,11 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       };
     }
   }
-  const extProbs = calcExtendedProbs(hFor, hAgt, aFor, aAgt, nextRaw.league?.name || '');
+  const extProbs = calcExtendedProbs(hFor, hAgt, aFor, aAgt, nextRaw.league?.name || '', {
+    homeCornersPG: parseFloat(_bestHomeStats?.cornersPerGameHome ?? _bestHomeStats?.cornersPerGame) || null,
+    awayCornersPG: parseFloat(_bestAwayStats?.cornersPerGameAway ?? _bestAwayStats?.cornersPerGame) || null,
+    neutral:       isNeutralVenue(leagueId, homeTeam),
+  });
 
   const fixtureForEngine = {
     fixtureId:      nextRaw.fixture.id,
