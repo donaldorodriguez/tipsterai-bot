@@ -5647,6 +5647,14 @@ async function evaluatePendingPicks() {
   return picks;
 }
 
+// Autoevaluación periódica: sin esto la autocalibración nunca aprende —
+// evaluatePendingPicks solo corría cuando el admin ejecutaba /estadisticas o
+// /calibracion a mano, así que getMarketCalibration veía 0 picks con W/L y
+// usaba factor neutro para todos los mercados (detectado 8-jul: 193 picks
+// acumulados del Mundial, ninguno evaluado). Cada 6h coincide con CALIB_TTL.
+setTimeout(() => evaluatePendingPicks().catch(e => console.error('evaluatePendingPicks (arranque):', e.message)), 5 * 60 * 1000);
+setInterval(() => evaluatePendingPicks().catch(e => console.error('evaluatePendingPicks (cron):', e.message)), 6 * 60 * 60 * 1000);
+
 async function handleEstadisticas(chatId, period = 'hoy') {
   await bot.sendMessage(chatId, '📊 Evaluando resultados de tus picks...');
 
