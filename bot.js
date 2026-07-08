@@ -109,27 +109,27 @@ const LEAGUE_SEASONS = {
   // European 2nd tier
   34824:2025, 120775:2025, 116520:2025, 68013:2025, 53546:2025,
   // European club competitions
-  2486:2025, 3337:2025, 722432:2025,
-  // Other European leagues
+  2486:2026, 3337:2026, 722432:2026, // ediciones 2026-27 (clasificatorias desde jul-2026)
+  // Other European leagues (ago-may: 2025 = temporada 2025-26)
   75672:2025, 80778:2025, 153113:2025, 123328:2025, 168431:2025,
   176941:2025, 179494:2025, 186302:2025, 102053:2025, 90990:2025,
-  96947:2025, 88437:2025, 244170:2025, 271402:2025,
+  96947:2026, 88437:2026, 244170:2025, 271402:2025, // Allsvenskan y Eliteserien son ligas calendario
   // International
-  1635:2026, 8443:2024, 4188:2024, 5039:2024, 29718:2026, 14400:2025,
-  // South American club competitions
-  11847:2025, 10145:2025,
-  // South American leagues
-  61205:2025, 62056:2025, 109712:2025,
-  228852:2025, 230554:2025,
-  204173:2025, 205024:2025, 205875:2025,
-  226299:2025, 206726:2025, 255233:2025,
-  293528:2025, 213534:2025, 215236:2025,
-  239915:2025, 1049216:2025,
-  // CONCACAF
-  216087:2025, 223746:2025, 224597:2025,
-  // Asia / Africa
-  262041:2025, 84182:2025, 249276:2025, 199067:2025,
-  173537:2025, 304591:2025, 305442:2025,
+  1635:2026, 8443:2024, 4188:2024, 5039:2024, 29718:2026, 14400:2026,
+  // South American club competitions (calendario)
+  11847:2026, 10145:2026,
+  // South American leagues (calendario)
+  61205:2026, 62056:2026, 109712:2026,
+  228852:2026, 230554:2026,
+  204173:2026, 205024:2026, 205875:2026,
+  226299:2026, 206726:2026, 255233:2026,
+  293528:2026, 213534:2026, 215236:2026,
+  239915:2026, 1049216:2026,
+  // CONCACAF (MLS calendario; Liga MX Apertura 2026 arranca jul-2026)
+  216087:2026, 223746:2026, 224597:2026,
+  // Asia / Africa (K League y J1 calendario)
+  262041:2025, 84182:2026, 249276:2026, 199067:2025,
+  173537:2025, 304591:2026, 305442:2026,
 };
 
 const LEAGUE_IDS = new Set(Object.keys(LEAGUE_SEASONS).map(Number));
@@ -1275,13 +1275,14 @@ async function getTeamLastFixtures(teamId, last = 15, venue = null) {
 }
 
 async function getLeagueStandings(leagueId) {
-  const mapped = LEAGUE_SEASONS[leagueId];
-  // Ligas sin mapear: probar el año actual (ligas calendario: Kazajistán, Brasil,
-  // Noruega...) y caer al año anterior si esa temporada aún no tiene tabla jugada
-  // (ligas ago-may consultadas en verano). Antes el default fijo 2025 devolvía
-  // tablas de temporadas terminadas para las ligas calendario.
+  // Siempre probar el año actual y caer al anterior si esa temporada no tiene
+  // tabla jugada. Cubre ligas calendario (Brasil, Noruega...) Y ligas ago-may
+  // (en verano la temporada nueva viene vacía → cae a la recién terminada).
+  // No depende de LEAGUE_SEASONS: el mapping estático servía tablas muertas
+  // (Brasileirão B mapeado a 2025 mostró "5º con 61 puntos" en pleno jul-2026
+  // cuando la temporada 2026 iba por la jornada 16).
   const year = new Date().getFullYear();
-  const seasonsToTry = mapped != null ? [mapped] : [year, year - 1];
+  const seasonsToTry = [year, year - 1];
   for (const season of seasonsToTry) {
     try {
       const { data } = await API.get('/standings', { params: { leagueId, season } });
@@ -1986,6 +1987,14 @@ async function getRefereeCardStats(name) {
   if (_refereeStatsCache.has(name)) return _refereeStatsCache.get(name);
 
   const sh = findStatsHubReferee(name);
+  // Árbitro sin muestra real (0 partidos o todos los promedios en cero): tratarlo
+  // como "sin datos" — inyectarlo hacía que el LLM narrara "todos los campos en
+  // cero" al cliente en vez de omitir la línea de árbitro.
+  if (sh && (!(sh.partidos > 0) || !((sh.avg_tarjetas ?? 0) > 0 || (sh.amarillas_por_partido ?? 0) > 0))) {
+    console.log(`🃏 StatsHub [${name}]: match sin muestra útil (${sh.partidos ?? 0} partidos, promedios en cero) → null`);
+    _refereeStatsCache.set(name, null);
+    return null;
+  }
   if (sh) {
     console.log(`🃏 StatsHub [${name} → ${sh.nombre}]: ${sh.amarillas_por_partido} am/p, ${sh.avg_tarjetas} total/p (${sh.partidos} partidos)`);
     const result = {
@@ -4098,10 +4107,10 @@ async function claudeWithRetry(params, retries = 4) {
   }
 }
 
-async function haiku(systemPrompt, userMessage) {
+async function haiku(systemPrompt, userMessage, maxTokens = 800) {
   const msg = await claudeWithRetry({
     model: 'claude-haiku-4-5-20251001',
-    max_tokens: 800,
+    max_tokens: maxTokens,
     system: [{ type: 'text', text: systemPrompt, cache_control: { type: 'ephemeral' } }],
     messages: [{ role: 'user', content: userMessage }],
   });
@@ -4217,6 +4226,9 @@ PICKS QUE NUNCA DAS — aplica estos criterios internamente, sin mencionarlos al
 - BTTS cuando un equipo tiene más del 35% de partidos sin marcar en su contexto (casa o fuera)
 - Asian Handicap (AH) y Draw No Bet local (DNB_HOME) en picks automáticos del día. Solo usar DNB_AWAY si la probabilidad supera 75%
 - BTTS en La Liga cuando no son equipos ofensivos — la liga tiene solo 40% BTTS base, muy por debajo del umbral
+
+⛔ PROHIBIDO NARRAR EL PROCESO INTERNO — REGLA INQUEBRANTABLE:
+Si un pick no cumple los requisitos (cuota, stake, probabilidad), NO LO ESCRIBAS — ni siquiera para explicar que lo descartas o que "se redirige a otro mercado". El texto final SOLO contiene picks publicables. PROHIBIDO escribir: "DESCARTADO", "no supera el mínimo/umbral/piso", "la cuota no alcanza", "se redirige", "en el JSON", "los campos", "de la muestra". El cliente paga por picks accionables, no por ver tu proceso de decisión. Un pick a medio descartar confunde y destruye la credibilidad del producto.
 
 MERCADOS DISPONIBLES — usa el que tenga más valor según los datos (no te limites a los primeros):
 
@@ -4809,6 +4821,8 @@ const INPLAY_SYSTEM = `${TIPSTER_SYSTEM}
 INSTRUCCIÓN ESPECIAL IN-PLAY:
 Eres un tipster en vivo. Siempre das picks concretos y accionables — NUNCA terminas un análisis diciendo "sin picks de valor" si hay tiempo de partido por delante y contexto claro.
 
+⛔ FORMATO EXCLUSIVO IN-PLAY: PROHIBIDO incluir bloques "🎰 COMBINADA" y "🔥 PICK ESTRELLA DEL DÍA" en análisis en vivo — esos bloques son EXCLUSIVOS de los picks del día pre-partido. Un análisis in-play emite solo picks individuales del partido.
+
 CUOTAS EN VIVO:
 ⛔ PROHIBIDO escribir "cuota real verificada" o "cuota real disponible" basándote en lineasXxxVivo — esas son cuotas matemáticas de breakeven del modelo (campo "cuotaJustaOver"), NO cuotas reales. Solo puedes decir "cuota real" si el dato viene de cuotasVivo.
 ⛔ COHERENCIA CUOTA-PROBABILIDAD: la cuota estimada DEBE ser exactamente el valor del campo cuotaJustaOver/cuotaJustaUnder del JSON (= 100/probabilidad). PROHIBIDO escribir una cuota estimada distinta a ese campo. Si citas "53.4% de probabilidad", la cuota estimada coherente es ~1.87 (100/53.4) — nunca 2.15 ni otro número inventado.
@@ -5237,7 +5251,8 @@ async function extractPicksFromText(analysisText, matchesCtx) {
   const contextStr = matchesCtx.map(m => `fixtureId=${m.fixtureId} | ${m.local} vs ${m.visitante} (${m.liga})`).join('\n');
   const raw = await haiku(
     EXTRACT_PICKS_SYSTEM,
-    `Contexto de partidos analizados:\n${contextStr}\n\nTexto del tipster:\n${analysisText}`
+    `Contexto de partidos analizados:\n${contextStr}\n\nTexto del tipster:\n${analysisText}`,
+    2500 // con los 800 default el JSON de sesiones largas se truncaba → parse fallaba → gates ciegos
   );
   try {
     const jsonMatch = raw.match(/\[[\s\S]*\]/);
@@ -5335,22 +5350,45 @@ async function applyStakeGate(picksText, enriched, matchesCtx) {
       }
     }
 
-    // ── GATE DURO: elimina picks con cuota < 1.65 O stake ≤ 5 aunque el LLM los publique ──
+    // ── GATE DURO: elimina picks con cuota < 1.65 O stake ≤ 5 (combinadas incluidas) ──
     // Las reglas de prompt no bastan (el LLM las viola bajo instrucciones en
-    // conflicto). Antes solo se eliminaba por cuota: un pick "Stake: 5/10"
-    // (prohibido publicar) pasaba intacto si su cuota superaba el piso.
+    // conflicto). Antes solo se eliminaba por cuota y las combinadas se saltaban
+    // todo: una "COMBINADA ... Stake: 5/10" pasaba intacta a publicación.
     const invalid = extracted.filter(x => {
-      if (x.esCombinada) return false;
-      const cuotaBaja = x.cuota != null && x.cuota > 1 && x.cuota < PUBLISH_MIN_ODDS;
       const st = finalStakes.get(x) ?? x.stake;
       const stakeBajo = st != null && st <= 5;
+      if (x.esCombinada) return stakeBajo; // combinada: su cuota es producto de patas — solo gate de stake
+      const cuotaBaja = x.cuota != null && x.cuota > 1 && x.cuota < PUBLISH_MIN_ODDS;
       return cuotaBaja || stakeBajo;
     });
-    if (invalid.length) {
-      console.log(`🚫 Gate duro: ${invalid.length} pick(s) inválido(s) (cuota<${PUBLISH_MIN_ODDS} o stake≤5): ${invalid.map(p => `${p.seleccion}@${p.cuota} stake ${finalStakes.get(p) ?? p.stake}`).join(', ')}`);
+
+    // ── SANITIZADOR: lenguaje de maquinaria interna que jamás debe llegar al cliente ──
+    // Casos reales vistos en producción (8-jul): "queda DESCARTADO — cuota 1.64 no
+    // supera el mínimo de 1.65", "sin datos disponibles en el JSON", "todos los
+    // campos en cero". Detección determinista → reescritura quirúrgica.
+    const LEAK_PATTERNS = [
+      /\bJSON\b/,
+      /DESCARTAD[OA]/i,
+      /no (?:supera|alcanza) el (?:mínimo|umbral|piso)/i,
+      /(?:mínimo|umbral|piso) (?:establecido|de publicación|interno)/i,
+      /se redirige a (?:otros )?mercados/i,
+      /todos los campos en cero|campos? (?:están )?(?:en|a) cero/i,
+      /\bde la muestra\b/i,
+      /sobrecomprimid/i,
+      /probabilidadesCalculadas|statsLocal|statsVisitante|cuotasReales|_syntheticOdds|picksMotorJS|modeloPoisson/,
+    ];
+    const leaks = LEAK_PATTERNS.filter(re => re.test(correctedText)).map(re => re.source);
+
+    if (invalid.length || leaks.length) {
+      if (invalid.length) console.log(`🚫 Gate duro: ${invalid.length} pick(s) inválido(s) (cuota<${PUBLISH_MIN_ODDS} o stake≤5): ${invalid.map(p => `${p.seleccion}@${p.cuota} stake ${finalStakes.get(p) ?? p.stake}`).join(', ')}`);
+      if (leaks.length)   console.log(`🧹 Sanitizador: lenguaje interno detectado (${leaks.length} patrón(es)): ${leaks.slice(0, 4).join(' | ')}`);
       const rewritten = await haiku(
-        `Eres un editor de texto quirúrgico. Recibes un análisis de picks deportivos y una lista de picks INVÁLIDOS a eliminar. Devuelve el MISMO texto, palabra por palabra, con la única diferencia de que los bloques completos de los picks inválidos (desde su encabezado "🎯 PICK..." hasta su última línea "└ ⚠️ Riesgo...") desaparecen. No renumeres, no resumas, no añadas notas ni explicaciones. Si todos los picks son inválidos, devuelve solo la parte de contexto/análisis con la línea "⛔ Sin picks de valor en este partido."`,
-        `PICKS INVÁLIDOS A ELIMINAR (cuota < ${PUBLISH_MIN_ODDS} o stake ≤ 5):\n${invalid.map(p => `- ${p.seleccion} (cuota ${p.cuota}, stake ${finalStakes.get(p) ?? p.stake}) del partido ${p.local} vs ${p.visitante}`).join('\n')}\n\nTEXTO:\n${correctedText}`
+        `Eres un editor de texto quirúrgico. Recibes un análisis de picks deportivos y dos listas de problemas. Devuelve el MISMO texto, palabra por palabra, con estas únicas diferencias:
+1. Los bloques completos de los picks INVÁLIDOS (desde su encabezado "🎯 PICK..." o "🎰 COMBINADA..." hasta su última línea) desaparecen por completo. Un pick que se describe a sí mismo como descartado, rechazado o "redirigido" también es un bloque inválido: elimínalo entero.
+2. Las frases con LENGUAJE INTERNO desaparecen o se reformulan en lenguaje de cliente: nunca menciones JSON, campos de datos, muestras, umbrales/mínimos/pisos de cuota o de publicación, descartes ni redirecciones de mercado. "sin datos disponibles en el JSON" → "sin datos disponibles". Si una frase solo narra maquinaria interna, elimínala.
+No renumeres, no resumas, no añadas notas ni explicaciones. Si todos los picks son inválidos, devuelve solo la parte de contexto/análisis con la línea "⛔ Sin picks de valor en este partido."`,
+        `PICKS INVÁLIDOS A ELIMINAR (cuota < ${PUBLISH_MIN_ODDS} o stake ≤ 5):\n${invalid.length ? invalid.map(p => `- ${p.seleccion} (cuota ${p.cuota}, stake ${finalStakes.get(p) ?? p.stake}) del partido ${p.local} vs ${p.visitante}`).join('\n') : '(ninguno)'}\n\nLENGUAJE INTERNO DETECTADO (patrones): ${leaks.length ? leaks.join(' | ') : '(ninguno)'}\n\nTEXTO:\n${correctedText}`,
+        8000 // la reescritura devuelve el texto COMPLETO — con los 800 default se truncaba y el guard de longitud la descartaba (gate fail-open)
       ).catch(() => null);
       if (rewritten && rewritten.length > correctedText.length * 0.3) {
         correctedText = rewritten;
@@ -9264,23 +9302,59 @@ async function handleImage(msg) {
       }
     } catch (e) { console.log('API lookup falló:', e.message); }
 
+    // ── Mapear al fixture EN VIVO real: habilita cuotas in-play reales y hace
+    // los picks evaluables (antes se guardaban con fixtureId null → nunca
+    // entraban a la autocalibración).
+    let liveFixtureId = null;
+    let liveOddsCtx = null;
+    try {
+      const live = await fetchLiveRaw().catch(() => []);
+      const qh = normalizeTeamName(matchData.home_team || ''), qa = normalizeTeamName(matchData.away_team || '');
+      const sideMatch = (t, q) => { const tn = normalizeTeamName(t || ''); return !!q && (tn === q || tn.includes(q) || q.includes(tn)); };
+      const lm = live.find(m => sideMatch(m.homeTeam?.name, qh) && sideMatch(m.awayTeam?.name, qa))
+              || live.find(m => sideMatch(m.homeTeam?.name, qa) && sideMatch(m.awayTeam?.name, qh));
+      if (lm) {
+        liveFixtureId = lm.id;
+        liveOddsCtx = await getLiveOdds(lm.id).catch(() => null);
+        console.log(`📡 Imagen mapeada a fixture en vivo ${lm.id} (${lm.homeTeam?.name} vs ${lm.awayTeam?.name})${liveOddsCtx ? ' + cuotas in-play reales' : ''}`);
+      }
+    } catch (e) { console.log('map imagen→fixture falló:', e.message); }
+
+    // ── Guard anti-contradicción: si este chat ya recibió un análisis de este
+    // mismo partido hace <30 min, el nuevo análisis debe ser COHERENTE con él
+    // (visto en producción: Over 1.5 y Under 1.5 del mismo partido con 30 min
+    // de diferencia por dos imágenes distintas).
+    const dedupKey = `${chatId}:${[normalizeTeamName(matchData.home_team || ''), normalizeTeamName(matchData.away_team || '')].sort().join('|')}`;
+    const previo = _imageAnalysisRecent.get(dedupKey);
+    const coherencia = (previo && Date.now() - previo.ts < 30 * 60 * 1000)
+      ? `\n\n⛔ COHERENCIA OBLIGATORIA: hace ${Math.round((Date.now() - previo.ts) / 60000)} minutos ya emitiste este análisis del MISMO partido:\n---\n${previo.texto.slice(0, 1800)}\n---\nTus nuevos picks NO PUEDEN contradecir los anteriores (jamás recomiendes el lado opuesto del mismo mercado). Si el contexto cambió (goles, expulsión, minuto), actualiza el análisis DECLARANDO el cambio; si no cambió nada relevante, ratifica los mismos picks.`
+      : '';
+
     const contextNote = apiContext
       ? 'Datos históricos disponibles.'
       : 'No se encontraron datos históricos. Analiza SOLO con datos de la imagen. Indica "Análisis basado solo en estadísticas visibles".';
 
     await bot.sendMessage(chatId, '⚡ Generando análisis in-play...');
-    const analysis = await sonnet(
+    let analysis = await sonnet(
       INPLAY_SYSTEM,
-      `DATOS DE LA IMAGEN (fuente principal):\n${JSON.stringify(matchData, null, 2)}\n\nDATOS HISTÓRICOS API:\n${apiContext ? JSON.stringify(apiContext, null, 2) : 'No disponibles'}\n\nNOTA: ${contextNote}`
+      `DATOS DE LA IMAGEN (fuente principal):\n${JSON.stringify(matchData, null, 2)}\n\nDATOS HISTÓRICOS API:\n${apiContext ? JSON.stringify(apiContext, null, 2) : 'No disponibles'}\n\n${liveOddsCtx ? `CUOTAS EN VIVO REALES (bookmaker):\n${JSON.stringify(liveOddsCtx, null, 2)}\n\n` : ''}NOTA: ${contextNote}${coherencia}`
     );
+    // Gate pre-publicación (antes el flujo de imagen enviaba el texto crudo:
+    // así salió una combinada con stake 5 y cuotas bajo el piso).
+    analysis = await applyStakeGate(analysis, [], [{ fixtureId: liveFixtureId, local: matchData.home_team, visitante: matchData.away_team, liga: 'En vivo (imagen)', fechaPartido: new Date().toISOString() }]);
     await sendLong(chatId, analysis, { parse_mode: 'Markdown' });
-    recordPicks(analysis, [{ fixtureId: null, local: matchData.home_team, visitante: matchData.away_team, liga: 'En vivo (imagen)', fechaPartido: new Date().toISOString() }]).catch(e => console.error('recordPicks:', e.message));
+    _imageAnalysisRecent.set(dedupKey, { ts: Date.now(), texto: analysis });
+    if (_imageAnalysisRecent.size > 200) _imageAnalysisRecent.clear(); // límite de memoria
+    recordPicks(analysis, [{ fixtureId: liveFixtureId, local: matchData.home_team, visitante: matchData.away_team, liga: 'En vivo (imagen)', fechaPartido: new Date().toISOString() }]).catch(e => console.error('recordPicks:', e.message));
 
   } catch (err) {
     console.error('handleImage error:', err.message);
     await bot.sendMessage(chatId, `❌ Error al analizar imagen: ${err.message}`);
   }
 }
+
+// Análisis de imagen recientes por chat+partido (guard de coherencia, TTL 30 min)
+const _imageAnalysisRecent = new Map();
 
 // ─── Access control ───────────────────────────────────────────────────────────
 
