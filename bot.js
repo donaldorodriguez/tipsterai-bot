@@ -2176,13 +2176,26 @@ async function getStatsHubGames(dateStr) {
 }
 
 function shGameIdFor(games, homeName, awayName) {
-  const nh = _apifNorm(homeName), na = _apifNorm(awayName);
-  const hit = games.find(g => {
-    const gh = _apifNorm(g.home), ga = _apifNorm(g.away);
-    return (gh === nh || gh.startsWith(nh) || nh.startsWith(gh)) &&
-           (ga === na || ga.startsWith(na) || na.startsWith(ga));
-  });
-  return hit?.id || null;
+  // Variantes de cada nombre: crudo, traducido y alias conocidos
+  // ("USA" ↔ "United States", "Bosnia & Herzegovina" ↔ "Bosnia and Herzegovina").
+  const variants = (name) => {
+    const t = translateTeamName(name);
+    const out = new Set([_apifNorm(name), _apifNorm(t)]);
+    for (const alt of (TEAM_SEARCH_ALTERNATES[t] || [])) out.add(_apifNorm(alt));
+    out.delete('');
+    return [...out];
+  };
+  const vh = variants(homeName), va = variants(awayName);
+  const matchSide = (gName, vars) => {
+    const gn = _apifNorm(gName);
+    return vars.some(v => gn === v || gn.startsWith(v) || v.startsWith(gn));
+  };
+  const hit = games.find(g => matchSide(g.home, vh) && matchSide(g.away, va));
+  if (!hit) {
+    console.log(`🔎 StatsHub: sin match para "${homeName} vs ${awayName}" entre ${games.length} partidos del día`);
+    return null;
+  }
+  return hit.id;
 }
 
 async function getPlayerPropsForGames(gameIds, { minOdds = 1.45, maxOdds = 3.2, minTrendPct = 75, minWindow = 5, limit = 6 } = {}) {
