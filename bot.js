@@ -1188,19 +1188,22 @@ async function searchTeam(name, countryHint = '') {
 // Verifica si un equipo está jugando ahora, hoy o en los próximos 2 días
 async function getTeamPlayingPriority(teamId) {
   try {
-    const live = liveCache.raw || [];
-    const lf = live.find(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId);
+    // Poblar los cachés activamente: leerlos en pasivo hacía que tras un
+    // reinicio las etiquetas salieran vacías ("Aurora ()" indistinguibles).
+    // fetchLiveRaw cachea 30s y fetchFixturesByDate cachea por fecha — el
+    // costo real es solo la primera desambiguación del día.
+    const live = await fetchLiveRaw().catch(() => liveCache.raw || []);
+    const lf = (live || []).find(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId);
     if (lf) return { priority: 3, label: `🔴 En vivo ahora${lf.league?.name ? ` · ${lf.league.name}` : ''}` };
-    const today = todayDate();
-    const todayFixtures = dateCache.get(today) || [];
-    const tf = todayFixtures.find(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId);
-    if (tf) return { priority: 2, label: `📅 Juega hoy${tf.league?.name ? ` · ${tf.league.name}` : ''}` };
-    for (let d = 1; d <= 2; d++) {
-      const dt = new Date(); dt.setDate(dt.getDate() + d);
-      const ds = dt.toISOString().split('T')[0];
-      const cf = (dateCache.get(ds) || []).find(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId);
+    for (let d = 0; d <= 2; d++) {
+      const ds = new Date(Date.now() + d * 86400000)
+        .toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+      const fixtures = await fetchFixturesByDate(ds).catch(() => dateCache.get(ds) || []);
+      const cf = (fixtures || []).find(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId);
       if (cf) {
-        return { priority: 1, label: `📆 Juega en ${d} día${d>1?'s':''}${cf.league?.name ? ` · ${cf.league.name}` : ''}` };
+        const liga = cf.league?.name ? ` · ${cf.league.name}` : '';
+        if (d === 0) return { priority: 2, label: `📅 Juega hoy${liga}` };
+        return { priority: 1, label: `📆 Juega en ${d} día${d > 1 ? 's' : ''}${liga}` };
       }
     }
   } catch {}
@@ -1239,10 +1242,14 @@ async function findTeamWithButtons(chatId, name, countryHint = '', intent = null
   const gap = scored.length > 1 ? scored[0]._score - scored[1]._score : 999;
   if (gap > 30 || scored.length === 1) return scored[0];
 
-  const enriched = await Promise.all(scored.slice(0, 4).map(async t => {
+  // Secuencial a propósito: el primer equipo llena los cachés de fixtures
+  // (fetchLiveRaw + fetchFixturesByDate) y los siguientes los leen gratis.
+  // En paralelo se disparaban los mismos fetches ×4 antes de poblar el caché.
+  const enriched = [];
+  for (const t of scored.slice(0, 4)) {
     const playingInfo = await getTeamPlayingPriority(t.team.id);
-    return { ...t, _priority: playingInfo.priority, _priorityLabel: playingInfo.label };
-  }));
+    enriched.push({ ...t, _priority: playingInfo.priority, _priorityLabel: playingInfo.label });
+  }
 
   enriched.sort((a, b) => b._priority - a._priority || b._score - a._score);
 
