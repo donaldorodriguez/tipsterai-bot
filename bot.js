@@ -4156,11 +4156,16 @@ function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats, opts = 
     : null;
 
   // ── Lambda combinada ──────────────────────────────────────────────────────
-  // Con xG real: 45% histórico + 40% ritmo de xG + 15% ritmo de goles.
-  // Sin xG: 60% histórico + 40% pace de goles (fórmula anterior).
+  // Con xG real: el peso del ritmo de xG CRECE con los minutos jugados —
+  // extrapolar 15-25 min de xG a todo el partido es ruidoso y sesgaba al alza
+  // la probabilidad en el 1T (mataba las alertas de primer tiempo que antes
+  // salían). Min 15 → xG pesa ~10%, min 45+ → 40% completo.
+  // Sin xG: 60% histórico + 40% pace de goles (fórmula original).
   let lambdaCombined;
   if (lambdaLiveXG != null) {
-    lambdaCombined = lambdaHistorical * 0.45 + lambdaLiveXG * 0.40 + lambdaLivePace * 0.15;
+    const wXG   = 0.40 * Math.min(1, Math.max(0, (elapsed - 5) / 40));
+    const wPace = 0.15;
+    lambdaCombined = lambdaHistorical * (1 - wXG - wPace) + lambdaLiveXG * wXG + lambdaLivePace * wPace;
   } else {
     const liveWeight = totalGoals > 0 ? 0.40 : 0.15;
     lambdaCombined = lambdaHistorical * (1 - liveWeight) + lambdaLivePace * liveWeight;
