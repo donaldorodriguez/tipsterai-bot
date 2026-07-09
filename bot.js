@@ -555,10 +555,18 @@ async function fetchLiveRaw() {
   // en juego EN ESTE INSTANTE. Highlightly /matches?date=X tiene estados desactualizados.
   // Después de obtener la lista live de APIF, se cruza con los datos de Highlightly
   // para obtener los IDs correctos que usan los endpoints de stats/cuotas de Highlightly.
-  const today = new Date().toISOString().split('T')[0];
-  // Fetch Highlightly today en paralelo (siempre lo necesitamos para IDs o como fallback)
-  const hlTodayPromise = API.get('/matches', { params: { date: today, limit: 200 } })
-    .then(r => r.data?.data || []).catch(() => []);
+  // Fetch Highlightly hoy+mañana UTC en paralelo (para el cruce de IDs y fallback).
+  // OJO: el endpoint rechaza limit>100 (el limit:200 anterior devolvía 400 SIEMPRE
+  // → el cruce nunca tenía datos y todos los partidos live quedaban con IDs de
+  // APIF, invisibles para la whitelist). fetchFixturesByDate pagina y cachea.
+  // Se incluye el día UTC siguiente: los partidos de la noche de Colombia caen
+  // en la fecha UTC de mañana.
+  const todayUtc = new Date().toISOString().split('T')[0];
+  const nextUtc  = new Date(Date.now() + 86400e3).toISOString().split('T')[0];
+  const hlTodayPromise = Promise.all([
+    fetchFixturesByDate(todayUtc).catch(() => []),
+    fetchFixturesByDate(nextUtc).catch(() => []),
+  ]).then(([a, b]) => [...a, ...b]);
 
   if (APIF) {
     try {
@@ -569,13 +577,27 @@ async function fetchLiveRaw() {
       const fixtures = apifData.data?.response || [];
       console.log(`⚡ API-Football live: ${fixtures.length} partidos en vivo ahora`);
 
-      // Función de normalización para comparar nombres de equipos entre APIs
+      // Función de normalización para comparar nombres de equipos entre APIs.
+      // Se quitan prefijos de club (FC/CF/AC/SC...) antes de tomar la primera
+      // palabra — "FC Santa Coloma" (APIF) vs "Santa Coloma" (HL) no cruzaba.
       const normName = s => s.toLowerCase()
         .normalize('NFD').replace(/[̀-ͯ]/g, '')
-        .replace(/[^a-z0-9]/g, ' ').trim().split(/\s+/)[0]; // primera palabra
+        .replace(/[^a-z0-9]/g, ' ')
+        .replace(/^(?:fc|cf|ac|sc|cd|ca|afc|fk|sk|nk|kf|ks|if|bk|club|real|deportivo|atletico)\s+/, '')
+        .trim().split(/\s+/)[0]; // primera palabra significativa
 
       const STATUS_MAP = { '1H': 'First half', 'HT': 'Half time', '2H': 'Second half',
                            'ET': 'Extra time', 'P': 'Penalties', 'BT': 'Break time' };
+
+      // La cuota agotada de APIF llega como HTTP 200 con body.errors — sin esto,
+      // se cacheaba [] y el fallback de Highlightly nunca corría ("no hay
+      // partidos en vivo" con 20 partidos jugándose).
+      if (!fixtures.length) {
+        const apifErr = apifData.data?.errors && Object.keys(apifData.data.errors).length
+          ? JSON.stringify(apifData.data.errors) : null;
+        if (apifErr) console.warn(`⚠️ APIF live sin datos (${apifErr}) → fallback a Highlightly`);
+        throw new Error(apifErr || 'APIF live devolvió 0 sin error — usar fallback');
+      }
 
       const raw = fixtures.map(f => {
         const apifH = normName(f.teams.home.name);
@@ -616,23 +638,57 @@ async function fetchLiveRaw() {
     }
   }
 
-  // Fallback: Highlightly con filtro de 5h (partidos que no pueden llevar más de 5h jugados)
+  // Fallback: Highlightly. Sus estados llegan tarde ('Not started' en partidos ya
+  // en juego), así que el filtro es por HORARIO: arrancó hace 0-150 min y no está
+  // terminado. Si el estado no trae minuto, se estima por el reloj.
   const allToday = await hlTodayPromise;
-  const fiveHoursAgo = Date.now() - 5 * 60 * 60 * 1000;
   const raw = allToday.filter(m => {
-    if (!LIVE_DESCS.has(m.state?.description)) return false;
-    const startTime = m.date ? new Date(m.date).getTime() : 0;
-    return startTime >= fiveHoursAgo;
+    if (FINISHED_DESCS.has(m.state?.description)) return false;
+    const start = m.date ? new Date(m.date).getTime() : 0;
+    const mins = (Date.now() - start) / 60000;
+    return mins >= 1 && mins <= 150;
+  }).map(m => {
+    const st = { ...(m.state || {}) };
+    if (st.clock == null) {
+      const mins = Math.round((Date.now() - new Date(m.date).getTime()) / 60000);
+      st.clock = Math.max(1, mins <= 48 ? mins : Math.min(90, mins - 17)); // descanso ~15-17 min
+      st._clockEstimado = true;
+    }
+    // Estado utilizable para los filtros downstream (HL deja 'Not started' un rato)
+    if (!LIVE_DESCS.has(st.description)) {
+      st.description = st.clock <= 45 ? 'First half' : st.clock <= 49 ? 'Half time' : 'Second half';
+    }
+    return { ...m, state: st };
   });
+  console.log(`📡 Fallback HL live: ${raw.length} partidos en ventana de juego (estados HL pueden llegar tarde)`);
   liveCache = { raw, ts: Date.now() };
   return raw;
+}
+
+// Whitelist de ligas EN VIVO por nombre: cuando el cruce APIF↔HL falla, el
+// partido llega con league.id de API-Football (UEL=3, UECL=848...) que jamás
+// está en LEAGUE_IDS (IDs de Highlightly) → clasificatorias europeas en juego
+// quedaban invisibles para /vivo. El nombre de la competición sí es estable.
+const _LIVE_LEAGUE_NAMES = [
+  'champions league', 'europa league', 'conference league', 'world cup',
+  'copa libertadores', 'copa sudamericana', 'friendlies clubs', 'club friendlies',
+  ...Object.values(LEAGUE_MAP).map(l => normalizeTeamName(l.name)).filter(n => n.length >= 7),
+];
+const _LIVE_LEAGUE_EXCLUDE = /women|femen|ladies|u-?\d{2}\b|youth|junior|reserve|sub-?\d{2}/i;
+
+function liveLeagueAllowed(m) {
+  if (LEAGUE_IDS.has(m.league?.id)) return true;
+  const rawName = m.league?.name || '';
+  if (_LIVE_LEAGUE_EXCLUDE.test(rawName)) return false;
+  const n = normalizeTeamName(rawName);
+  return _LIVE_LEAGUE_NAMES.some(w => n.includes(w));
 }
 
 async function getLiveFixtures(leagueId = null) {
   const raw = await fetchLiveRaw();
   const filtered = leagueId
     ? raw.filter(m => m.league?.id === leagueId)
-    : raw.filter(m => LEAGUE_IDS.has(m.league?.id));
+    : raw.filter(m => liveLeagueAllowed(m));
   return filtered.map(parseFixture);
 }
 
@@ -5903,24 +5959,35 @@ async function evaluatePendingPicks() {
   console.log(`📊 Fixtures a evaluar: ${fixtureIds.join(', ')}`);
   const fixtureMap = {};
 
+  // Presupuesto APIF: los lookups de IDs cortos consumen la cuota diaria (100/día
+  // en plan free). Solo se intentan para picks de <7 días (los viejos que no
+  // resolvieron ya no van a resolver) y máximo 10 por corrida.
+  const _cutoffApif = Date.now() - 7 * 86400e3;
+  const _fidRecientes = new Set(pending
+    .filter(p => new Date(p.fechaPartido || p.emitidoAt || 0).getTime() >= _cutoffApif)
+    .map(p => p.fixtureId));
+  let _apifLookupsRestantes = 10;
+
   // Usar GET /matches/{id} directo — más confiable que buscar por fecha para historiales
   await Promise.allSettled(fixtureIds.map(async (fid) => {
     try {
-      const m = await fetchMatchById(fid);
-      if (m && FINISHED_DESCS.has(m.state?.description)) {
-        const f = hlToApif(m);
-        const stats = await getFixtureStatistics(fid).catch(() => null);
-        fixtureMap[fid] = { fixture: f, stats };
-        console.log(`✅ Fixture ${fid} terminado: ${f.goals?.home}-${f.goals?.away}`);
-        return;
-      } else if (m) {
-        console.log(`⏳ Fixture ${fid} aún no terminado: state="${m.state?.description}"`);
+      // IDs cortos (~7 dígitos) = API-Football (el cruce con HL falló al crearse):
+      // no gastar una llamada HL que nunca resolverá
+      const esApifId = String(fid).length < 9;
+      if (!esApifId) {
+        const m = await fetchMatchById(fid);
+        if (m && FINISHED_DESCS.has(m.state?.description)) {
+          const f = hlToApif(m);
+          const stats = await getFixtureStatistics(fid).catch(() => null);
+          fixtureMap[fid] = { fixture: f, stats };
+          console.log(`✅ Fixture ${fid} terminado: ${f.goals?.home}-${f.goals?.away}`);
+        } else if (m) {
+          console.log(`⏳ Fixture ${fid} aún no terminado: state="${m.state?.description}"`);
+        }
         return;
       }
-      // IDs cortos (~7 dígitos) son de API-Football: fetchLiveRaw los usa cuando
-      // el cruce de nombres con Highlightly falla. 42 de 46 alertas de gol
-      // quedaron inevaluables por esto — resolver el marcador final vía APIF.
-      if (APIF && String(fid).length < 9) {
+      if (APIF && _fidRecientes.has(fid) && _apifLookupsRestantes > 0) {
+        _apifLookupsRestantes--;
         const { data } = await APIF.get('/fixtures', { params: { id: fid } });
         const fx = data.response?.[0];
         if (fx && ['FT', 'AET', 'PEN'].includes(fx.fixture?.status?.short)) {
