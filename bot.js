@@ -1196,14 +1196,20 @@ async function getTeamPlayingPriority(teamId) {
     const lf = (live || []).find(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId);
     if (lf) return { priority: 3, label: `🔴 En vivo ahora${lf.league?.name ? ` · ${lf.league.name}` : ''}` };
     for (let d = 0; d <= 2; d++) {
-      const ds = new Date(Date.now() + d * 86400000)
-        .toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+      const ds = new Date(Date.now() + d * 86400000).toISOString().split('T')[0];
       const fixtures = await fetchFixturesByDate(ds).catch(() => dateCache.get(ds) || []);
-      const cf = (fixtures || []).find(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId);
+      const cf = (fixtures || []).find(m =>
+        (m.homeTeam?.id === teamId || m.awayTeam?.id === teamId) &&
+        !FINISHED_DESCS.has(m.state?.description));
       if (cf) {
         const liga = cf.league?.name ? ` · ${cf.league.name}` : '';
-        if (d === 0) return { priority: 2, label: `📅 Juega hoy${liga}` };
-        return { priority: 1, label: `📆 Juega en ${d} día${d > 1 ? 's' : ''}${liga}` };
+        // "hoy"/"en N días" según la fecha del KICKOFF en hora Colombia — el día
+        // de escaneo es UTC y etiquetaba "en 1 día" partidos de esta noche.
+        const hoyBog     = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+        const partidoBog = new Date(cf.date).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+        if (partidoBog === hoyBog) return { priority: 2, label: `📅 Juega HOY ${formatHour(cf.date)}${liga}` };
+        const dias = Math.max(1, Math.round((new Date(partidoBog) - new Date(hoyBog)) / 86400000));
+        return { priority: 1, label: `📆 Juega en ${dias} día${dias > 1 ? 's' : ''}${liga}` };
       }
     }
   } catch {}
@@ -1278,32 +1284,42 @@ async function findNextFixtureByDate(teamId, daysAhead = 14) {
   const cutoff = new Date();
   cutoff.setDate(cutoff.getDate() + daysAhead);
 
-  // 1. Partido en vivo hoy
+  // 1. Escaneo por FECHA de hoy → +3 días (cacheado): la vía confiable para el
+  // partido inminente. Antes solo se detectaba si YA estaba en vivo — uno que
+  // arrancaba en 20 min ("Not started") se saltaba y caía al fallback por
+  // equipo, que devolvía otro partido (ver bug Aurora vs Oriente Petrolero).
   try {
-    const today = new Date().toISOString().split('T')[0];
-    const allToday = await fetchFixturesByDate(today);
-    const live = allToday.find(m =>
-      (m.homeTeam.id === teamId || m.awayTeam.id === teamId) &&
-      LIVE_STATUSES.has(m.state?.description)
-    );
-    if (live) return hlToApif(live);
+    for (let d = 0; d <= 3; d++) {
+      const ds = new Date(Date.now() + d * 86400000).toISOString().split('T')[0];
+      const fixtures = await fetchFixturesByDate(ds).catch(() => []);
+      const propios = fixtures.filter(m =>
+        (m.homeTeam?.id === teamId || m.awayTeam?.id === teamId) &&
+        UPCOMING_STATUSES.has(m.state?.description)
+      );
+      if (propios.length) {
+        const live = propios.find(m => LIVE_STATUSES.has(m.state?.description));
+        const next = live || propios.sort((a, b) => new Date(a.date) - new Date(b.date))[0];
+        return hlToApif(next);
+      }
+    }
   } catch {}
 
-  // 2. Próximos partidos en casa
+  // 2. Fallback: consultas por equipo (local Y visitante COMBINADAS — antes se
+  // retornaba el primer partido de local sin mirar si había uno de visitante
+  // más próximo). limit 50: el endpoint no garantiza orden y con 10 el partido
+  // cercano podía quedar fuera de la muestra.
   try {
-    const { data } = await API.get('/matches', { params: { homeTeamId: teamId, limit: 10 } });
-    const next = (data.data || [])
-      .filter(m => UPCOMING_STATUSES.has(m.state?.description) && new Date(m.date) <= cutoff)
-      .sort((a, b) => new Date(a.date) - new Date(b.date))[0];
-    if (next) return hlToApif(next);
-  } catch {}
-
-  // 3. Próximos partidos fuera
-  try {
-    const { data } = await API.get('/matches', { params: { awayTeamId: teamId, limit: 10 } });
-    const next = (data.data || [])
-      .filter(m => UPCOMING_STATUSES.has(m.state?.description) && new Date(m.date) <= cutoff)
-      .sort((a, b) => new Date(a.date) - new Date(b.date))[0];
+    const [h, a] = await Promise.allSettled([
+      API.get('/matches', { params: { homeTeamId: teamId, limit: 50 } }),
+      API.get('/matches', { params: { awayTeamId: teamId, limit: 50 } }),
+    ]);
+    const pool = [
+      ...(h.status === 'fulfilled' ? (h.value.data?.data || []) : []),
+      ...(a.status === 'fulfilled' ? (a.value.data?.data || []) : []),
+    ];
+    const next = pool
+      .filter(m => UPCOMING_STATUSES.has(m.state?.description) && new Date(m.date) <= cutoff && new Date(m.date) >= new Date(Date.now() - 3 * 3600e3))
+      .sort((x, y) => new Date(x.date) - new Date(y.date))[0];
     if (next) return hlToApif(next);
   } catch {}
 
