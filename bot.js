@@ -278,9 +278,10 @@ function findLeagueId(name) {
 
 const LEAGUE_PRIORITY = {
   2486:100, 3337:95, 722432:90,
+  1635:93, // Mundial: el torneo con mejor cobertura de datos — antes 77, quedaba DEBAJO de clasificatorias de Conference con equipos de Gibraltar
   33973:88, 119924:87, 115669:86, 67162:85, 52695:84,
   11847:80, 10145:78,
-  1635:77, 8443:76, 4188:75, 5039:74,
+  8443:76, 4188:75, 5039:74,
   75672:70, 80778:69, 173537:68, 123328:67,
   61205:65, 223746:64, 109712:63, 204173:62, 216087:61,
   34824:55, 120775:54, 116520:53, 68013:52, 53546:51,
@@ -290,6 +291,20 @@ const LEAGUE_PRIORITY = {
   244170:29, 176941:28, 179494:27, 186302:26,
   102053:25, 90990:24, 96947:23, 29718:22,
 };
+
+// Prioridad EFECTIVA de un fixture: las fases previas de copas europeas heredaban
+// el tier de la Champions/Conference "grande" (100/90 → boost 1.15 de EV) con
+// equipos de Gibraltar/Andorra/San Marino — por eso desplazaban al Mundial en
+// picks del día. Ronda clasificatoria → tier de liga menor (35).
+function effectiveLeaguePriority(f) {
+  const base = LEAGUE_PRIORITY[f.leagueId] || 20;
+  const esEuroCup = f.leagueId === 2486 || f.leagueId === 3337 || f.leagueId === 722432;
+  const round = String(f.round ?? f.jornada ?? '');
+  if (esEuroCup && (!round || /qualif|prelim|play.?off|ronda previa|clasificat/i.test(round))) {
+    return Math.min(base, 35);
+  }
+  return base;
+}
 
 // Ligas excluidas de picks automáticos (picks de hoy, picks en vivo)
 // El bot sigue respondiendo si el usuario pregunta por estas ligas específicamente.
@@ -3484,6 +3499,10 @@ function buildPickCandidates(enrichedFixtures) {
 
       let o = hasRealOdds ? m.oddsVal : impliedFair;
       if (!o || o <= 1) continue;
+      // Cuota SINTÉTICA > 5.0 = probabilidad del modelo < ~20% sin que ningún
+      // bookmaker la valide — pura especulación invendible (visto en producción:
+      // "DNB Visitante est. ~17.74"). Con cuota real no aplica el tope.
+      if (!hasRealOdds && o > 5) continue;
 
       // Piso mínimo por mercado — aplica a cuotas reales Y sintéticas.
       // Antes solo aplicaba con hasRealOdds: los picks sintéticos (ej. DNB derivado
@@ -3617,7 +3636,8 @@ function buildPickCandidates(enrichedFixtures) {
       }
 
       // ── Tier multiplier de liga: penaliza ligas de baja cobertura ────────────
-      const leagueP   = LEAGUE_PRIORITY[f.leagueId] || 20;
+      // (effectiveLeaguePriority castiga fases previas de copas europeas)
+      const leagueP   = effectiveLeaguePriority(f);
       const tierMult  = leagueP >= 80 ? 1.15   // Tier 1-2: UCL, Libertadores, ligas top
                       : leagueP >= 60 ? 1.05   // Tier 3: Eredivisie, Belgian, Brasileirao
                       : leagueP >= 45 ? 1.00   // Tier 4: Championship, LaLiga2, Colombia A
@@ -4347,6 +4367,7 @@ PICKS QUE NUNCA DAS — aplica estos criterios internamente, sin mencionarlos al
 - BTTS cuando un equipo tiene más del 35% de partidos sin marcar en su contexto (casa o fuera)
 - Asian Handicap (AH) y Draw No Bet local (DNB_HOME) en picks automáticos del día. Solo usar DNB_AWAY si la probabilidad supera 75%
 - BTTS en La Liga cuando no son equipos ofensivos — la liga tiene solo 40% BTTS base, muy por debajo del umbral
+- ⛔ TARJETAS EN TORNEOS DE SELECCIONES (Mundial, Eurocopa, Copa América, Nations League, amistosos internacionales): PROHIBIDO TOTALMENTE, aunque el árbitro tenga historial cargado de tarjetas. Su historial viene de su liga doméstica; en torneos FIFA los árbitros reciben instrucción de contención y el mercado quiebra (36-40% de acierto medido). En ligas de CLUBES el mercado de tarjetas sigue permitido.
 
 ⛔ PROHIBIDO NARRAR EL PROCESO INTERNO — REGLA INQUEBRANTABLE:
 Si un pick no cumple los requisitos (cuota, stake, probabilidad), NO LO ESCRIBAS — ni siquiera para explicar que lo descartas o que "se redirige a otro mercado". El texto final SOLO contiene picks publicables. PROHIBIDO escribir: "DESCARTADO", "no supera el mínimo/umbral/piso", "la cuota no alcanza", "se redirige", "en el JSON", "los campos", "de la muestra". El cliente paga por picks accionables, no por ver tu proceso de decisión. Un pick a medio descartar confunde y destruye la credibilidad del producto.
@@ -4690,6 +4711,7 @@ Cuando el partido es de copa con pocos juegos en esa competición, el razonamien
 Los datos de la copa actual son complementarios. Si hay menos de 5 partidos en esa copa pero sí hay datos de liga doméstica → analiza y publica si el pick cumple stake 7+. Solo descarta si no existe ninguna fuente de datos confiable.
 Si el partido incluye "faseCopa": es una RONDA PREVIA/CLASIFICATORIA europea. Reglas duras:
 - posicionLocal/posicionVisitante son la posición en la LIGA DOMÉSTICA de cada club (usa posicionLocalNota/posicionVisitanteNota como texto) — PROHIBIDO citarlas como posición en Champions/Europa/Conference y PROHIBIDO mencionar tablas o puntos del torneo europeo (serían de la edición anterior).
+- ⛔ Las posiciones/puntos de los dos clubes son de LIGAS DISTINTAS (países distintos): PROHIBIDO compararlos entre sí ("aventaja por 15 puntos", "ambos pelean el título", "X va por encima de Y en la tabla") — no comparten tabla. Di "líder de su liga (Gibraltar)" y "3º de su liga (Irlanda)" por separado, y pondera el NIVEL de cada liga: ser líder de la liga de Gibraltar/Andorra/San Marino vale menos que media tabla de una liga profesional. Sus promedios de goles vienen inflados por el nivel de su liga — corrígelos mentalmente al proyectar.
 - statsLocal/statsVisitante con "_ligaFallback" o cuyo campo "liga" NO sea el torneo europeo son de la liga doméstica del club: cítalas como "en su liga" — es la base estadística correcta, NO digas "sin datos" si existen.
 - El nivel relativo se infiere de: posición doméstica de cada club, nivel de sus ligas de origen y el H2H. Un 2° de la liga kazaja vs un club montenegrino de media tabla NO son "dos equipos igualmente débiles".
 
@@ -4928,8 +4950,8 @@ REGLAS IRROMPIBLES:
 - La sección 📊 ANÁLISIS siempre muestra AMBOS equipos (▸ Local y ▸ Visitante) — nunca solo uno
 - Si motivacionLocal.estado o motivacionVisitante.estado es "desconocido" → no escribas "Sin datos de posición" — usa posicionLocal/posicionVisitante directamente o infiere del contexto
 - LA CUOTA: si "_syntheticOdds" es false (cuota real) → escribe exactamente el número del campo "odds", sin texto adicional. Si "_syntheticOdds" es true (cuota estimada) → escribe "est. ~X.XX" usando el valor del campo "odds" como referencia. Si odds es null → escribe "n/d". NUNCA inventes un número fuera de estos casos.
-- PROPS DE JUGADOR (propsJugador) — SOLO si el campo existe: añade al final una sección "💥 PROP DE JUGADOR" con: [jugador] — [mercado] | Cuota real: [cuotaReal] ([bookmaker]) | [racha]. Estas cuotas SÍ son reales multi-bookmaker — sin "est." ni "verifica en tu book". ⛔ PROHIBIDO inventar props que no estén en propsJugador.
-- TENDENCIAS DE EQUIPO (tendenciasEquipo) — SOLO si existe: sección "📈 TENDENCIA DE EQUIPO" con [mercado] | Cuota real: [cuotaReal] ([bookmaker]) | [racha]. Cuota real verificada. ⛔ PROHIBIDO inventar tendencias fuera del campo.
+- PROPS DE JUGADOR (propsJugador) — si el campo existe, la sección "💥 PROP DE JUGADOR" al final es OBLIGATORIA (omitirla es un error de formato): [jugador] — [mercado] | Cuota real: [cuotaReal] ([bookmaker]) | [racha]. Estas cuotas SÍ son reales multi-bookmaker — sin "est." ni "verifica en tu book". ⛔ PROHIBIDO inventar props que no estén en propsJugador. Si el campo NO existe, no hay sección.
+- TENDENCIAS DE EQUIPO (tendenciasEquipo) — si el campo existe, la sección "📈 TENDENCIA DE EQUIPO" es OBLIGATORIA: [mercado] | Cuota real: [cuotaReal] ([bookmaker]) | [racha]. Cuota real verificada. ⛔ PROHIBIDO inventar tendencias fuera del campo. Si una tendencia contradice uno de tus picks (ej. tendencia "Menos de 2.5 tarjetas" del rival vs tu pick Over tarjetas), NO publiques ese pick.
 - NO cambies el stake ni la cuota que viene en los datos
 - CUOTA MÍNIMA 1.65: NUNCA recomiendes un pick donde la cuota sea < 1.65. Si en el JSON llega un pick con odds < 1.65, omítelo completamente y no lo publiques. Una cuota de 1.15 (ej: DNB Real Madrid), 1.20 o 1.40 no tiene valor real — el motor ya los filtra pero si por error llegan, descártalos en silencio.
 - DNB/DC (Draw No Bet, Doble Oportunidad) son mercados legítimos CUANDO la cuota ≥ 1.65. Explica el valor: "el visitante gana a 2.50 pero el DNB a 1.75 nos da cobertura con buen EV". NUNCA digas que un DNB es "seguro" o "cómodo" — explica por qué el equipo tiene capacidad de ganar Y por qué la cuota tiene valor.
@@ -5429,7 +5451,7 @@ function validateStake(pick, probBlock) {
 
 // Valida y corrige stakes ANTES de publicar el mensaje.
 // Ejecuta el gate matemático + regla de máximo 1 stake 9+/10 por sesión.
-async function applyStakeGate(picksText, enriched, matchesCtx) {
+async function applyStakeGate(picksText, enriched, matchesCtx, opts = {}) {
   try {
     const extracted = await extractPicksFromText(picksText, matchesCtx);
     if (!extracted.length) return picksText;
@@ -5506,14 +5528,43 @@ async function applyStakeGate(picksText, enriched, matchesCtx) {
       return false;
     };
 
+    // Tarjetas en torneos de SELECCIONES: el motor las tiene vetadas (36-40%
+    // acierto, ROI -34% medido en el WC) pero el LLM las generaba igual desde
+    // las stats del árbitro del prompt. Gate determinista por liga del contexto.
+    const _INTL_SELECCIONES = /world cup|copa del mundo|mundial|copa am[eé]rica|nations league|eurocopa|gold cup|copa oro|friendlies(?! clubs)/i;
+    const tarjetasEnSelecciones = (x) => {
+      if (!['OVER_CARDS', 'UNDER_CARDS'].includes(x.mercado) && !/tarjetas?|cards?/i.test(x.seleccion || '')) return false;
+      if (!['OVER_CARDS', 'UNDER_CARDS'].includes(x.mercado) && x.mercado !== 'OTHER') return false;
+      const ctx = matchesCtx.find(m =>
+        (m.local || '').toLowerCase().includes((x.local || '').toLowerCase().split(' ')[0]) ||
+        (m.visitante || '').toLowerCase().includes((x.visitante || '').toLowerCase().split(' ')[0])
+      ) || matchesCtx[0];
+      return !!ctx && _INTL_SELECCIONES.test(ctx.liga || '');
+    };
+
     const invalid = extracted.filter(x => {
       const st = finalStakes.get(x) ?? x.stake;
       const stakeBajo = st != null && st <= 5;
       if (ganadorYaGanando(x)) { x._motivo = 'victoria/DNB/DC del equipo que ya va ganando (cuota en vivo ~1.1-1.35, sin valor)'; return true; }
+      if (tarjetasEnSelecciones(x)) { x._motivo = 'tarjetas en torneo de selecciones (mercado vetado: 36-40% acierto medido, FIFA instruye contención arbitral)'; return true; }
       if (x.esCombinada) return stakeBajo; // combinada: su cuota es producto de patas — solo gate de stake
       const cuotaBaja = x.cuota != null && x.cuota > 1 && x.cuota < PUBLISH_MIN_ODDS;
       return cuotaBaja || stakeBajo;
     });
+
+    // ── TOPE DE PICKS INDIVIDUALES (partido específico = exactamente 3) ──────
+    // El prompt exige 3 pero el LLM a veces emite 4+. Los excedentes de menor
+    // stake se eliminan del texto de forma determinista.
+    const maxPicks = opts.maxPicks || null;
+    if (maxPicks) {
+      const validos = extracted.filter(x => !x.esCombinada && !invalid.includes(x));
+      if (validos.length > maxPicks) {
+        const sobrantes = [...validos]
+          .sort((a, b) => (finalStakes.get(b) ?? b.stake ?? 0) - (finalStakes.get(a) ?? a.stake ?? 0))
+          .slice(maxPicks);
+        for (const s of sobrantes) { s._motivo = `excede el máximo de ${maxPicks} picks por partido (menor stake)`; invalid.push(s); }
+      }
+    }
 
     // ── SANITIZADOR: lenguaje de maquinaria interna que jamás debe llegar al cliente ──
     // Casos reales vistos en producción (8-jul): "queda DESCARTADO — cuota 1.64 no
@@ -6165,7 +6216,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   // ── FASE 1: cuotas — The Odds API (bulk) + API-Football (fallback) ───────────
   // Ordenar todos los partidos disponibles por prioridad de liga
   const oddsPool = [...fixtures]
-    .sort((a, b) => (LEAGUE_PRIORITY[b.leagueId] || 0) - (LEAGUE_PRIORITY[a.leagueId] || 0))
+    .sort((a, b) => effectiveLeaguePriority(b) - effectiveLeaguePriority(a))
     .slice(0, 80); // revisar hasta 80 partidos buscando cuotas
 
   await bot.sendMessage(chatId, `📊 ${fixtures.length} partidos en ligas monitoreadas. Consultando cuotas...`);
@@ -6862,7 +6913,7 @@ async function handleSistemaHoy(chatId) {
 
   // 2. Ordenar por prioridad de liga y tomar top 20 para analizar
   const candidates = [...allFixtures]
-    .sort((a, b) => (LEAGUE_PRIORITY[b.leagueId] || 0) - (LEAGUE_PRIORITY[a.leagueId] || 0))
+    .sort((a, b) => effectiveLeaguePriority(b) - effectiveLeaguePriority(a))
     .slice(0, 20);
 
   await bot.sendMessage(chatId, `📊 ${allFixtures.length} partidos encontrados. Analizando top ${candidates.length} con estadísticas + cuotas...`);
@@ -7346,6 +7397,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       jornadasRestantes:  motivLocal.jornadas_restantes ?? null,
       ...(isSingleLegFinal && { esPartidoUnico: 'FINAL DE COPA — partido único, no hay vuelta. Presión máxima para ambos.' }),
       ...(_esFasePreviaEuro && { faseCopa: 'Ronda previa/clasificatoria europea — PROHIBIDO citar tabla o puntos del torneo europeo (serían de la edición anterior). El nivel de cada club se evalúa con statsLigaDomestica y el nivel de sus ligas de origen.' }),
+      ...(isNationalTeamMatch && isNeutralVenue(leagueId, homeTeam) && { cancha_neutral: true }),
     },
     ...(predData && { prediccionAPIFootball: predData }),
     h2h:            h2hData,
@@ -7518,7 +7570,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam,
     liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date,
     ...(isLive && { marcadorVivo: { home: liveHomeGoals, away: liveAwayGoals } }),
-  }]);
+  }], { maxPicks: 3 });
 
   try {
     await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
