@@ -1189,16 +1189,18 @@ async function searchTeam(name, countryHint = '') {
 async function getTeamPlayingPriority(teamId) {
   try {
     const live = liveCache.raw || [];
-    if (live.some(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId)) return { priority: 3, label: '🔴 En vivo ahora' };
+    const lf = live.find(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId);
+    if (lf) return { priority: 3, label: `🔴 En vivo ahora${lf.league?.name ? ` · ${lf.league.name}` : ''}` };
     const today = todayDate();
     const todayFixtures = dateCache.get(today) || [];
-    if (todayFixtures.some(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId)) return { priority: 2, label: '📅 Juega hoy' };
+    const tf = todayFixtures.find(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId);
+    if (tf) return { priority: 2, label: `📅 Juega hoy${tf.league?.name ? ` · ${tf.league.name}` : ''}` };
     for (let d = 1; d <= 2; d++) {
       const dt = new Date(); dt.setDate(dt.getDate() + d);
       const ds = dt.toISOString().split('T')[0];
-      const cached = dateCache.get(ds) || [];
-      if (cached.some(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId)) {
-        return { priority: 1, label: `📆 Juega en ${d} día${d>1?'s':''}` };
+      const cf = (dateCache.get(ds) || []).find(m => m.homeTeam?.id === teamId || m.awayTeam?.id === teamId);
+      if (cf) {
+        return { priority: 1, label: `📆 Juega en ${d} día${d>1?'s':''}${cf.league?.name ? ` · ${cf.league.name}` : ''}` };
       }
     }
   } catch {}
@@ -10655,14 +10657,19 @@ bot.on('callback_query', async (query) => {
         { chat_id: chatId, message_id: query.message.message_id }
       ).catch(() => {});
 
-      // Obtener datos del equipo directo de la API (sin Map en memoria)
-      const { data: apiRes } = await API.get('/teams', { params: { id: teamId } });
-      const teamData = (apiRes.response || [])[0];
-
-      if (!teamData) {
+      // Obtener datos del equipo directo de la API (sin Map en memoria).
+      // OJO: Highlightly usa GET /teams/{id} — el anterior /teams?id=X devolvía
+      // 400 "property id should not exist" y el parseo .response era formato
+      // API-Football: TODOS los clicks de botón terminaban en "Error al procesar".
+      const { data: apiRes } = await API.get('/teams/' + teamId);
+      const raw = Array.isArray(apiRes) ? apiRes[0]
+        : Array.isArray(apiRes?.data) ? apiRes.data[0]
+        : apiRes?.data || apiRes;
+      if (!raw?.id || !raw?.name) {
         await bot.sendMessage(chatId, '❌ No pude cargar el equipo. Escribe la pregunta de nuevo.');
         return;
       }
+      const teamData = { team: { id: raw.id, name: raw.name } };
 
       console.log(`[callback_query] team=${teamData.team.name} intencion=${intentCode}`);
 
