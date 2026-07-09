@@ -4823,6 +4823,10 @@ Eres un tipster en vivo. Siempre das picks concretos y accionables — NUNCA ter
 
 ⛔ FORMATO EXCLUSIVO IN-PLAY: PROHIBIDO incluir bloques "🎰 COMBINADA" y "🔥 PICK ESTRELLA DEL DÍA" en análisis en vivo — esos bloques son EXCLUSIVOS de los picks del día pre-partido. Un análisis in-play emite solo picks individuales del partido.
 
+⛔ RESULTADO DEL EQUIPO QUE YA GANA — REGLA INCONDICIONAL (haya o no cuotas en los datos):
+PROHIBIDO recomendar victoria, DNB, doble oportunidad o "no pierde" del equipo que YA va ganando en el marcador. Su cuota en vivo real es 1.10-1.35 — no existe valor, y recomendarla hace ver al tipster como aficionado. Si el dominio del que va ganando es la historia del partido, tradúcelo a mercados con valor: siguiente gol, over/under de goles restantes, corners o hándicap -1.5 del líder (ese sí paga >1.65).
+Igual de PROHIBIDO: citar probabilidades del modelo pre-partido (probLocalGana/probVisitanteGana del modeloPoisson) para justificar picks de resultado en vivo — con el marcador ya alterado esas probabilidades no existen.
+
 CUOTAS EN VIVO:
 ⛔ PROHIBIDO escribir "cuota real verificada" o "cuota real disponible" basándote en lineasXxxVivo — esas son cuotas matemáticas de breakeven del modelo (campo "cuotaJustaOver"), NO cuotas reales. Solo puedes decir "cuota real" si el dato viene de cuotasVivo.
 ⛔ COHERENCIA CUOTA-PROBABILIDAD: la cuota estimada DEBE ser exactamente el valor del campo cuotaJustaOver/cuotaJustaUnder del JSON (= 100/probabilidad). PROHIBIDO escribir una cuota estimada distinta a ese campo. Si citas "53.4% de probabilidad", la cuota estimada coherente es ~1.87 (100/53.4) — nunca 2.15 ni otro número inventado.
@@ -5354,9 +5358,35 @@ async function applyStakeGate(picksText, enriched, matchesCtx) {
     // Las reglas de prompt no bastan (el LLM las viola bajo instrucciones en
     // conflicto). Antes solo se eliminaba por cuota y las combinadas se saltaban
     // todo: una "COMBINADA ... Stake: 5/10" pasaba intacta a publicación.
+    // Pick de resultado a favor del equipo que YA va ganando (en vivo): la cuota
+    // real cae a 1.10-1.35 — cero valor, y suele salir sin cuota visible porque
+    // el LLM no la tiene. La regla de prompt existe pero está anidada bajo
+    // "si cuotasVivo tiene datos"; esta versión es determinista e incondicional.
+    const ganadorYaGanando = (x) => {
+      const ctx = matchesCtx.find(m => m.marcadorVivo && (
+        (m.local || '').toLowerCase().includes((x.local || '').toLowerCase().split(' ')[0]) ||
+        (m.visitante || '').toLowerCase().includes((x.visitante || '').toLowerCase().split(' ')[0])
+      ));
+      const sc = ctx?.marcadorVivo;
+      if (!sc || sc.home == null || sc.away == null || sc.home === sc.away) return false;
+      const lider = sc.home > sc.away ? 'home' : 'away';
+      if (lider === 'home' && ['HOME_WIN', 'DNB_HOME'].includes(x.mercado)) return true;
+      if (lider === 'away' && ['AWAY_WIN', 'DNB_AWAY'].includes(x.mercado)) return true;
+      // Doble oportunidad / "no pierde" del lado que lidera (el extractor las marca OTHER)
+      if (x.mercado === 'OTHER' && /doble oportunidad|no pierde|1x\b|x2\b|dnb/i.test(x.seleccion || '')) {
+        const equipoLider = lider === 'home' ? (ctx.local || '') : (ctx.visitante || '');
+        const primeraPalabra = equipoLider.toLowerCase().split(' ')[0];
+        if (primeraPalabra && (x.seleccion || '').toLowerCase().includes(primeraPalabra)) return true;
+        if (lider === 'home' && /1x\b/i.test(x.seleccion || '')) return true;
+        if (lider === 'away' && /x2\b/i.test(x.seleccion || '')) return true;
+      }
+      return false;
+    };
+
     const invalid = extracted.filter(x => {
       const st = finalStakes.get(x) ?? x.stake;
       const stakeBajo = st != null && st <= 5;
+      if (ganadorYaGanando(x)) { x._motivo = 'victoria/DNB/DC del equipo que ya va ganando (cuota en vivo ~1.1-1.35, sin valor)'; return true; }
       if (x.esCombinada) return stakeBajo; // combinada: su cuota es producto de patas — solo gate de stake
       const cuotaBaja = x.cuota != null && x.cuota > 1 && x.cuota < PUBLISH_MIN_ODDS;
       return cuotaBaja || stakeBajo;
@@ -5380,14 +5410,14 @@ async function applyStakeGate(picksText, enriched, matchesCtx) {
     const leaks = LEAK_PATTERNS.filter(re => re.test(correctedText)).map(re => re.source);
 
     if (invalid.length || leaks.length) {
-      if (invalid.length) console.log(`🚫 Gate duro: ${invalid.length} pick(s) inválido(s) (cuota<${PUBLISH_MIN_ODDS} o stake≤5): ${invalid.map(p => `${p.seleccion}@${p.cuota} stake ${finalStakes.get(p) ?? p.stake}`).join(', ')}`);
+      if (invalid.length) console.log(`🚫 Gate duro: ${invalid.length} pick(s) inválido(s): ${invalid.map(p => `${p.seleccion}@${p.cuota} stake ${finalStakes.get(p) ?? p.stake}${p._motivo ? ` [${p._motivo}]` : ''}`).join(', ')}`);
       if (leaks.length)   console.log(`🧹 Sanitizador: lenguaje interno detectado (${leaks.length} patrón(es)): ${leaks.slice(0, 4).join(' | ')}`);
       const rewritten = await haiku(
         `Eres un editor de texto quirúrgico. Recibes un análisis de picks deportivos y dos listas de problemas. Devuelve el MISMO texto, palabra por palabra, con estas únicas diferencias:
 1. Los bloques completos de los picks INVÁLIDOS (desde su encabezado "🎯 PICK..." o "🎰 COMBINADA..." hasta su última línea) desaparecen por completo. Un pick que se describe a sí mismo como descartado, rechazado o "redirigido" también es un bloque inválido: elimínalo entero.
 2. Las frases con LENGUAJE INTERNO desaparecen o se reformulan en lenguaje de cliente: nunca menciones JSON, campos de datos, muestras, umbrales/mínimos/pisos de cuota o de publicación, descartes ni redirecciones de mercado. "sin datos disponibles en el JSON" → "sin datos disponibles". Si una frase solo narra maquinaria interna, elimínala.
 No renumeres, no resumas, no añadas notas ni explicaciones. Si todos los picks son inválidos, devuelve solo la parte de contexto/análisis con la línea "⛔ Sin picks de valor en este partido."`,
-        `PICKS INVÁLIDOS A ELIMINAR (cuota < ${PUBLISH_MIN_ODDS} o stake ≤ 5):\n${invalid.length ? invalid.map(p => `- ${p.seleccion} (cuota ${p.cuota}, stake ${finalStakes.get(p) ?? p.stake}) del partido ${p.local} vs ${p.visitante}`).join('\n') : '(ninguno)'}\n\nLENGUAJE INTERNO DETECTADO (patrones): ${leaks.length ? leaks.join(' | ') : '(ninguno)'}\n\nTEXTO:\n${correctedText}`,
+        `PICKS INVÁLIDOS A ELIMINAR (cuota < ${PUBLISH_MIN_ODDS}, stake ≤ 5, o resultado del equipo que ya gana):\n${invalid.length ? invalid.map(p => `- ${p.seleccion} (cuota ${p.cuota}, stake ${finalStakes.get(p) ?? p.stake})${p._motivo ? ` — ${p._motivo}` : ''} del partido ${p.local} vs ${p.visitante}`).join('\n') : '(ninguno)'}\n\nLENGUAJE INTERNO DETECTADO (patrones): ${leaks.length ? leaks.join(' | ') : '(ninguno)'}\n\nTEXTO:\n${correctedText}`,
         8000 // la reescritura devuelve el texto COMPLETO — con los 800 default se truncaba y el guard de longitud la descartaba (gate fail-open)
       ).catch(() => null);
       if (rewritten && rewritten.length > correctedText.length * 0.3) {
@@ -7295,7 +7325,11 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   );
 
   // Gate duro pre-publicación: valida stakes y elimina picks con cuota < 1.65
-  analysis = await applyStakeGate(analysis, [fixtureForEngine], [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]);
+  analysis = await applyStakeGate(analysis, [fixtureForEngine], [{
+    fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam,
+    liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date,
+    ...(isLive && { marcadorVivo: { home: liveHomeGoals, away: liveAwayGoals } }),
+  }]);
 
   try {
     await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
@@ -9341,7 +9375,12 @@ async function handleImage(msg) {
     );
     // Gate pre-publicación (antes el flujo de imagen enviaba el texto crudo:
     // así salió una combinada con stake 5 y cuotas bajo el piso).
-    analysis = await applyStakeGate(analysis, [], [{ fixtureId: liveFixtureId, local: matchData.home_team, visitante: matchData.away_team, liga: 'En vivo (imagen)', fechaPartido: new Date().toISOString() }]);
+    analysis = await applyStakeGate(analysis, [], [{
+      fixtureId: liveFixtureId, local: matchData.home_team, visitante: matchData.away_team,
+      liga: 'En vivo (imagen)', fechaPartido: new Date().toISOString(),
+      ...(matchData.score_home != null && matchData.score_away != null &&
+        { marcadorVivo: { home: +matchData.score_home, away: +matchData.score_away } }),
+    }]);
     await sendLong(chatId, analysis, { parse_mode: 'Markdown' });
     _imageAnalysisRecent.set(dedupKey, { ts: Date.now(), texto: analysis });
     if (_imageAnalysisRecent.size > 200) _imageAnalysisRecent.clear(); // límite de memoria
