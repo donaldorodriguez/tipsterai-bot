@@ -1889,6 +1889,12 @@ async function getApiPrediction(fixtureId) {
       _venue:   detail.venue?.name    || detail.stadium?.name  || detail.ground?.name   || detail.location?.name  || null,
       _city:    detail.venue?.city    || detail.stadium?.city  || detail.ground?.city   || detail.location?.city  || detail.city || null,
       _referee: detail.referee?.name  || detail.refereeName    || detail.officials?.[0]?.name || null,
+      // Clima del partido (Highlightly lo trae y nunca se usaba) — lluvia/viento empujan al Under
+      _forecast: detail.forecast
+        ? [detail.forecast.status, detail.forecast.temperature].filter(Boolean).join(', ')
+        : null,
+      _news: (Array.isArray(detail.news) ? detail.news : []).slice(0, 3)
+        .map(nw => nw.title || nw.headline).filter(Boolean).join(' | ') || null,
     };
 
     // predictions puede ser array [{...}] o un objeto solo {...} — normalizar a array
@@ -2235,6 +2241,85 @@ async function getNationalTeamRecentStats(teamId, last = 20) {
     };
   } catch (e) {
     console.warn(`⚠️ getNationalTeamRecentStats(${teamId}): ${e.message}`);
+    return null;
+  }
+}
+
+// ─── Stats REALES por equipo desde sus últimos partidos ──────────────────────
+// /teams/statistics de Highlightly SOLO trae partidos+goles (verificado hasta
+// con Liverpool) — corners/tarjetas/tiros por equipo salían de heurísticas.
+// La data real está en /matches/{id} (statistics de 39 campos + events con
+// minuto de cada gol) — una llamada por partido histórico. Cache 24h/equipo.
+const _teamRealStatsCache = new Map(); // teamId → { ts, data }
+
+async function getTeamRealRecentStats(teamId, n = 4) {
+  const cached = _teamRealStatsCache.get(teamId);
+  if (cached && Date.now() - cached.ts < 24 * 3600e3) return cached.data;
+  try {
+    const fixtures = await getTeamLastFixtures(teamId, n);
+    if (fixtures.length < 3) { _teamRealStatsCache.set(teamId, { ts: Date.now(), data: null }); return null; }
+
+    let corners = 0, cornersN = 0, cards = 0, cardsN = 0;
+    let shots = 0, shotsOn = 0, shotsN = 0, xg = 0, xgN = 0, fouls = 0, foulsN = 0, bigCh = 0;
+    let golesTempranos = 0, golesTardios = 0, golesEq = 0;
+
+    for (const f of fixtures) {
+      const m = await fetchMatchById(f.fixtureId).catch(() => null);
+      if (!m) continue;
+      const stArr = m.statistics || [];
+      const mySt = stArr.find(s => s.team?.id === teamId);
+      if (mySt?.statistics) {
+        const raw = {};
+        mySt.statistics.forEach(s => { raw[s.displayName] = s.value; });
+        if (raw['Corners'] != null) { corners += raw['Corners']; cornersN++; }
+        if (raw['Yellow cards'] != null || raw['Red cards'] != null) {
+          cards += (raw['Yellow cards'] || 0) + (raw['Red cards'] || 0); cardsN++;
+        }
+        if (raw['Shots on target'] != null) {
+          shotsOn += raw['Shots on target'];
+          shots   += (raw['Shots on target'] || 0) + (raw['Shots off target'] || 0) + (raw['Blocked shots'] || 0);
+          shotsN++;
+        }
+        const xgVal = parseFloat(raw['Expected Goals']);
+        if (!isNaN(xgVal)) { xg += xgVal; xgN++; }
+        if (raw['Fouls'] != null) { fouls += raw['Fouls']; foulsN++; }
+        if (raw['Big Chances Created'] != null) bigCh += raw['Big Chances Created'];
+      }
+      // Timing de goles propios (events trae minuto por gol)
+      for (const ev of (m.events || [])) {
+        if (ev.type !== 'Goal' || ev.team?.id !== teamId) continue;
+        golesEq++;
+        const min = parseInt(String(ev.time).split('+')[0]) || 0;
+        if (min <= 30) golesTempranos++;
+        if (min >= 75) golesTardios++;
+      }
+      await new Promise(r => setTimeout(r, 120)); // rate limit Highlightly
+    }
+
+    const out = {
+      partidosMuestra: fixtures.length,
+      ...(cornersN > 0 && { cornersPerGame:  +(corners / cornersN).toFixed(2) }),
+      ...(cardsN   > 0 && { tarjetasPerGame: +(cards / cardsN).toFixed(2) }),
+      ...(shotsN   > 0 && { tirosPerGame: +(shots / shotsN).toFixed(2), tirosArcoPerGame: +(shotsOn / shotsN).toFixed(2) }),
+      ...(xgN      > 0 && { xgPerGame: +(xg / xgN).toFixed(2) }),
+      ...(foulsN   > 0 && { faltasPerGame: +(fouls / foulsN).toFixed(2) }),
+      ...(bigCh    > 0 && { ocasionesClarasEnMuestra: bigCh }),
+      ...(golesEq  > 0 && {
+        perfilGoles: {
+          goles: golesEq,
+          tempranos_min1a30: golesTempranos,
+          tardios_min75mas:  golesTardios,
+          ...(golesTardios / golesEq >= 0.4 ? { nota: 'equipo que marca tarde (final del 2T)' }
+            : golesTempranos / golesEq >= 0.4 ? { nota: 'equipo que marca temprano (1T)' } : {}),
+        },
+      }),
+    };
+    const data = Object.keys(out).length > 1 ? out : null;
+    _teamRealStatsCache.set(teamId, { ts: Date.now(), data });
+    if (data) console.log(`📐 Stats reales equipo ${teamId}: corners ${data.cornersPerGame ?? '—'}/p, tarjetas ${data.tarjetasPerGame ?? '—'}/p, xG ${data.xgPerGame ?? '—'}/p (${fixtures.length} partidos)`);
+    return data;
+  } catch (e) {
+    console.warn(`getTeamRealRecentStats(${teamId}): ${e.message}`);
     return null;
   }
 }
@@ -4290,6 +4375,8 @@ MERCADOS DE RESULTADO:
 17. Asian Handicap -0.5 local — si prob victoria local > 70%
 18. Asian Handicap +0.5 visitante — si visitante raramente pierde por 2+
 
+FUENTE PRIORITARIA PARA CORNERS/TARJETAS/TIROS: si el JSON incluye "statsRealesUltimos" (dentro de statsLocal/statsVisitante) o "statsRealesUltimosLocal/Visitante", son promedios MEDIDOS de los últimos partidos reales del equipo (cornersPerGame, tarjetasPerGame, xgPerGame, faltasPerGame, tirosPerGame y perfilGoles con timing temprano/tarde) — úsalos como fuente principal para estos mercados y cítalos. El "perfilGoles.nota" (equipo que marca temprano/tarde) es ideal para mercados de 1T/2T.
+
 MERCADOS DE CORNERS:
 19. Corners Over/Under total (9.5, 10.5, 11.5) — suma promedios local casa + visitante fuera
 20. Corners local Over/Under específico (ej. Local Over 4.5 córners) — si el local promedia +5.5 córners en casa
@@ -6164,10 +6251,36 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   // Elo de selecciones (solo se usa en torneos de selecciones; 1 fetch/24h)
   const eloMap = await getEloMap();
 
+  // ── Stats REALES por equipo para el top-12 de fixtures ──────────────────────
+  // /teams/statistics solo trae goles → corners/tarjetas por equipo corrían con
+  // heurísticas y el motor solo confiaba en mercados de goles (52% de los picks).
+  // Para los 12 fixtures mejor puntuados se miden promedios reales de los
+  // últimos 4 partidos (cache 24h/equipo). Selecciones ya los tienen.
+  await bot.sendMessage(chatId, `📐 Midiendo corners/tarjetas/xG reales de los equipos principales...`);
+  const realStatsMap = new Map();
+  for (const f of selected.slice(0, 12).filter(x => !NATIONAL_LEAGUES_HOY.has(x.leagueId))) {
+    for (const tid of [f.homeId, f.awayId]) {
+      if (tid == null || realStatsMap.has(tid)) continue;
+      realStatsMap.set(tid, await getTeamRealRecentStats(tid, 4).catch(() => null));
+    }
+  }
+  console.log(`📐 Stats reales: ${[...realStatsMap.values()].filter(Boolean).length}/${realStatsMap.size} equipos con datos`);
+
   // Construir enriched con probabilidades extendidas (HT + corners)
   const enriched = selected.map((f, i) => {
-    const hStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
-    const aStats = statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
+    let hStats = statsResults[i * 2].status === 'fulfilled' ? statsResults[i * 2].value : null;
+    let aStats = statsResults[i * 2 + 1].status === 'fulfilled' ? statsResults[i * 2 + 1].value : null;
+
+    // Merge de stats reales medidas (corners/tarjetas/xG/faltas/perfil de goles)
+    const realH = realStatsMap.get(f.homeId), realA = realStatsMap.get(f.awayId);
+    if (hStats && realH) hStats = { ...hStats,
+      ...(realH.cornersPerGame  != null && { cornersPerGame: realH.cornersPerGame }),
+      ...(realH.tarjetasPerGame != null && { tarjetasAmPG:   realH.tarjetasPerGame }),
+      statsRealesUltimos: realH };
+    if (aStats && realA) aStats = { ...aStats,
+      ...(realA.cornersPerGame  != null && { cornersPerGame: realA.cornersPerGame }),
+      ...(realA.tarjetasPerGame != null && { tarjetasAmPG:   realA.tarjetasPerGame }),
+      statsRealesUltimos: realA };
 
     // ── Lambdas base (promedios de temporada) ──
     const hFor  = parseFloat(hStats?.golesAnotadosHome) || 1.3;
@@ -6322,6 +6435,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
       if (pred._venue)   enriched[i].estadio = pred._venue;
       if (pred._city)    enriched[i].ciudad  = pred._city;
       if (pred._referee) enriched[i].arbitro = pred._referee;
+      if (pred._forecast) enriched[i].clima  = pred._forecast;
       enriched[i].prediccionAPI = pred;
       // Si la API da xG esperados, recalcular probs blending 40% API + 60% nuestro Poisson
       if (pred.goals_home != null && pred.goals_away != null) {
@@ -7060,6 +7174,13 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const homeBaseForNat  = homeStatsData;
   const awayBaseForNat  = awayStatsData;
 
+  // ── Stats REALES medidas de los últimos partidos (corners/tarjetas/xG/faltas
+  // por equipo + perfil de timing de goles). /teams/statistics no las trae.
+  const [homeRealStats, awayRealStats] = await Promise.all([
+    getTeamRealRecentStats(homeId, 5).catch(() => null),
+    getTeamRealRecentStats(awayId, 5).catch(() => null),
+  ]);
+
   const apiReferee = nextRaw.fixture.referee || null;
   const referee = predData?._referee || apiReferee || null;
   const refereeStats = referee ? await getRefereeCardStats(referee).catch(() => null) : null;
@@ -7239,6 +7360,13 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       : null,
     ...(homeDomStats && { statsLocalLigaDomestica:     { ...homeDomStats,     _fuente: 'promedio liga doméstica' } }),
     ...(awayDomStats && { statsVisitanteLigaDomestica: { ...awayDomStats,     _fuente: 'promedio liga doméstica' } }),
+    // Promedios MEDIDOS de los últimos partidos (corners, tarjetas, xG, faltas,
+    // perfil de timing de goles) — la fuente más confiable para mercados de
+    // corners/tarjetas/HT por equipo
+    ...(homeRealStats && { statsRealesUltimosLocal:     homeRealStats }),
+    ...(awayRealStats && { statsRealesUltimosVisitante: awayRealStats }),
+    ...(predData?._forecast && { clima: predData._forecast }),
+    ...(predData?._news && { noticiasPartido: predData._news }),
     ultimosPartidosLocal:     homeLastFixtures,
     ultimosPartidosVisitante: awayLastFixtures,
     estadisticasVivo: liveStatsData,
@@ -7338,10 +7466,22 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     }
   }
   const extProbs = calcExtendedProbs(hFor, hAgt, aFor, aAgt, nextRaw.league?.name || '', {
-    homeCornersPG: parseFloat(_bestHomeStats?.cornersPerGameHome ?? _bestHomeStats?.cornersPerGame) || null,
-    awayCornersPG: parseFloat(_bestAwayStats?.cornersPerGameAway ?? _bestAwayStats?.cornersPerGame) || null,
+    // Prioridad: corners MEDIDOS de los últimos 5 partidos > promedios de temporada
+    homeCornersPG: homeRealStats?.cornersPerGame
+      ?? (parseFloat(_bestHomeStats?.cornersPerGameHome ?? _bestHomeStats?.cornersPerGame) || null),
+    awayCornersPG: awayRealStats?.cornersPerGame
+      ?? (parseFloat(_bestAwayStats?.cornersPerGameAway ?? _bestAwayStats?.cornersPerGame) || null),
     neutral:       isNeutralVenue(leagueId, homeTeam),
   });
+
+  // Merge de stats reales al motor: tarjetas/corners medidos alimentan los
+  // candidatos de team_cards/team_corners (antes iban con heurística de liga)
+  const _engineHomeStats = { ...(homeDomStats || homeStatsData),
+    ...(homeRealStats?.cornersPerGame  != null && { cornersPerGame: homeRealStats.cornersPerGame }),
+    ...(homeRealStats?.tarjetasPerGame != null && { tarjetasAmPG:   homeRealStats.tarjetasPerGame }) };
+  const _engineAwayStats = { ...(awayDomStats || awayStatsData),
+    ...(awayRealStats?.cornersPerGame  != null && { cornersPerGame: awayRealStats.cornersPerGame }),
+    ...(awayRealStats?.tarjetasPerGame != null && { tarjetasAmPG:   awayRealStats.tarjetasPerGame }) };
 
   const fixtureForEngine = {
     fixtureId:      nextRaw.fixture.id,
@@ -7350,8 +7490,8 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     local:          homeTeam,
     visitante:      awayTeam,
     hora:           formatHour(nextRaw.fixture.date),
-    statsLocal:     withHomeContext(homeDomStats || homeStatsData),
-    statsVisitante: withAwayContext(awayDomStats || awayStatsData),
+    statsLocal:     withHomeContext(_engineHomeStats),
+    statsVisitante: withAwayContext(_engineAwayStats),
     _extendedProbs: extProbs,
     cuotasReales:   realOdds || undefined,
   };
