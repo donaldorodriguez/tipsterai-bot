@@ -4099,15 +4099,19 @@ function selectGoalMarket(homeTeam, awayTeam, homeGoals, awayGoals, pGoal, elaps
  *
  * @returns {object|null} datos de alerta o null si el partido no está activo
  */
-function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats) {
+function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats, opts = {}) {
+  // opts.explain: en vez de null, devuelve { _rechazado, ... } para que el
+  // handler pueda explicar al usuario POR QUÉ no hay alertas (antes: mensaje
+  // genérico "no hay cuotas" con 20 partidos en juego).
+  const reject = (motivo, extra = {}) => opts.explain ? { _rechazado: motivo, ...extra } : null;
   const timeInfo = matchTimeInfo(fixture.status, fixture.elapsed);
-  if (!timeInfo) return null;
+  if (!timeInfo) return reject('sin_tiempo');
 
   const { period, remaining, total } = timeInfo;
   const elapsed     = fixture.elapsed || 1;
 
   // No recomendar partidos después del minuto 75
-  if (elapsed > 75) return null;
+  if (elapsed > 75) return reject('min_75', { minuto: elapsed });
   const homeGoals   = fixture.homeGoals ?? 0;
   const awayGoals   = fixture.awayGoals ?? 0;
   const totalGoals  = homeGoals + awayGoals;
@@ -4188,7 +4192,9 @@ function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats) {
   const pGoal = Math.min(pRaw + bonus, 0.94);
   const impliedOdds = pGoal > 0 ? +(1 / pGoal).toFixed(2) : 99;
 
-  if (impliedOdds <= 1.50) return null;  // cuota mínima >1.50 para alertas de gol
+  // Cuota mínima >1.50: si la prob de gol es muy alta (partido temprano con
+  // mucho tiempo por delante), la cuota no paga — sin valor apostable.
+  if (impliedOdds <= 1.50) return reject('cuota_baja', { pGoal: +(pGoal * 100).toFixed(0), cuota: impliedOdds, minuto: elapsed });
 
   const { market, impliedOdds: mktOdds, overLine, tipo } = selectGoalMarket(
     fixture.homeTeam, fixture.awayTeam,
@@ -7860,6 +7866,7 @@ async function handleAlertaGol(chatId) {
 
   // 3. Calcular alerta de gol para cada partido
   const alerts = [];
+  const rechazos = []; // para el mensaje informativo cuando no hay alertas
   for (let i = 0; i < candidates.length; i++) {
     const f = candidates[i];
     const parsed        = parseFixture(f);
@@ -7868,19 +7875,38 @@ async function handleAlertaGol(chatId) {
     const homeStatsData = homeStatsResults[i].status  === 'fulfilled' ? homeStatsResults[i].value   : null;
     const awayStatsData = awayStatsResults[i].status  === 'fulfilled' ? awayStatsResults[i].value   : null;
 
-    const alert = calcGoalAlert(parsed, liveStats, homeStatsData, awayStatsData);
-    if (alert && alert.pGoal >= 55) {
+    const alert = calcGoalAlert(parsed, liveStats, homeStatsData, awayStatsData, { explain: true });
+    if (alert && !alert._rechazado && alert.pGoal >= 55) {
       // Adjuntar resumen de eventos al alert para enriquecer el contexto de Claude
       const evResumen = rawEvents.length > 0 ? summarizeEvents(rawEvents, parsed.homeTeam, parsed.awayTeam) : null;
       if (evResumen) alert.eventosPartido = evResumen;
       alerts.push(alert);
+    } else {
+      // Clasificar el rechazo para el mensaje informativo
+      const motivo = alert?._rechazado || (alert ? 'prob_baja' : 'sin_datos');
+      rechazos.push({ partido: `${parsed.homeTeam} vs ${parsed.awayTeam}`, minuto: alert?.minuto ?? parsed.elapsed, motivo, pGoal: alert?.pGoal, cuota: alert?.cuota });
     }
   }
 
   if (alerts.length === 0) {
-    return bot.sendMessage(
+    // Mensaje informativo: POR QUÉ no hay alerta y cuándo reintentar —
+    // "no hay cuotas" a secas parecía un fallo del bot con 20 partidos en juego.
+    const cuentas = {};
+    for (const r of rechazos) cuentas[r.motivo] = (cuentas[r.motivo] || 0) + 1;
+    const partes = [];
+    if (cuentas.cuota_baja) partes.push(`${cuentas.cuota_baja} con probabilidad de gol muy alta (partidos tempranos — la cuota queda bajo 1.50, sin valor)`);
+    if (cuentas.prob_baja)  partes.push(`${cuentas.prob_baja} con probabilidad menor al 55%`);
+    if (cuentas.min_75)     partes.push(`${cuentas.min_75} pasado el minuto 75`);
+    if (cuentas.sin_datos || cuentas.sin_tiempo) partes.push(`${(cuentas.sin_datos || 0) + (cuentas.sin_tiempo || 0)} sin datos suficientes`);
+    const proximos = rechazos
+      .filter(r => r.motivo === 'cuota_baja' && r.minuto >= 25)
+      .sort((a, b) => b.minuto - a.minuto)
+      .slice(0, 3)
+      .map(r => `▸ ${r.partido} (min ${r.minuto}) — prob ${r.pGoal}%, entrará en ventana de valor hacia el min 55-70`);
+    return sendLong(
       chatId,
-      '⛔ No hay partidos en vivo con probabilidad de gol suficiente para recomendar (cuota < 1.45 o partidos finalizando).\n\nInténtalo más tarde.'
+      `⛔ *Sin alertas con valor ahora mismo* — analicé ${candidates.length} partido(s) en vivo:\n${partes.map(p => `• ${p}`).join('\n')}\n\nLa alerta dispara cuando la probabilidad de gol está entre 55% y ~67% (cuota 1.50-1.80) — la ventana típica es el minuto 50-70.${proximos.length ? `\n\n👀 *Candidatos a vigilar:*\n${proximos.join('\n')}` : ''}`,
+      { parse_mode: 'Markdown' }
     );
   }
 
