@@ -5580,8 +5580,16 @@ async function applyStakeGate(picksText, enriched, matchesCtx, opts = {}) {
       /\bde la muestra\b/i,
       /sobrecomprimid/i,
       /probabilidadesCalculadas|statsLocal|statsVisitante|cuotasReales|_syntheticOdds|picksMotorJS|modeloPoisson/,
+      /^\s*\|.+\|.+\|\s*$/m,              // tablas markdown — Telegram no las renderiza
     ];
     const leaks = LEAK_PATTERNS.filter(re => re.test(correctedText)).map(re => re.source);
+
+    // Numeración con saltos ("PICK 1, PICK 2, PICK 4") delata al cliente que un
+    // pick fue eliminado — visto en producción tras el descarte interno del LLM.
+    const _pickNums = [...correctedText.matchAll(/🎯 PICK (\d+)/g)].map(m => +m[1]);
+    if (_pickNums.length && _pickNums.some((n, i) => n !== i + 1)) {
+      leaks.push(`numeración de picks con saltos (${_pickNums.join(', ')}) — renumerar consecutivo`);
+    }
 
     if (invalid.length || leaks.length) {
       if (invalid.length) console.log(`🚫 Gate duro: ${invalid.length} pick(s) inválido(s): ${invalid.map(p => `${p.seleccion}@${p.cuota} stake ${finalStakes.get(p) ?? p.stake}${p._motivo ? ` [${p._motivo}]` : ''}`).join(', ')}`);
@@ -5590,7 +5598,9 @@ async function applyStakeGate(picksText, enriched, matchesCtx, opts = {}) {
         `Eres un editor de texto quirúrgico. Recibes un análisis de picks deportivos y dos listas de problemas. Devuelve el MISMO texto, palabra por palabra, con estas únicas diferencias:
 1. Los bloques completos de los picks INVÁLIDOS (desde su encabezado "🎯 PICK..." o "🎰 COMBINADA..." hasta su última línea) desaparecen por completo. Un pick que se describe a sí mismo como descartado, rechazado o "redirigido" también es un bloque inválido: elimínalo entero.
 2. Las frases con LENGUAJE INTERNO desaparecen o se reformulan en lenguaje de cliente: nunca menciones JSON, campos de datos, muestras, umbrales/mínimos/pisos de cuota o de publicación, descartes ni redirecciones de mercado. "sin datos disponibles en el JSON" → "sin datos disponibles". Si una frase solo narra maquinaria interna, elimínala.
-No renumeres, no resumas, no añadas notas ni explicaciones. Si todos los picks son inválidos, devuelve solo la parte de contexto/análisis con la línea "⛔ Sin picks de valor en este partido."`,
+3. Tras eliminar bloques, RENUMERA los picks restantes para que queden consecutivos empezando en 1 ("🎯 PICK 1", "🎯 PICK 2", ...) y actualiza cualquier tabla o resumen que los liste — un salto de numeración (1, 2, 4) delata la eliminación al cliente.
+4. Si hay tablas markdown (líneas con | columnas |), conviértelas a líneas simples con "▸ " — Telegram no renderiza tablas.
+No resumas, no añadas notas ni explicaciones. Si todos los picks son inválidos, devuelve solo la parte de contexto/análisis con la línea "⛔ Sin picks de valor en este partido."`,
         `PICKS INVÁLIDOS A ELIMINAR (cuota < ${PUBLISH_MIN_ODDS}, stake ≤ 5, o resultado del equipo que ya gana):\n${invalid.length ? invalid.map(p => `- ${p.seleccion} (cuota ${p.cuota}, stake ${finalStakes.get(p) ?? p.stake})${p._motivo ? ` — ${p._motivo}` : ''} del partido ${p.local} vs ${p.visitante}`).join('\n') : '(ninguno)'}\n\nLENGUAJE INTERNO DETECTADO (patrones): ${leaks.length ? leaks.join(' | ') : '(ninguno)'}\n\nTEXTO:\n${correctedText}`,
         8000 // la reescritura devuelve el texto COMPLETO — con los 800 default se truncaba y el guard de longitud la descartaba (gate fail-open)
       ).catch(() => null);
@@ -7571,6 +7581,23 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date,
     ...(isLive && { marcadorVivo: { home: liveHomeGoals, away: liveAwayGoals } }),
   }], { maxPicks: 3 });
+
+  // ── Props/tendencias GARANTIZADOS por código ─────────────────────────────────
+  // El LLM omitía la sección aun con los datos en el JSON (visto 9-jul: los logs
+  // mostraban "🎯 Props: Theo Hernandez @1.7..." y el texto salía sin sección).
+  // Si hay datos y el texto no trae la sección, se construye determinísticamente.
+  if (analysisData.propsJugador?.length && !/PROPS? DE JUGADOR/i.test(analysis)) {
+    const lineas = analysisData.propsJugador.map(p =>
+      `▸ *${p.jugador}* (${p.equipo}) — ${p.mercado} | Cuota real: *${p.cuotaReal}* (${p.bookmaker}) | ${p.racha}${p.promedioStat != null ? ` | Promedio: ${p.promedioStat}` : ''}`);
+    analysis += `\n\n━━━━━━━━━━━━━━━━━━━\n💥 *PROPS DE JUGADOR*\n${lineas.join('\n')}`;
+    console.log(`💥 Props añadidos por código (el LLM omitió la sección): ${analysisData.propsJugador.length}`);
+  }
+  if (analysisData.tendenciasEquipo?.length && !/TENDENCIAS? DE EQUIPO/i.test(analysis)) {
+    const lineas = analysisData.tendenciasEquipo.map(t =>
+      `▸ ${t.mercado} | Cuota real: *${t.cuotaReal}* (${t.bookmaker || 'Bet365'}) | ${t.racha || ''}`.trim());
+    analysis += `\n\n📈 *TENDENCIAS DE EQUIPO*\n${lineas.join('\n')}`;
+    console.log(`📈 Tendencias añadidas por código: ${analysisData.tendenciasEquipo.length}`);
+  }
 
   try {
     await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
