@@ -628,6 +628,8 @@ const HL_STAT_MAP = {
   'Yellow cards':              'Yellow Cards',
   'Red cards':                 'Red Cards',
   'Shots within penalty area': 'Shots insidebox',
+  'Expected Goals':            'Expected Goals',      // xG REAL medido por Highlightly (no estimación propia)
+  'Big Chances Created':       'Big Chances Created', // ocasiones claras — señal fuerte de gol inminente
 };
 
 async function getFixtureStatistics(fixtureId) {
@@ -3964,15 +3966,11 @@ function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats) {
   const goalPaceFull = totalGoals > 0 ? (totalGoals / elapsed) * 90 : 0;
   const lambdaLivePace = goalPaceFull * timeFrac;
 
-  // ── Lambda combinada: 60% histórico + 40% pace real ───────────────────────
-  // Si no hay goles aún, confiamos más en el histórico
-  const liveWeight = totalGoals > 0 ? 0.40 : 0.15;
-  const lambdaCombined = lambdaHistorical * (1 - liveWeight) + lambdaLivePace * liveWeight;
-
-  // ── Bonuses contextuales ──────────────────────────────────────────────────
-  let bonus = 0;
-
-  // Presión de tiros: muchos tiros con pocos goles → presión acumulada
+  // ── xG REAL en vivo (Highlightly lo mide por partido) ─────────────────────
+  // El ritmo de goles es ruidoso (0 o 1 eventos); el xG acumulado mide la
+  // producción de ocasiones real. Si está disponible, es el mejor estimador
+  // del ritmo ofensivo: λ_xg = (xG total / minutos jugados) × minutos restantes.
+  let xgTotalLive = null, xgPending = 0, bigChancesTotal = 0;
   let shotsOnH = 0, shotsOnA = 0, shotsTotal = 0;
   if (liveStats) {
     const hSt = homeStats(liveStats);
@@ -3980,9 +3978,43 @@ function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats) {
     shotsOnH   = parseInt(hSt['Shots on Goal'] || 0);
     shotsOnA   = parseInt(aSt['Shots on Goal'] || 0);
     shotsTotal = parseInt(hSt['Total Shots'] || 0) + parseInt(aSt['Total Shots'] || 0);
+    const xgH = parseFloat(hSt['Expected Goals']);
+    const xgA = parseFloat(aSt['Expected Goals']);
+    if (!isNaN(xgH) && !isNaN(xgA) && (xgH + xgA) > 0) {
+      xgTotalLive = +(xgH + xgA).toFixed(2);
+      xgPending   = Math.max(0, xgTotalLive - totalGoals); // ocasiones generadas sin convertir
+    }
+    bigChancesTotal = (parseInt(hSt['Big Chances Created'] || 0)) + (parseInt(aSt['Big Chances Created'] || 0));
+  }
+  const lambdaLiveXG = xgTotalLive != null && elapsed >= 15
+    ? (xgTotalLive / elapsed) * remaining
+    : null;
+
+  // ── Lambda combinada ──────────────────────────────────────────────────────
+  // Con xG real: 45% histórico + 40% ritmo de xG + 15% ritmo de goles.
+  // Sin xG: 60% histórico + 40% pace de goles (fórmula anterior).
+  let lambdaCombined;
+  if (lambdaLiveXG != null) {
+    lambdaCombined = lambdaHistorical * 0.45 + lambdaLiveXG * 0.40 + lambdaLivePace * 0.15;
+  } else {
+    const liveWeight = totalGoals > 0 ? 0.40 : 0.15;
+    lambdaCombined = lambdaHistorical * (1 - liveWeight) + lambdaLivePace * liveWeight;
+  }
+
+  // ── Bonuses contextuales ──────────────────────────────────────────────────
+  let bonus = 0;
+
+  // Presión de tiros: muchos tiros con pocos goles → presión acumulada
+  if (liveStats) {
     const shotsOnTarget = shotsOnH + shotsOnA;
     if (shotsOnTarget >= 8 && shotsOnTarget / (totalGoals + 1) > 4) bonus += 0.05;
     if (shotsTotal >= 14) bonus += 0.03;
+    // xG generado sin convertir: el partido "debe" goles — los equipos que
+    // crean ocasiones siguen creándolas (regresión a la conversión media)
+    if (xgPending >= 1.0) bonus += 0.05;
+    else if (xgPending >= 0.7) bonus += 0.03;
+    // Ocasiones claras acumuladas — señal directa de gol inminente
+    if (bigChancesTotal >= 4) bonus += 0.03;
   }
 
   // Equipo perdedor por 1 gol → empuja más
@@ -4016,6 +4048,8 @@ function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats) {
     const trailing = homeGoals < awayGoals ? fixture.homeTeam : fixture.awayTeam;
     reasons.push(`${trailing} busca el empate`);
   }
+  if (xgTotalLive != null && xgPending >= 0.7) reasons.push(`xG en vivo ${xgTotalLive} con solo ${totalGoals} gol(es) — el partido merece más goles`);
+  if (bigChancesTotal >= 4) reasons.push(`${bigChancesTotal} ocasiones claras creadas`);
   if (lambdaCombined > 0.8) reasons.push(`xG esperado alto: ${lambdaCombined.toFixed(2)} goles restantes`);
   if (reasons.length === 0) reasons.push(`${(pGoal*100).toFixed(0)}% prob — ${remaining} min restantes`);
 
@@ -4036,6 +4070,8 @@ function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats) {
     shotsLocal:    shotsOnH,
     shotsVisitante: shotsOnA,
     xGRestante: +lambdaCombined.toFixed(2),
+    ...(xgTotalLive != null && { xGVivoMedido: xgTotalLive, xGSinConvertir: +xgPending.toFixed(2) }),
+    ...(bigChancesTotal > 0 && { ocasionesClaras: bigChancesTotal }),
     alertScore: +alertScore.toFixed(1),
     razon:      reasons.join(' + '),
   };
@@ -5728,8 +5764,21 @@ async function evaluatePendingPicks() {
         const stats = await getFixtureStatistics(fid).catch(() => null);
         fixtureMap[fid] = { fixture: f, stats };
         console.log(`✅ Fixture ${fid} terminado: ${f.goals?.home}-${f.goals?.away}`);
+        return;
       } else if (m) {
         console.log(`⏳ Fixture ${fid} aún no terminado: state="${m.state?.description}"`);
+        return;
+      }
+      // IDs cortos (~7 dígitos) son de API-Football: fetchLiveRaw los usa cuando
+      // el cruce de nombres con Highlightly falla. 42 de 46 alertas de gol
+      // quedaron inevaluables por esto — resolver el marcador final vía APIF.
+      if (APIF && String(fid).length < 9) {
+        const { data } = await APIF.get('/fixtures', { params: { id: fid } });
+        const fx = data.response?.[0];
+        if (fx && ['FT', 'AET', 'PEN'].includes(fx.fixture?.status?.short)) {
+          fixtureMap[fid] = { fixture: { goals: { home: fx.goals.home, away: fx.goals.away } }, stats: null };
+          console.log(`✅ Fixture ${fid} (APIF) terminado: ${fx.goals.home}-${fx.goals.away}`);
+        }
       }
     } catch (e) {
       console.log(`❌ Error fixture ${fid}: ${e.message}`);
