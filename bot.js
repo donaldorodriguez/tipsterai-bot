@@ -1294,12 +1294,25 @@ async function findNextFixtureByDate(teamId, daysAhead = 14) {
       const fixtures = await fetchFixturesByDate(ds).catch(() => []);
       const propios = fixtures.filter(m =>
         (m.homeTeam?.id === teamId || m.awayTeam?.id === teamId) &&
-        UPCOMING_STATUSES.has(m.state?.description)
+        !FINISHED_DESCS.has(m.state?.description)
       );
       if (propios.length) {
-        const live = propios.find(m => LIVE_STATUSES.has(m.state?.description));
-        const next = live || propios.sort((a, b) => new Date(a.date) - new Date(b.date))[0];
-        return hlToApif(next);
+        // El caché por fecha guarda ESTADOS VIEJOS: un partido cacheado a las
+        // 11am sigue "Not started" al medio tiempo → el análisis salía
+        // pre-partido con el partido en vivo. Refrescar estado real con
+        // /matches/{id} (1-2 llamadas) antes de decidir pre-match vs live.
+        const frescos = [];
+        for (const p of propios.slice(0, 3)) {
+          const fresh = await fetchMatchById(p.id).catch(() => null);
+          frescos.push(fresh || p);
+        }
+        const activos = frescos.filter(m => UPCOMING_STATUSES.has(m.state?.description));
+        if (activos.length) {
+          const live = activos.find(m => LIVE_STATUSES.has(m.state?.description));
+          const next = live || activos.sort((a, b) => new Date(a.date) - new Date(b.date))[0];
+          return hlToApif(next);
+        }
+        // todos terminados en realidad → seguir escaneando días siguientes
       }
     }
   } catch {}
