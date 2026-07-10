@@ -6420,7 +6420,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   // heurísticas y el motor solo confiaba en mercados de goles (52% de los picks).
   // Para los 12 fixtures mejor puntuados se miden promedios reales de los
   // últimos 4 partidos (cache 24h/equipo). Selecciones ya los tienen.
-  await bot.sendMessage(chatId, `📐 Midiendo corners/tarjetas/xG reales de los equipos principales...`);
+  await bot.sendMessage(chatId, `📐 Midiendo el rendimiento reciente de los equipos principales...`);
   const realStatsMap = new Map();
   for (const f of selected.slice(0, 12).filter(x => !NATIONAL_LEAGUES_HOY.has(x.leagueId))) {
     for (const tid of [f.homeId, f.awayId]) {
