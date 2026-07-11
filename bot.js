@@ -3304,7 +3304,8 @@ function getMarketCalibration(force = false) {
   const out = {};
   try {
     const picks = loadPicks().filter(p =>
-      ['W', 'L'].includes(p.resultado) && !p.esCombinada && p.source !== 'alerta_gol'
+      // superpick excluido: duplicaría picks del día ya contados en la calibración
+      ['W', 'L'].includes(p.resultado) && !p.esCombinada && !['alerta_gol', 'superpick'].includes(p.source)
     );
     const fam = {};
     for (const p of picks) {
@@ -5714,6 +5715,25 @@ No resumas, no añadas notas ni explicaciones. Si todos los picks son inválidos
       }
     }
 
+    // ── COMBINADA SUGERIDA (sección libre del formateador) ────────────────────
+    // Su formato de una línea (multi-partido, sin bloque de pick) se escapa de
+    // extractPicksFromText — el 11-jul salió publicada con "Stake: 3/10".
+    // Gate determinista: stake ≤ 5 o cuota < piso de producto → sección fuera.
+    correctedText = correctedText.replace(
+      /🎰\s*\*?COMBINADA SUGERIDA\*?[^\n]*\n(?:(?!\n\n|━━)[\s\S])*/g,
+      (sec) => {
+        const st = sec.match(/Stake:\s*\*?(\d{1,2})\s*\/\s*10/i);
+        const cu = sec.match(/Cuota:\s*\*?\s*~?\s*(?:est\.?\s*~?\s*)?(\d+(?:[.,]\d+)?)/i);
+        const stakeVal = st ? parseInt(st[1], 10) : null;
+        const cuotaVal = cu ? parseFloat(cu[1].replace(',', '.')) : null;
+        if (stakeVal == null || stakeVal <= 5 || (cuotaVal != null && cuotaVal < PUBLISH_MIN_ODDS)) {
+          console.log(`🚫 Gate: COMBINADA SUGERIDA eliminada (stake ${stakeVal}, cuota ${cuotaVal})`);
+          return '';
+        }
+        return sec;
+      }
+    );
+
     return correctedText;
   } catch (e) {
     console.error('applyStakeGate:', e.message);
@@ -6306,27 +6326,13 @@ function buildMatchContext({ fixture, round, homeStanding, awayStanding, totalTe
 
 // ─── Business flows ───────────────────────────────────────────────────────────
 
-async function handlePicksHoy(chatId, forceRefresh = false) {
+// ─── Pipeline de datos del día (compartido: picks del día + SuperPick) ────────
+// Recolecta fixtures → cuotas → stats → probabilidades → candidatos del motor.
+// `progress` recibe los mensajes de avance (Telegram los muestra; el cron del
+// SuperPick pasa un no-op). No llama al LLM ni publica nada.
+async function gatherDailyCandidates(progress = async () => {}) {
   const today = todayDate();
-
-  // ── Caché: devuelve picks ya generados hoy sin volver a consultar ─────────
-  if (!forceRefresh) {
-    const cached = getPicksCache('all');
-    if (cached) {
-      const generadoCol = new Date(cached.generadoAt).toLocaleTimeString('es-CO', {
-        timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit', hour12: true,
-      });
-      console.log(`📦 Cache hit — picks del día ya generados a las ${generadoCol} (Col)`);
-      await bot.sendMessage(
-        chatId,
-        `📦 _Análisis generado hoy a las ${generadoCol} (Col). Escribe *"Actualizar picks"* para regenerar con datos frescos._`,
-        { parse_mode: 'Markdown' }
-      );
-      return sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${cached.picksText}`, { parse_mode: 'Markdown' });
-    }
-  }
-
-  await bot.sendMessage(chatId, '🔍 Consultando nuestra base de datos estadística...');
+  await progress('🔍 Consultando nuestra base de datos estadística...');
   const allFixtures = await getFixturesByDate(today);
   // Para picks del día: solo partidos NO iniciados (status NS) y no en ligas excluidas
   const STARTED_STATUSES = new Set(['1H','HT','2H','ET','P','BT','LIVE','INT']);
@@ -6336,7 +6342,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   );
 
   if (fixtures.length === 0) {
-    return bot.sendMessage(chatId, `😔 No hay partidos no iniciados en las ligas monitoreadas hoy (${today}).`);
+    return { status: 'sin_partidos', enriched: [], enrichedFiltrado: [], candidates: [], conOdds: 0, withOddsCount: 0 };
   }
 
   // ── FASE 1: cuotas — The Odds API (bulk) + API-Football (fallback) ───────────
@@ -6345,7 +6351,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     .sort((a, b) => effectiveLeaguePriority(b) - effectiveLeaguePriority(a))
     .slice(0, 80); // revisar hasta 80 partidos buscando cuotas
 
-  await bot.sendMessage(chatId, `📊 ${fixtures.length} partidos en ligas monitoreadas. Consultando cuotas...`);
+  await progress(`📊 ${fixtures.length} partidos en ligas monitoreadas. Consultando cuotas...`);
 
   // Cuotas desde Highlightly (todas las casas disponibles por partido)
   const oddsMap = await prefetchOddsApi(oddsPool, today);
@@ -6399,7 +6405,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     }
   }
 
-  await bot.sendMessage(chatId, `📊 ${withOdds.length} cuotas recopiladas | Analizando ${selected.length} partidos con el motor matemático...`);
+  await progress(`📊 ${withOdds.length} cuotas recopiladas | Analizando ${selected.length} partidos con el motor matemático...`);
 
   // ── FASE 2: stats de equipo solo para partidos con cuotas ────────────────────
   // Para selecciones nacionales (WC, Nations League, Clasificatorias, etc.):
@@ -6433,7 +6439,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   // heurísticas y el motor solo confiaba en mercados de goles (52% de los picks).
   // Para los 12 fixtures mejor puntuados se miden promedios reales de los
   // últimos 4 partidos (cache 24h/equipo). Selecciones ya los tienen.
-  await bot.sendMessage(chatId, `📐 Midiendo el rendimiento reciente de los equipos principales...`);
+  await progress(`📐 Midiendo el rendimiento reciente de los equipos principales...`);
   const realStatsMap = new Map();
   for (const f of selected.slice(0, 12).filter(x => !NATIONAL_LEAGUES_HOY.has(x.leagueId))) {
     for (const tid of [f.homeId, f.awayId]) {
@@ -6522,7 +6528,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   });
 
   // ── FASE 3: H2H, standings, predicciones y contexto ─────────────────────────
-  await bot.sendMessage(chatId, `🔢 Consultando H2H, tabla de posiciones y contexto histórico...`);
+  await progress(`🔢 Consultando H2H, tabla de posiciones y contexto histórico...`);
 
   // Fases previas de copas europeas: la tabla del torneo es la de la EDICIÓN
   // ANTERIOR (ej. Kairat "#36 con 1 punto" = fase liga UCL 2025-26 terminada).
@@ -6720,7 +6726,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     if (zetHits > 0) console.log(`🎯 ZCode Extra (TP/PR/SO/CB): ${zetHits} partidos con señales adicionales`);
   }
 
-  await bot.sendMessage(chatId, `🧮 Motor matemático calculando EV por mercado...`);
+  await progress(`🧮 Motor matemático calculando EV por mercado...`);
 
   // ── Filtro de calidad ANTES del motor ────────────────────────────────────
   // REGLA: necesitamos datos de AMBOS equipos. Sin datos de uno de los dos,
@@ -6751,7 +6757,37 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   // ── Selección matemática de picks ────────────────────────────────────────
   const candidates = buildPickCandidates(enrichedFiltrado);
-  const topPicks   = selectDiversePicks(candidates, 3);
+
+  return { status: 'ok', enriched, enrichedFiltrado, candidates, conOdds, withOddsCount: withOdds.length };
+}
+
+
+async function handlePicksHoy(chatId, forceRefresh = false) {
+  const today = todayDate();
+
+  // ── Caché: devuelve picks ya generados hoy sin volver a consultar ─────────
+  if (!forceRefresh) {
+    const cached = getPicksCache('all');
+    if (cached) {
+      const generadoCol = new Date(cached.generadoAt).toLocaleTimeString('es-CO', {
+        timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit', hour12: true,
+      });
+      console.log(`📦 Cache hit — picks del día ya generados a las ${generadoCol} (Col)`);
+      await bot.sendMessage(
+        chatId,
+        `📦 _Análisis generado hoy a las ${generadoCol} (Col). Escribe *"Actualizar picks"* para regenerar con datos frescos._`,
+        { parse_mode: 'Markdown' }
+      );
+      return sendLong(chatId, `📅 *PICKS DEL DÍA — ${today}*\n\n${cached.picksText}`, { parse_mode: 'Markdown' });
+    }
+  }
+
+  const g = await gatherDailyCandidates(async (txt) => { await bot.sendMessage(chatId, txt); });
+  if (g.status === 'sin_partidos') {
+    return bot.sendMessage(chatId, `😔 No hay partidos no iniciados en las ligas monitoreadas hoy (${today}).`);
+  }
+  const { enriched, candidates, conOdds } = g;
+  const topPicks = selectDiversePicks(candidates, 3);
 
   // ── Lesionados/sancionados para los picks seleccionados ────────────────────
   // Solo consultamos los 3 fixtures finales → máximo 3 llamadas API extra.
@@ -6977,6 +7013,160 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   }
   recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
 }
+
+// ─── SuperPick del día (producto WhatsApp — 3 franjas horarias) ───────────────
+// El mejor pick del motor por franja: MISMO pick para todos los leads de la
+// franja (auditable — nunca picks distintos a leads simultáneos). Individual o
+// mini combinada de 2 patas del MISMO partido. Ranking por EV validado contra
+// cuota real — el stake solo desempata (medición 8-jul: stake 8 → 45% acierto,
+// stake 6 → 74%; la confianza del sistema anti-correlaciona con el acierto).
+const SUPERPICK_FILE = fs.existsSync('/data') ? '/data/superpicks.json' : path.join(__dirname, 'superpicks.json');
+const SUPERPICK_SLOTS = [
+  { id: 'am',    hora: 9,  label: 'SuperPick AM' },
+  { id: 'pm',    hora: 14, label: 'SuperPick PM' },
+  { id: 'noche', hora: 19, label: 'SuperPick Noche' },
+];
+const SUPERPICK_MIN_KICKOFF_MIN = 90;  // el pick debe jugarse ≥90 min en el futuro
+const SUPERPICK_MAX_EV = 25;           // EV mayor contra cuota real = probable error del modelo (winner's curse)
+
+function loadSuperPicks() {
+  try { return JSON.parse(fs.readFileSync(SUPERPICK_FILE, 'utf8')); } catch { return {}; }
+}
+function persistSuperPicks(store) {
+  fs.writeFileSync(SUPERPICK_FILE, JSON.stringify(store, null, 2));
+}
+function colombiaHour() {
+  return parseInt(new Date().toLocaleString('en-GB', { timeZone: 'America/Bogota', hour: '2-digit', hour12: false }), 10);
+}
+
+// Familia canónica de picks.json desde la key del motor — para el log de track record
+const SUPERPICK_MERCADO_MAP = [
+  [/^homeWin/, 'HOME_WIN'], [/^awayWin/, 'AWAY_WIN'],
+  [/^over\d/, 'OVER_GOALS'], [/^under\d/, 'UNDER_GOALS'],
+  [/^btts$/, 'BTTS_YES'], [/^bttsNo$/, 'BTTS_NO'],
+  [/^dc_/, 'DOUBLE_CHANCE'], [/^dnb_home$/, 'DNB_HOME'], [/^dnb_away$/, 'DNB_AWAY'],
+  [/^ah_home/, 'AH_HOME'], [/^ah_away/, 'AH_AWAY'],
+  [/^ht_over/, 'HT_OVER'], [/^ht_under/, 'HT_UNDER'],
+  [/^cleanSheet/, 'CLEAN_SHEET'], [/ToScore$/, 'TEAM_GOAL'],
+  [/cornersUnder/i, 'UNDER_CORNERS'], [/corner/i, 'OVER_CORNERS'],
+  [/cardsUnder/i, 'UNDER_CARDS'], [/card/i, 'OVER_CARDS'],
+  [/^combinada$/, 'COMBINADA'],
+];
+function superPickMercado(marketKey) {
+  for (const [re, m] of SUPERPICK_MERCADO_MAP) if (re.test(String(marketKey || ''))) return m;
+  return String(marketKey || 'OTHER').toUpperCase();
+}
+
+function rankSuperPickCandidates(candidates, enriched, now = new Date()) {
+  const fechaByFixture = new Map(enriched.map(e => [e.fixtureId, e.fechaPartido]));
+  return candidates
+    .filter(c => {
+      const fecha = fechaByFixture.get(c.fixtureId);
+      if (!fecha) return false;
+      const minAhead = (new Date(fecha) - now) / 60000;
+      if (minAhead < SUPERPICK_MIN_KICKOFF_MIN) return false;        // ya jugado o demasiado próximo
+      if (c.odds == null || c.odds < PUBLISH_MIN_ODDS) return false;  // piso de producto
+      if (c._syntheticOdds) return false;                             // solo EV validado contra cuota REAL
+      if (!(c.ev >= 3 && c.ev <= SUPERPICK_MAX_EV)) return false;
+      if (c.esCombinada && (c.legs || []).length !== 2) return false; // mini combinada: 2 patas, mismo partido
+      return true;
+    })
+    .sort((a, b) => (b.ev - a.ev) || ((b.stake || 0) - (a.stake || 0)));
+}
+
+let _superPickGenerating = false;
+async function generateSuperPick(slotId) {
+  const today = todayDate();
+  const key = `${today}_${slotId}`;
+  const existing = loadSuperPicks()[key];
+  if (existing) return existing;
+  if (_superPickGenerating) return null;
+  _superPickGenerating = true;
+  try {
+    console.log(`🎯 SuperPick [${slotId}]: generando con datos frescos...`);
+    const g = await gatherDailyCandidates();
+    const slot = SUPERPICK_SLOTS.find(s => s.id === slotId) || {};
+    const base = { fecha: today, slot: slotId, slotLabel: slot.label || slotId, generadoAt: new Date().toISOString() };
+    let entry;
+    if (g.status !== 'ok' || !g.candidates.length) {
+      entry = { ...base, status: 'sin_pick', motivo: g.status === 'sin_partidos' ? 'sin_partidos_hoy' : 'sin_candidatos_con_valor' };
+    } else {
+      const ranked = rankSuperPickCandidates(g.candidates, g.enriched);
+      if (!ranked.length) {
+        entry = { ...base, status: 'sin_pick', motivo: 'sin_valor_suficiente_en_partidos_futuros' };
+      } else {
+        const c = ranked[0];
+        const fechaPartido = g.enriched.find(e => e.fixtureId === c.fixtureId)?.fechaPartido || null;
+        entry = {
+          ...base, status: 'ok',
+          fixtureId: c.fixtureId, liga: c.liga, local: c.local, visitante: c.visitante,
+          kickoff: fechaPartido, mercado: superPickMercado(c.market), seleccion: c.marketLabel,
+          esCombinada: !!c.esCombinada, legs: c.legs || null,
+          cuota: c.odds, ev: c.ev, prob: c.prob, stake: c.stake,
+        };
+        // Track record: al log de picks — evaluatePendingPicks lo evalúa solo.
+        // (Combinadas quedan pendientes: el evaluador aún no cubre 2 patas.)
+        try {
+          const picks = loadPicks();
+          if (!picks.some(p => p.source === 'superpick' && p.fecha === today && p.slot === slotId)) {
+            picks.push({
+              id: `sp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+              emitidoAt: entry.generadoAt, fecha: today, fixtureId: c.fixtureId, fechaPartido,
+              liga: c.liga, local: c.local, visitante: c.visitante,
+              mercado: entry.mercado, seleccion: c.marketLabel, linea: null, handicap: null,
+              cuota: c.odds, stake: c.stake, esCombinada: !!c.esCombinada,
+              resultado: null, scoresFinal: null, source: 'superpick', slot: slotId,
+            });
+            persistPicks(picks);
+          }
+        } catch (e) { console.error('superpick log:', e.message); }
+        console.log(`🎯 SuperPick [${slotId}]: ${c.local} vs ${c.visitante} | ${c.marketLabel} @ ${c.odds} | EV ${c.ev}%`);
+      }
+    }
+    const fresh = loadSuperPicks();
+    fresh[key] = entry;
+    persistSuperPicks(fresh);
+    return entry;
+  } catch (e) {
+    console.error(`SuperPick [${slotId}]:`, e.message);
+    return null;
+  } finally {
+    _superPickGenerating = false;
+  }
+}
+
+function superPickTrackRecord(days = 30) {
+  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - days);
+  const all = loadPicks().filter(p => p.source === 'superpick' && new Date(p.emitidoAt) >= cutoff);
+  const done = all.filter(p => ['W', 'L'].includes(p.resultado));
+  const w = done.filter(p => p.resultado === 'W').length;
+  const roiUnits = done.reduce((s, p) => s + (p.resultado === 'W' ? (parseFloat(p.cuota) || 2) - 1 : -1), 0);
+  const tr = {
+    dias: days, emitidos: all.length, evaluados: done.length, ganados: w, perdidos: done.length - w,
+    winRate: done.length ? +((w / done.length) * 100).toFixed(1) : null,
+    roiPct: done.length ? +((roiUnits / done.length) * 100).toFixed(1) : null,
+  };
+  if (!all.length) {
+    // Sin historial de SuperPicks aún → track record global verificado del motor
+    const glob = loadPicks().filter(p => ['W', 'L'].includes(p.resultado) && !p.esCombinada && p.emitidoAt && new Date(p.emitidoAt) >= cutoff);
+    const gw = glob.filter(p => p.resultado === 'W').length;
+    tr.fallbackGlobal = glob.length ? { evaluados: glob.length, winRate: +((gw / glob.length) * 100).toFixed(1) } : null;
+  }
+  return tr;
+}
+
+// Cron SuperPick: cada 5 min revisa si la franja vigente ya tiene pick del día.
+// Solo genera la ÚLTIMA franja cuya hora ya pasó (auto-recupera tras reinicios;
+// las cuotas se consultan frescas en cada generación — maduran durante el día).
+setInterval(async () => {
+  try {
+    const colH = colombiaHour();
+    const passed = SUPERPICK_SLOTS.filter(s => colH >= s.hora);
+    if (!passed.length) return;
+    const slot = passed[passed.length - 1];
+    if (!loadSuperPicks()[`${todayDate()}_${slot.id}`]) await generateSuperPick(slot.id);
+  } catch (e) { console.error('superpick cron:', e.message); }
+}, 5 * 60 * 1000);
 
 // ─── Sistema del Día (admin-only) ────────────────────────────────────────────
 // Escanea TODOS los partidos de hoy, calcula EV por pick y arma la apuesta de sistema
@@ -11052,6 +11242,52 @@ app.post('/webhook/wompi', async (req, res) => {
   } catch (err) {
     console.error('Wompi webhook handler error:', err.message);
     res.status(500).json({ error: err.message });
+  }
+});
+
+// ─── API SuperPick (consumida por el bot de WhatsApp) ────────────────────────
+// Auth: Authorization: Bearer <SUPERPICK_API_TOKEN>. Sirve el pick de la franja
+// vigente cuyo kickoff siga en el futuro; si no hay, informa el próximo slot y
+// el último resultado — nunca entrega un pick de un partido ya iniciado.
+app.get('/api/superpick', (req, res) => {
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!process.env.SUPERPICK_API_TOKEN || token !== process.env.SUPERPICK_API_TOKEN) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  try {
+    const today = todayDate();
+    const store = loadSuperPicks();
+    const colH = colombiaHour();
+    const now = new Date();
+    const trackRecord = superPickTrackRecord();
+    const next = SUPERPICK_SLOTS.find(s => colH < s.hora);
+    const proximoSlot = next
+      ? { id: next.id, label: next.label, horaCol: `${next.hora}:00` }
+      : { id: SUPERPICK_SLOTS[0].id, label: SUPERPICK_SLOTS[0].label, horaCol: `mañana ${SUPERPICK_SLOTS[0].hora}:00` };
+
+    // Franjas ya pasadas, de la más reciente a la más antigua: servir el primer
+    // pick cuyo partido no haya empezado.
+    const passed = SUPERPICK_SLOTS.filter(s => colH >= s.hora).reverse();
+    let ultimoPick = null;
+    for (const s of passed) {
+      const entry = store[`${today}_${s.id}`];
+      if (!entry || entry.status !== 'ok') continue;
+      if (!ultimoPick) ultimoPick = entry;
+      if (entry.kickoff && new Date(entry.kickoff) > now) {
+        return res.json({ status: 'ok', pick: entry, trackRecord });
+      }
+    }
+    if (passed.length && !store[`${today}_${passed[0].id}`]) {
+      return res.json({ status: 'generando', slot: passed[0].id, reintentarEnSeg: 180, proximoSlot, trackRecord });
+    }
+    return res.json({
+      status: 'espera',
+      motivo: passed.length ? 'sin_pick_vigente' : 'antes_del_primer_slot',
+      ultimoPick, proximoSlot, trackRecord,
+    });
+  } catch (e) {
+    console.error('/api/superpick:', e.message);
+    res.status(500).json({ error: 'internal' });
   }
 });
 
