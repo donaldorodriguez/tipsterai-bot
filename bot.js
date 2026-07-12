@@ -1967,12 +1967,18 @@ function eloExpectedLambdas(diff) {
 async function prefetchOddsApi(fixtures, _date) {
   const map = new Map();
   const top = fixtures.slice(0, 30);
-  // APIF merge solo para los primeros 12 fixtures (presupuesto: plan free = 100 req/día)
-  await Promise.allSettled(top.map(async (f, i) => {
-    const ctx = i < 12 ? { date: f.date, homeTeam: f.homeTeam, awayTeam: f.awayTeam } : null;
-    const odds = await getRealOdds(f.fixtureId, ctx);
-    if (odds) map.set(f.fixtureId, odds);
-  }));
+  // Plan APIF Pro (7,500 req/día, 300/min): merge APIF para TODO el pool.
+  // En lotes de 8 con pausa — el límite por minuto castiga ráfagas paralelas
+  // (429s vistos el 12-jul con 13 llamadas simultáneas en el plan free).
+  const BATCH = 8;
+  for (let i = 0; i < top.length; i += BATCH) {
+    const batch = top.slice(i, i + BATCH);
+    await Promise.allSettled(batch.map(async (f) => {
+      const odds = await getRealOdds(f.fixtureId, { date: f.date, homeTeam: f.homeTeam, awayTeam: f.awayTeam });
+      if (odds) map.set(f.fixtureId, odds);
+    }));
+    if (i + BATCH < top.length) await new Promise(r => setTimeout(r, 1200));
+  }
   console.log(`📊 Odds (HL+APIF): ${map.size}/${top.length} partidos`);
   return map;
 }
@@ -6031,14 +6037,14 @@ async function evaluatePendingPicks() {
   console.log(`📊 Fixtures a evaluar: ${fixtureIds.join(', ')}`);
   const fixtureMap = {};
 
-  // Presupuesto APIF: los lookups de IDs cortos consumen la cuota diaria (100/día
-  // en plan free). Solo se intentan para picks de <7 días (los viejos que no
-  // resolvieron ya no van a resolver) y máximo 10 por corrida.
+  // Lookups APIF de IDs cortos: solo picks de <7 días (los viejos que no
+  // resolvieron ya no van a resolver). Con plan Pro (7,500/día) el cap por
+  // corrida sube de 10 a 80 — alcanza para evaluar todo el backlog del día.
   const _cutoffApif = Date.now() - 7 * 86400e3;
   const _fidRecientes = new Set(pending
     .filter(p => new Date(p.fechaPartido || p.emitidoAt || 0).getTime() >= _cutoffApif)
     .map(p => p.fixtureId));
-  let _apifLookupsRestantes = 10;
+  let _apifLookupsRestantes = 80;
 
   // Usar GET /matches/{id} directo — más confiable que buscar por fecha para historiales
   await Promise.allSettled(fixtureIds.map(async (fid) => {
@@ -7126,6 +7132,18 @@ async function generateSuperPickPlan(force = false) {
         cuota: c.odds, ev: c.ev, prob: c.prob, stake: c.stake,
         locked: false, servedAt: null,
       }));
+      // Bajas confirmadas para los picks nuevos del plan (≤3 llamadas APIF):
+      // ≥2 bajas en un equipo → stake -1, mismo criterio que picks del día.
+      for (const p of nuevos) {
+        try {
+          const inj = await getFixtureInjuriesAPIF(p.kickoff, p.local, p.visitante);
+          if (inj && (inj.local.length >= 2 || inj.visitante.length >= 2)) {
+            p.stake = Math.max(5, (p.stake || 6) - 1);
+            p.bajas = { local: inj.local.length, visitante: inj.visitante.length };
+            console.log(`🏥 SuperPick ${p.local} vs ${p.visitante}: bajas ${inj.local.length}/${inj.visitante.length} → stake ${p.stake}`);
+          }
+        } catch {}
+      }
       entries = [...kept, ...nuevos];
     }
     entries.sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
