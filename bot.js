@@ -7017,20 +7017,22 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
 }
 
-// ─── SuperPick del día (producto WhatsApp — 3 franjas horarias) ───────────────
-// El mejor pick del motor por franja: MISMO pick para todos los leads de la
-// franja (auditable — nunca picks distintos a leads simultáneos). Individual o
-// mini combinada de 2 patas del MISMO partido. Ranking por EV validado contra
-// cuota real — el stake solo desempata (medición 8-jul: stake 8 → 45% acierto,
-// stake 6 → 74%; la confianza del sistema anti-correlaciona con el acierto).
+// ─── SuperPick del día (producto WhatsApp — plan adaptativo al calendario) ────
+// "El siguiente por jugarse": plan diario de hasta 3 SuperPicks con kickoffs
+// separados ≥2h — las franjas las dibuja el calendario del día, no el reloj
+// (un domingo sudamericano cabe entero en la tarde; un martes de Champions
+// termina de noche). El endpoint sirve el primer pick cuyo partido empiece en
+// ≥30 min; un pick se BLOQUEA al servirse por primera vez (lo que un lead ya
+// vio jamás cambia) y los futuros no bloqueados se re-optimizan con cuotas
+// frescas. Ranking por EV validado contra cuota real — stake solo desempata.
 const SUPERPICK_FILE = fs.existsSync('/data') ? '/data/superpicks.json' : path.join(__dirname, 'superpicks.json');
-const SUPERPICK_SLOTS = [
-  { id: 'am',    hora: 9,  label: 'SuperPick AM' },
-  { id: 'pm',    hora: 14, label: 'SuperPick PM' },
-  { id: 'noche', hora: 19, label: 'SuperPick Noche' },
-];
-const SUPERPICK_MIN_KICKOFF_MIN = 90;  // el pick debe jugarse ≥90 min en el futuro
-const SUPERPICK_MAX_EV = 25;           // EV mayor contra cuota real = probable error del modelo (winner's curse)
+const SUPERPICK_MIN_KICKOFF_MIN  = 90;   // para ENTRAR al plan: kickoff ≥90 min futuro
+const SUPERPICK_SERVE_MIN        = 30;   // para SERVIRSE a un lead: kickoff ≥30 min futuro
+const SUPERPICK_SPACING_MIN      = 120;  // separación mínima entre kickoffs del plan
+const SUPERPICK_MAX_PICKS        = 3;
+const SUPERPICK_BUILD_FROM_HOUR  = 6;    // hora Col desde la que se construye el plan
+const SUPERPICK_REFRESH_MIN      = 90;   // re-optimización de picks no bloqueados
+const SUPERPICK_MAX_EV           = 25;   // EV mayor contra cuota real = probable error del modelo
 
 function loadSuperPicks() {
   try { return JSON.parse(fs.readFileSync(SUPERPICK_FILE, 'utf8')); } catch { return {}; }
@@ -7077,65 +7079,99 @@ function rankSuperPickCandidates(candidates, enriched, now = new Date()) {
     .sort((a, b) => (b.ev - a.ev) || ((b.stake || 0) - (a.stake || 0)));
 }
 
+// Selección con espaciado: mejor EV primero, respetando ≥2h entre kickoffs y
+// sin repetir fixture (incluye los picks ya bloqueados que se conservan).
+function buildSuperPickPlan(ranked, fechaBy, kept = [], maxPicks = SUPERPICK_MAX_PICKS) {
+  const chosen = [];
+  const usedFixtures = new Set(kept.map(p => p.fixtureId));
+  const kickoffs = kept.map(p => +new Date(p.kickoff));
+  for (const c of ranked) {
+    if (kept.length + chosen.length >= maxPicks) break;
+    if (usedFixtures.has(c.fixtureId)) continue;
+    const ko = +new Date(fechaBy.get(c.fixtureId));
+    if (kickoffs.some(k => Math.abs(k - ko) < SUPERPICK_SPACING_MIN * 60000)) continue;
+    chosen.push(c);
+    usedFixtures.add(c.fixtureId);
+    kickoffs.push(ko);
+  }
+  return chosen;
+}
+
 let _superPickGenerating = false;
-async function generateSuperPick(slotId) {
+async function generateSuperPickPlan(force = false) {
   const today = todayDate();
-  const key = `${today}_${slotId}`;
-  const existing = loadSuperPicks()[key];
-  if (existing) return existing;
   if (_superPickGenerating) return null;
+  const now = new Date();
+  const day = loadSuperPicks()[today];
+  if (day && !force) {
+    const hasRefreshable = (day.picks || []).some(p => !p.locked && new Date(p.kickoff) > now);
+    const ageMin = (now - new Date(day.refreshedAt || day.generadoAt)) / 60000;
+    if (!hasRefreshable || ageMin < SUPERPICK_REFRESH_MIN) return day;
+  }
   _superPickGenerating = true;
   try {
-    console.log(`🎯 SuperPick [${slotId}]: generando con datos frescos...`);
+    console.log(`🎯 SuperPick: ${day ? 'refrescando' : 'generando'} plan del día...`);
     const g = await gatherDailyCandidates();
-    const slot = SUPERPICK_SLOTS.find(s => s.id === slotId) || {};
-    const base = { fecha: today, slot: slotId, slotLabel: slot.label || slotId, generadoAt: new Date().toISOString() };
-    let entry;
-    if (g.status !== 'ok' || !g.candidates.length) {
-      entry = { ...base, status: 'sin_pick', motivo: g.status === 'sin_partidos' ? 'sin_partidos_hoy' : 'sin_candidatos_con_valor' };
-    } else {
-      const ranked = rankSuperPickCandidates(g.candidates, g.enriched);
-      if (!ranked.length) {
-        entry = { ...base, status: 'sin_pick', motivo: 'sin_valor_suficiente_en_partidos_futuros' };
-      } else {
-        const c = ranked[0];
-        const fechaPartido = g.enriched.find(e => e.fixtureId === c.fixtureId)?.fechaPartido || null;
-        entry = {
-          ...base, status: 'ok',
-          fixtureId: c.fixtureId, liga: c.liga, local: c.local, visitante: c.visitante,
-          kickoff: fechaPartido, mercado: superPickMercado(c.market), seleccion: c.marketLabel,
-          esCombinada: !!c.esCombinada, legs: c.legs || null,
-          cuota: c.odds, ev: c.ev, prob: c.prob, stake: c.stake,
-        };
-        // Track record: al log de picks — evaluatePendingPicks lo evalúa solo.
-        // (Combinadas quedan pendientes: el evaluador aún no cubre 2 patas.)
-        try {
-          const picks = loadPicks();
-          if (!picks.some(p => p.source === 'superpick' && p.fecha === today && p.slot === slotId)) {
-            picks.push({
-              id: `sp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-              emitidoAt: entry.generadoAt, fecha: today, fixtureId: c.fixtureId, fechaPartido,
-              liga: c.liga, local: c.local, visitante: c.visitante,
-              mercado: entry.mercado, seleccion: c.marketLabel, linea: null, handicap: null,
-              cuota: c.odds, stake: c.stake, esCombinada: !!c.esCombinada,
-              resultado: null, scoresFinal: null, source: 'superpick', slot: slotId,
-            });
-            persistPicks(picks);
-          }
-        } catch (e) { console.error('superpick log:', e.message); }
-        console.log(`🎯 SuperPick [${slotId}]: ${c.local} vs ${c.visitante} | ${c.marketLabel} @ ${c.odds} | EV ${c.ev}%`);
-      }
+    // Se conservan: bloqueados (ya vistos por algún lead) y los ya jugándose/jugados
+    const kept = (day?.picks || []).filter(p => p.status === 'ok' && (p.locked || new Date(p.kickoff) <= now));
+    let entries = kept;
+    if (g.status === 'ok' && g.candidates.length) {
+      const fechaBy = new Map(g.enriched.map(e => [e.fixtureId, e.fechaPartido]));
+      const ranked = rankSuperPickCandidates(g.candidates, g.enriched, now);
+      const nuevos = buildSuperPickPlan(ranked, fechaBy, kept).map(c => ({
+        status: 'ok', fecha: today, generadoAt: now.toISOString(),
+        fixtureId: c.fixtureId, liga: c.liga, local: c.local, visitante: c.visitante,
+        kickoff: fechaBy.get(c.fixtureId), mercado: superPickMercado(c.market),
+        seleccion: c.marketLabel, esCombinada: !!c.esCombinada, legs: c.legs || null,
+        cuota: c.odds, ev: c.ev, prob: c.prob, stake: c.stake,
+        locked: false, servedAt: null,
+      }));
+      entries = [...kept, ...nuevos];
     }
+    entries.sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
+    entries.forEach((p, i) => { p.ordinal = i + 1; });
     const fresh = loadSuperPicks();
-    fresh[key] = entry;
+    fresh[today] = {
+      generadoAt: day?.generadoAt || now.toISOString(),
+      refreshedAt: now.toISOString(),
+      picks: entries,
+      ...(entries.length === 0 && { motivo: g.status === 'sin_partidos' ? 'sin_partidos_hoy' : 'sin_valor_validado' }),
+    };
     persistSuperPicks(fresh);
-    return entry;
+    console.log(`🎯 SuperPick plan ${today}: ${entries.length} pick(s)` +
+      entries.map(p => `\n   #${p.ordinal} ${p.local} vs ${p.visitante} | ${p.seleccion} @ ${p.cuota} | EV ${p.ev}% | ${p.kickoff}${p.locked ? ' 🔒' : ''}`).join(''));
+    return fresh[today];
   } catch (e) {
-    console.error(`SuperPick [${slotId}]:`, e.message);
+    console.error('generateSuperPickPlan:', e.message);
     return null;
   } finally {
     _superPickGenerating = false;
   }
+}
+
+// Bloqueo al primer servicio: lo mostrado jamás cambia + entra al track record
+function lockSuperPick(fecha, pick) {
+  try {
+    const store = loadSuperPicks();
+    const p = (store[fecha]?.picks || []).find(x => x.fixtureId === pick.fixtureId && x.seleccion === pick.seleccion);
+    if (!p || p.locked) return;
+    p.locked = true;
+    p.servedAt = new Date().toISOString();
+    persistSuperPicks(store);
+    const picks = loadPicks();
+    if (!picks.some(x => x.source === 'superpick' && x.fecha === fecha && x.fixtureId === p.fixtureId && x.seleccion === p.seleccion)) {
+      picks.push({
+        id: `sp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+        emitidoAt: p.servedAt, fecha, fixtureId: p.fixtureId, fechaPartido: p.kickoff,
+        liga: p.liga, local: p.local, visitante: p.visitante,
+        mercado: p.mercado, seleccion: p.seleccion, linea: null, handicap: null,
+        cuota: p.cuota, stake: p.stake, esCombinada: !!p.esCombinada,
+        resultado: null, scoresFinal: null, source: 'superpick', ordinal: p.ordinal,
+      });
+      persistPicks(picks);
+    }
+    console.log(`🔒 SuperPick #${p.ordinal} bloqueado al servirse: ${p.local} vs ${p.visitante} — ${p.seleccion} @ ${p.cuota}`);
+  } catch (e) { console.error('lockSuperPick:', e.message); }
 }
 
 function superPickTrackRecord(days = 30) {
@@ -7158,16 +7194,12 @@ function superPickTrackRecord(days = 30) {
   return tr;
 }
 
-// Cron SuperPick: cada 5 min revisa si la franja vigente ya tiene pick del día.
-// Solo genera la ÚLTIMA franja cuya hora ya pasó (auto-recupera tras reinicios;
-// las cuotas se consultan frescas en cada generación — maduran durante el día).
+// Cron SuperPick: desde las 6:00 Col construye el plan si falta y re-optimiza
+// los picks no bloqueados cada SUPERPICK_REFRESH_MIN (cuotas maduran en el día).
 setInterval(async () => {
   try {
-    const colH = colombiaHour();
-    const passed = SUPERPICK_SLOTS.filter(s => colH >= s.hora);
-    if (!passed.length) return;
-    const slot = passed[passed.length - 1];
-    if (!loadSuperPicks()[`${todayDate()}_${slot.id}`]) await generateSuperPick(slot.id);
+    if (colombiaHour() < SUPERPICK_BUILD_FROM_HOUR) return;
+    await generateSuperPickPlan();
   } catch (e) { console.error('superpick cron:', e.message); }
 }, 5 * 60 * 1000);
 
@@ -11249,9 +11281,9 @@ app.post('/webhook/wompi', async (req, res) => {
 });
 
 // ─── API SuperPick (consumida por el bot de WhatsApp) ────────────────────────
-// Auth: Authorization: Bearer <SUPERPICK_API_TOKEN>. Sirve el pick de la franja
-// vigente cuyo kickoff siga en el futuro; si no hay, informa el próximo slot y
-// el último resultado — nunca entrega un pick de un partido ya iniciado.
+// Auth: Authorization: Bearer <SUPERPICK_API_TOKEN>. Sirve "el siguiente por
+// jugarse" del plan del día (kickoff ≥30 min futuro) y lo bloquea al primer
+// servicio. Sin plan aún → lo dispara al vuelo y responde "generando".
 app.get('/api/superpick', (req, res) => {
   const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
   if (!process.env.SUPERPICK_API_TOKEN || token !== process.env.SUPERPICK_API_TOKEN) {
@@ -11259,34 +11291,37 @@ app.get('/api/superpick', (req, res) => {
   }
   try {
     const today = todayDate();
-    const store = loadSuperPicks();
-    const colH = colombiaHour();
     const now = new Date();
+    const day = loadSuperPicks()[today];
     const trackRecord = superPickTrackRecord();
-    const next = SUPERPICK_SLOTS.find(s => colH < s.hora);
-    const proximoSlot = next
-      ? { id: next.id, label: next.label, horaCol: `${next.hora}:00` }
-      : { id: SUPERPICK_SLOTS[0].id, label: SUPERPICK_SLOTS[0].label, horaCol: `mañana ${SUPERPICK_SLOTS[0].hora}:00` };
 
-    // Franjas ya pasadas, de la más reciente a la más antigua: servir el primer
-    // pick cuyo partido no haya empezado.
-    const passed = SUPERPICK_SLOTS.filter(s => colH >= s.hora).reverse();
-    let ultimoPick = null;
-    for (const s of passed) {
-      const entry = store[`${today}_${s.id}`];
-      if (!entry || entry.status !== 'ok') continue;
-      if (!ultimoPick) ultimoPick = entry;
-      if (entry.kickoff && new Date(entry.kickoff) > now) {
-        return res.json({ status: 'ok', pick: entry, trackRecord });
+    if (!day) {
+      if (colombiaHour() >= SUPERPICK_BUILD_FROM_HOUR) {
+        setImmediate(() => generateSuperPickPlan().catch(e => console.error('superpick on-demand:', e.message)));
+        return res.json({ status: 'generando', reintentarEnSeg: 180, trackRecord });
       }
+      return res.json({
+        status: 'espera', motivo: 'plan_no_generado_aun',
+        proximoPlan: `hoy ~${SUPERPICK_BUILD_FROM_HOUR}:00 (Col)`, trackRecord,
+      });
     }
-    if (passed.length && !store[`${today}_${passed[0].id}`]) {
-      return res.json({ status: 'generando', slot: passed[0].id, reintentarEnSeg: 180, proximoSlot, trackRecord });
+
+    const picks = day.picks || [];
+    const current = picks.find(p => p.status === 'ok' && (new Date(p.kickoff) - now) / 60000 >= SUPERPICK_SERVE_MIN);
+    if (current) {
+      if (!current.locked) {
+        lockSuperPick(today, current);
+        current.locked = true;
+        current.servedAt = current.servedAt || new Date().toISOString();
+      }
+      return res.json({ status: 'ok', pick: current, plan: { picksHoy: picks.length, ordinal: current.ordinal }, trackRecord });
     }
+
+    const ultimoPick = [...picks].reverse().find(p => p.status === 'ok') || null;
     return res.json({
       status: 'espera',
-      motivo: passed.length ? 'sin_pick_vigente' : 'antes_del_primer_slot',
-      ultimoPick, proximoSlot, trackRecord,
+      motivo: picks.length ? 'jornada_del_dia_terminada' : (day.motivo || 'sin_valor_hoy'),
+      ultimoPick, proximoPlan: `mañana ~${SUPERPICK_BUILD_FROM_HOUR}:00 (Col)`, trackRecord,
     });
   } catch (e) {
     console.error('/api/superpick:', e.message);
