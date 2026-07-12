@@ -5,3 +5,4 @@ picks_history.json
 *.log
 .pm2/
 *.DS_Store
+.superpick_token_local
