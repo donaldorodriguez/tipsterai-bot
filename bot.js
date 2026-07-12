@@ -5802,8 +5802,11 @@ async function recordPicks(analysisText, matchesCtx) {
 }
 
 async function evaluatePickResult(pick, fixture, stats) {
-  const goalsHome = fixture.goals?.home ?? 0;
-  const goalsAway = fixture.goals?.away ?? 0;
+  // Los mercados se liquidan al minuto 90: en eliminatorias con prórroga,
+  // fixture.goals trae el marcador FINAL (Argentina 3-1 aet cuando el 90' fue
+  // 1-1) — score.fulltime es el resultado reglamentario cuando la API lo trae.
+  const goalsHome = fixture.score?.fulltime?.home ?? fixture.goals?.home ?? 0;
+  const goalsAway = fixture.score?.fulltime?.away ?? fixture.goals?.away ?? 0;
   const htHome    = fixture.score?.halftime?.home ?? null;
   const htAway    = fixture.score?.halftime?.away ?? null;
   const total     = goalsHome + goalsAway;
