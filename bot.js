@@ -5863,6 +5863,14 @@ async function evaluatePickResult(pick, fixture, stats) {
     return 'L';
   }
 
+  // Doble Oportunidad — el SuperPick la publica como pick individual y quedaba
+  // en '?' (las L sin liquidar inflan el win rate publicado)
+  if (pick.mercado === 'DOUBLE_CHANCE' || /doble\s+oportunidad/i.test(sel)) {
+    if (/1x/i.test(sel)) return goalsHome >= goalsAway ? 'W' : 'L';
+    if (/x2/i.test(sel)) return goalsAway >= goalsHome ? 'W' : 'L';
+    if (/\b12\b/.test(sel)) return goalsHome !== goalsAway ? 'W' : 'L';
+  }
+
   // Asian Handicap
   if ((pick.mercado === 'AH_HOME' || pick.mercado === 'AH_AWAY') && pick.handicap != null) {
     const h = parseFloat(pick.handicap);
