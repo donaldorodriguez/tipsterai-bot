@@ -7047,6 +7047,10 @@ const SUPERPICK_MAX_PICKS        = 3;
 const SUPERPICK_BUILD_FROM_HOUR  = 6;    // hora Col desde la que se construye el plan
 const SUPERPICK_REFRESH_MIN      = 90;   // re-optimización de picks no bloqueados
 const SUPERPICK_MAX_EV           = 25;   // EV mayor contra cuota real = probable error del modelo
+const SUPERPICK_MIN_PROB         = 60;   // prob mínima: el SuperPick es "favorito con valor", no lotería
+                                         // (EV puro elegía cuotas 2.1-2.5 con prob ~50% → rachas de 5L
+                                         // matemáticamente normales pero invendibles; con ≥60% la racha
+                                         // de 5L pasa del 2.5% al 0.7% de los días)
 
 function loadSuperPicks() {
   try { return JSON.parse(fs.readFileSync(SUPERPICK_FILE, 'utf8')); } catch { return {}; }
@@ -7087,6 +7091,7 @@ function rankSuperPickCandidates(candidates, enriched, now = new Date()) {
       if (c.odds == null || c.odds < PUBLISH_MIN_ODDS) return false;  // piso de producto
       if (c._syntheticOdds) return false;                             // solo EV validado contra cuota REAL
       if (!(c.ev >= 3 && c.ev <= SUPERPICK_MAX_EV)) return false;
+      if (!(c.prob >= SUPERPICK_MIN_PROB)) return false;              // favorito con valor, no cuota-lotería
       if (c.esCombinada && (c.legs || []).length !== 2) return false; // mini combinada: 2 patas, mismo partido
       return true;
     })
