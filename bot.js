@@ -7211,13 +7211,28 @@ function superPickTrackRecord(days = 30) {
     winRate: done.length ? +((w / done.length) * 100).toFixed(1) : null,
     roiPct: done.length ? +((roiUnits / done.length) * 100).toFixed(1) : null,
   };
-  if (!all.length) {
-    // Sin historial de SuperPicks aún → track record global verificado del motor
-    const glob = loadPicks().filter(p => ['W', 'L'].includes(p.resultado) && !p.esCombinada && p.emitidoAt && new Date(p.emitidoAt) >= cutoff);
-    const gw = glob.filter(p => p.resultado === 'W').length;
-    tr.fallbackGlobal = glob.length ? { evaluados: glob.length, winRate: +((gw / glob.length) * 100).toFixed(1) } : null;
-  }
+  // Track record global verificado del motor — siempre disponible como referencia
+  // (los SuperPicks recién arrancan; con muestra chica el consumidor usa el global)
+  const glob = loadPicks().filter(p => ['W', 'L'].includes(p.resultado) && !p.esCombinada && p.emitidoAt && new Date(p.emitidoAt) >= cutoff);
+  const gw = glob.filter(p => p.resultado === 'W').length;
+  tr.fallbackGlobal = glob.length ? { evaluados: glob.length, winRate: +((gw / glob.length) * 100).toFixed(1) } : null;
   return tr;
+}
+
+// Último SuperPick ya evaluado (W/L) — para que el bot de WhatsApp pueda
+// saludar con el ganador de ayer o saber que el anterior no entró
+function ultimoSuperPickEvaluado() {
+  const evaluados = loadPicks()
+    .filter(p => p.source === 'superpick' && ['W', 'L'].includes(p.resultado))
+    .sort((a, b) => new Date(b.emitidoAt) - new Date(a.emitidoAt));
+  const p = evaluados[0];
+  if (!p) return null;
+  return {
+    local: p.local, visitante: p.visitante, liga: p.liga,
+    seleccion: p.seleccion, cuota: p.cuota,
+    resultado: p.resultado, // 'W' | 'L'
+    emitidoAt: p.emitidoAt,
+  };
 }
 
 // Cron SuperPick: desde las 6:00 Col construye el plan si falta y re-optimiza
@@ -11320,15 +11335,16 @@ app.get('/api/superpick', (req, res) => {
     const now = new Date();
     const day = loadSuperPicks()[today];
     const trackRecord = superPickTrackRecord();
+    const ultimoEvaluado = ultimoSuperPickEvaluado();
 
     if (!day) {
       if (colombiaHour() >= SUPERPICK_BUILD_FROM_HOUR) {
         setImmediate(() => generateSuperPickPlan().catch(e => console.error('superpick on-demand:', e.message)));
-        return res.json({ status: 'generando', reintentarEnSeg: 180, trackRecord });
+        return res.json({ status: 'generando', reintentarEnSeg: 180, trackRecord, ultimoEvaluado });
       }
       return res.json({
         status: 'espera', motivo: 'plan_no_generado_aun',
-        proximoPlan: `hoy ~${SUPERPICK_BUILD_FROM_HOUR}:00 (Col)`, trackRecord,
+        proximoPlan: `hoy ~${SUPERPICK_BUILD_FROM_HOUR}:00 (Col)`, trackRecord, ultimoEvaluado,
       });
     }
 
@@ -11340,14 +11356,14 @@ app.get('/api/superpick', (req, res) => {
         current.locked = true;
         current.servedAt = current.servedAt || new Date().toISOString();
       }
-      return res.json({ status: 'ok', pick: current, plan: { picksHoy: picks.length, ordinal: current.ordinal }, trackRecord });
+      return res.json({ status: 'ok', pick: current, plan: { picksHoy: picks.length, ordinal: current.ordinal }, trackRecord, ultimoEvaluado });
     }
 
     const ultimoPick = [...picks].reverse().find(p => p.status === 'ok') || null;
     return res.json({
       status: 'espera',
       motivo: picks.length ? 'jornada_del_dia_terminada' : (day.motivo || 'sin_valor_hoy'),
-      ultimoPick, proximoPlan: `mañana ~${SUPERPICK_BUILD_FROM_HOUR}:00 (Col)`, trackRecord,
+      ultimoPick, proximoPlan: `mañana ~${SUPERPICK_BUILD_FROM_HOUR}:00 (Col)`, trackRecord, ultimoEvaluado,
     });
   } catch (e) {
     console.error('/api/superpick:', e.message);
