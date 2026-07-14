@@ -5912,7 +5912,11 @@ async function evaluatePickResult(pick, fixture, stats) {
     const cornersHome = homeStats(stats)?.['Corner Kicks'] ?? null;
     const cornersAway = awayStats(stats)?.['Corner Kicks'] ?? null;
     if (cornersHome != null && cornersAway != null) {
-      const tc = cornersHome + cornersAway;
+      // Mercado por equipo: "corners visitante/local" evalúa SOLO los de ese equipo,
+      // no el total del partido (antes usaba el total → calificaba mal)
+      const esVisitante = /visitante|away|fuera/i.test(sel);
+      const esLocal     = /\blocal\b|home|casa/i.test(sel);
+      const tc = esVisitante ? cornersAway : esLocal ? cornersHome : (cornersHome + cornersAway);
       const overCornMatch  = sel.match(/(?:over|más de|mas de)\s+(\d+[.,]\d+)\s*(?:c[oó]rners?|esquinas?)?/i) ||
                              sel.match(/(?:c[oó]rners?|esquinas?)\s+(?:over|más de|mas de)\s+(\d+[.,]\d+)/i);
       const underCornMatch = sel.match(/(?:under|menos de|bajo)\s+(\d+[.,]\d+)\s*(?:c[oó]rners?|esquinas?)?/i) ||
