@@ -7227,17 +7227,20 @@ function superPickTrackRecord(days = 30) {
 // Último SuperPick ya evaluado (W/L) — para que el bot de WhatsApp pueda
 // saludar con el ganador de ayer o saber que el anterior no entró
 function ultimoSuperPickEvaluado() {
-  const evaluados = loadPicks()
-    .filter(p => p.source === 'superpick' && ['W', 'L'].includes(p.resultado))
-    .sort((a, b) => new Date(b.emitidoAt) - new Date(a.emitidoAt));
-  const p = evaluados[0];
-  if (!p) return null;
-  return {
-    local: p.local, visitante: p.visitante, liga: p.liga,
-    seleccion: p.seleccion, cuota: p.cuota,
-    resultado: p.resultado, // 'W' | 'L'
-    emitidoAt: p.emitidoAt,
-  };
+  return superPicksEvaluadosRecientes(72)[0] || null;
+}
+
+// Lista de SuperPicks evaluados (W/L) en las últimas N horas — el bot de WhatsApp
+// la usa para enviar el seguimiento automático a quienes recibieron cada pick ganador
+function superPicksEvaluadosRecientes(horas = 48) {
+  const cutoff = Date.now() - horas * 3600 * 1000;
+  return loadPicks()
+    .filter(p => p.source === 'superpick' && ['W', 'L'].includes(p.resultado) && p.emitidoAt && new Date(p.emitidoAt).getTime() >= cutoff)
+    .sort((a, b) => new Date(b.emitidoAt) - new Date(a.emitidoAt))
+    .map(p => ({
+      ordinal: p.ordinal, local: p.local, visitante: p.visitante, liga: p.liga,
+      seleccion: p.seleccion, cuota: p.cuota, resultado: p.resultado, emitidoAt: p.emitidoAt,
+    }));
 }
 
 // Cron SuperPick: desde las 6:00 Col construye el plan si falta y re-optimiza
@@ -11372,6 +11375,22 @@ app.get('/api/superpick', (req, res) => {
     });
   } catch (e) {
     console.error('/api/superpick:', e.message);
+    res.status(500).json({ error: 'internal' });
+  }
+});
+
+// SuperPicks evaluados recientes (W/L) — el bot de WhatsApp envía seguimiento
+// automático a quienes recibieron cada pick ganador. Mismo token que /api/superpick.
+app.get('/api/superpick/evaluados', (req, res) => {
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!process.env.SUPERPICK_API_TOKEN || token !== process.env.SUPERPICK_API_TOKEN) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  try {
+    const horas = Math.min(parseInt(req.query.horas) || 48, 168);
+    res.json({ evaluados: superPicksEvaluadosRecientes(horas) });
+  } catch (e) {
+    console.error('/api/superpick/evaluados:', e.message);
     res.status(500).json({ error: 'internal' });
   }
 });
