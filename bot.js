@@ -7080,8 +7080,39 @@ function superPickMercado(marketKey) {
   return String(marketKey || 'OTHER').toUpperCase();
 }
 
+// Familias de mercado que NO pueden ser SuperPick: las que la medición de
+// producción muestra perdiendo dinero con muestra suficiente. El SuperPick es
+// el producto estrella — solo se para sobre mercados con ROI comprobado. NO es
+// veto dogmático: el mercado sigue vivo en picks del día bajo autocalibración;
+// aquí solo se le sube la barra al flagship. Cache 30 min.
+let _spMarketGate = { data: null, ts: 0 };
+function superPickBlockedMarkets() {
+  if (_spMarketGate.data && Date.now() - _spMarketGate.ts < 30 * 60 * 1000) return _spMarketGate.data;
+  const fam = {};
+  for (const p of loadPicks()) {
+    if (p.esCombinada || !['W', 'L'].includes(p.resultado) || !p.cuota) continue;
+    const k = superPickMercado(p.mercado || p.seleccion || '');
+    (fam[k] = fam[k] || { n: 0, w: 0, roi: 0 });
+    fam[k].n++;
+    if (p.resultado === 'W') { fam[k].w++; fam[k].roi += parseFloat(p.cuota) - 1; }
+    else fam[k].roi -= 1;
+  }
+  // Bloquea con muestra ≥20 y (ROI negativo o acierto <48%). Tarjetas: n≈34,
+  // ROI −10% → bloqueado. Goles/BTTS/Corners/DC pasan.
+  const blocked = new Set();
+  for (const [k, s] of Object.entries(fam)) {
+    if (s.n >= 20 && (s.roi < 0 || s.w / s.n < 0.48)) {
+      blocked.add(k);
+      console.log(`🚫 SuperPick: ${k} bloqueado del flagship (${s.w}/${s.n}=${(s.w / s.n * 100).toFixed(0)}%, ROI ${(s.roi / s.n * 100).toFixed(0)}%)`);
+    }
+  }
+  _spMarketGate = { data: blocked, ts: Date.now() };
+  return blocked;
+}
+
 function rankSuperPickCandidates(candidates, enriched, now = new Date()) {
   const fechaByFixture = new Map(enriched.map(e => [e.fixtureId, e.fechaPartido]));
+  const blocked = superPickBlockedMarkets();
   return candidates
     .filter(c => {
       const fecha = fechaByFixture.get(c.fixtureId);
@@ -7092,6 +7123,7 @@ function rankSuperPickCandidates(candidates, enriched, now = new Date()) {
       if (c._syntheticOdds) return false;                             // solo EV validado contra cuota REAL
       if (!(c.ev >= 3 && c.ev <= SUPERPICK_MAX_EV)) return false;
       if (!(c.prob >= SUPERPICK_MIN_PROB)) return false;              // favorito con valor, no cuota-lotería
+      if (blocked.has(superPickMercado(c.market))) return false;      // mercado con ROI negativo comprobado
       if (c.esCombinada && (c.legs || []).length !== 2) return false; // mini combinada: 2 patas, mismo partido
       return true;
     })
