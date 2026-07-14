@@ -6115,8 +6115,11 @@ async function evaluatePendingPicks() {
 // /calibracion a mano, así que getMarketCalibration veía 0 picks con W/L y
 // usaba factor neutro para todos los mercados (detectado 8-jul: 193 picks
 // acumulados del Mundial, ninguno evaluado). Cada 6h coincide con CALIB_TTL.
-setTimeout(() => evaluatePendingPicks().catch(e => console.error('evaluatePendingPicks (arranque):', e.message)), 5 * 60 * 1000);
-setInterval(() => evaluatePendingPicks().catch(e => console.error('evaluatePendingPicks (cron):', e.message)), 6 * 60 * 60 * 1000);
+// Calificación cada 30 min: apenas termina un partido, el pick se marca W/L pronto
+// → el bot de WhatsApp envía el seguimiento ganador "como relojito" (auto-job cada 20 min).
+// Seguro de correr seguido: solo evalúa pendientes + últimos 7 días, con tope de llamadas API.
+setTimeout(() => evaluatePendingPicks().catch(e => console.error('evaluatePendingPicks (arranque):', e.message)), 60 * 1000);
+setInterval(() => evaluatePendingPicks().catch(e => console.error('evaluatePendingPicks (cron):', e.message)), 30 * 60 * 1000);
 
 async function handleEstadisticas(chatId, period = 'hoy') {
   await bot.sendMessage(chatId, '📊 Evaluando resultados de tus picks...');
