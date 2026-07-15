@@ -29,6 +29,26 @@ const API = axios.create({
   timeout: 15000,
 });
 
+// ─── Cortacircuitos de Highlightly ────────────────────────────────────────────
+// Cuando la cuota de Highlightly se agota devuelve 429 en TODA llamada. Sin
+// esto, la cron del SuperPick + el evaluador + cada lead reintentaban en bucle
+// y quemaban lo que se fuera reponiendo (tormenta de reintentos). Al primer 429
+// entramos en enfriamiento: los procesos de fondo (SuperPick, evaluador) se
+// saltan; las peticiones de usuario responden un mensaje honesto de datos, no
+// "la IA está saturada".
+let _hlCooldownUntil = 0;
+function hlEnCooldown() { return Date.now() < _hlCooldownUntil; }
+API.interceptors.response.use(
+  (r) => r,
+  (err) => {
+    if (err.response?.status === 429) {
+      if (!hlEnCooldown()) console.warn('🚧 Highlightly 429 (cuota agotada) — enfriamiento 15 min: procesos de fondo pausados');
+      _hlCooldownUntil = Date.now() + 15 * 60 * 1000;
+    }
+    return Promise.reject(err);
+  }
+);
+
 // ─── API-Football (api-sports.io) — solo para partidos en vivo en tiempo real ─
 // Highlightly no tiene endpoint live; API-Football sí: /fixtures?live=all
 const APIF = process.env.APIFOOTBALL_KEY ? axios.create({
@@ -6029,6 +6049,7 @@ async function fetchMatchById(fixtureId) {
 }
 
 async function evaluatePendingPicks() {
+  if (hlEnCooldown()) { console.log('🚧 Evaluador: Highlightly en enfriamiento — se pospone'); return; }
   const picks = loadPicks();
 
   // Re-evaluar también picks recientes (últimos 7 días) con W/L por si fueron mal evaluados.
@@ -7127,6 +7148,7 @@ let _superPickGenerating = false;
 async function generateSuperPickPlan(force = false) {
   const today = todayDate();
   if (_superPickGenerating) return null;
+  if (hlEnCooldown()) { console.log('🚧 SuperPick: Highlightly en enfriamiento — se conserva el plan actual'); return loadSuperPicks()[today] || null; }
   const now = new Date();
   const day = loadSuperPicks()[today];
   if (day && !force) {
@@ -7255,6 +7277,7 @@ function superPicksEvaluadosRecientes(horas = 48) {
 setInterval(async () => {
   try {
     if (colombiaHour() < SUPERPICK_BUILD_FROM_HOUR) return;
+    if (hlEnCooldown()) return; // Highlightly agotado — no hostigar
     await generateSuperPickPlan();
   } catch (e) { console.error('superpick cron:', e.message); }
 }, 5 * 60 * 1000);
@@ -10896,9 +10919,13 @@ bot.on('message', async (msg) => {
 
   } catch (err) {
     console.error('Handler error:', err.message);
-    const userMsg = isOverloadedError(err)
-      ? '⏳ La IA está saturada. Intenta de nuevo en unos segundos.'
-      : `❌ Error: ${err.message}`;
+    // 429 desde Highlightly (datos deportivos) ≠ Claude saturado. No mentir al usuario.
+    const esDatos = err.response?.status === 429 || hlEnCooldown();
+    const userMsg = esDatos
+      ? '⏳ Estamos actualizando la base de datos deportiva. Vuelve a intentar en unos minutos.'
+      : isOverloadedError(err)
+        ? '⏳ Alta demanda en este momento. Intenta de nuevo en unos segundos.'
+        : `❌ Error: ${err.message}`;
     await bot.sendMessage(chatId, userMsg);
   }
 });
