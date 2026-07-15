@@ -6052,21 +6052,33 @@ async function evaluatePendingPicks() {
   if (hlEnCooldown()) { console.log('🚧 Evaluador: Highlightly en enfriamiento — se pospone'); return; }
   const picks = loadPicks();
 
-  // Re-evaluar también picks recientes (últimos 7 días) con W/L por si fueron mal evaluados.
-  // Solo afecta picks dentro de la ventana de corrección para no cambiar resultados históricos.
-  const cutoff = new Date(); cutoff.setDate(cutoff.getDate() - 7);
+  // FUGA CORREGIDA (15-jul): antes los picks en '?' se reintentaban SIN límite de
+  // edad y sin tope de llamadas → ~275 fixtures × cada 30 min × 2 llamadas HL =
+  // ~24k llamadas/día que agotaban la cuota de Highlightly (los picks viejos de
+  // corners/tarjetas de partidos oscuros nunca resuelven, pero se reintentaban
+  // para siempre). Ahora: solo partidos de los últimos 3 días (los más viejos ya
+  // no van a resolver) y re-verificación de W/L reducida a 2 días.
+  const fechaOf = p => new Date(p.fechaPartido || p.emitidoAt || 0).getTime();
+  const AHORA = Date.now();
+  const cutoffPend  = AHORA - 3 * 86400e3; // '?' / null: 3 días
+  const cutoffRecheck = AHORA - 2 * 86400e3; // re-chequeo de W/L: 2 días
   const pending = picks.filter(p => {
     if (!p.fixtureId) return false;
     if (p.mercado === 'PLAYER_PROP') return false; // stats de jugador no evaluables con marcador
     if (p.esCombinada) return false; // combinadas: requieren evaluar ambas patas — no auto-evaluables
-    if (!p.resultado || p.resultado === '?') return true;
-    if (['W', 'L', 'V'].includes(p.resultado) && p.emitidoAt && new Date(p.emitidoAt) >= cutoff) return true;
+    const fecha = fechaOf(p);
+    if ((!p.resultado || p.resultado === '?') && fecha >= cutoffPend) return true;
+    if (['W', 'L', 'V'].includes(p.resultado) && fecha >= cutoffRecheck) return true;
     return false;
   });
-  console.log(`📊 evaluatePendingPicks: ${picks.length} total | ${pending.length} a evaluar (pendientes + recientes)`);
+  console.log(`📊 evaluatePendingPicks: ${picks.length} total | ${pending.length} a evaluar (últimos 3 días)`);
   if (!pending.length) return picks;
 
-  const fixtureIds = [...new Set(pending.map(p => p.fixtureId))];
+  // Tope de fixtures por corrida (protección de cuota HL): los más recientes primero.
+  const MAX_FIXTURES_POR_CORRIDA = 60;
+  const fixtureIds = [...new Set(
+    pending.sort((a, b) => fechaOf(b) - fechaOf(a)).map(p => p.fixtureId)
+  )].slice(0, MAX_FIXTURES_POR_CORRIDA);
   console.log(`📊 Fixtures a evaluar: ${fixtureIds.join(', ')}`);
   const fixtureMap = {};
 
