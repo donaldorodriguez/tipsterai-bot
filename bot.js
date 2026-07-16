@@ -3094,28 +3094,30 @@ function calcLiveGoalLines(currentGoals, elapsed, homeFor = 1.3, awayFor = 1.0, 
 
   const lineasConValor = lines.filter(l => l.overValor || l.underValor);
 
-  // ── Decisión "2T se abre" (estrategia del usuario para 1er tiempo 0-0) ────────
-  // p2 = prob de 2+ goles en lo que resta; p1 = prob de 1+ gol. Con datos reales
-  // (xG + ritmo + histórico) el bot elige la línea, NO una regla ciega:
-  //   • Contexto goleador (2+ goles probable) → Over 1.5, si la cuota real ≤~2.6 confirma.
-  //   • 1 gol muy probable pero 2 solo factible → Asiático +1.0 (gana con 2+, devuelve con 1).
-  // Solo aplica temprano/entrando al 2T (elapsed ≤ 60) y con marcador bajo (≤1 gol).
+  // ── Decisión "vienen más goles" (CUALQUIER marcador, no solo 0-0) ────────────
+  // Sobre goles RESTANTES: p2 = prob de 2+ goles más; p1 = prob de 1+ gol más.
+  // Con datos reales (xG en vivo + ritmo + histórico) el bot elige la jugada:
+  //   • PREFERIDO — Asiático +1.0 sobre goles restantes: gana con 2+ más, DEVUELVE
+  //     el stake con exactamente 1 más. Menor riesgo que pedir "2 goles más".
+  //   • Over (actual+1.5) [= 2 goles más] SOLO cuando 2+ es muy probable Y la cuota
+  //     real ≤ ~2.2 lo confirma. Si no, se prefiere el Asiático.
+  // Ventana: entretiempo hasta ~min 56 (queda tiempo real para 2 goles más).
   const p1 = probAtLeast(1), p2 = probAtLeast(2);
   let recomendacion2T = null;
-  if (elapsed >= 40 && elapsed <= 60 && currentGoals <= 1) {
-    if (p2 >= 0.45) {
+  if (elapsed >= 43 && elapsed <= 56) {
+    if (p2 >= 0.50) {
       recomendacion2T = {
-        jugada: 'Over 1.5 goles (resto del partido / 2do tiempo)',
+        jugada: `Over ${currentGoals + 1.5} goles totales (2 goles más)`,
         probModelo: +(p2 * 100).toFixed(1),
         cuotaJusta: +(1 / p2).toFixed(2),
-        condicion: 'Recomendar SOLO si la cuota real en vivo es ≤ ~2.6 (la confirma el mercado). Si la cuota es mucho más alta, el modelo y el mercado discrepan → abstenerse.',
+        condicion: 'Recomendar SOLO si la cuota real en vivo es ≤ ~2.2 (la confirma el mercado). Si es mucho más alta, modelo y mercado discrepan → preferir el Asiático o abstenerse.',
       };
-    } else if (p1 >= 0.68 && p2 >= 0.30) {
+    } else if (p1 >= 0.62 && p2 >= 0.28) {
       recomendacion2T = {
-        jugada: 'Hándicap Asiático +1.0 en goles (resto del partido / 2do tiempo)',
-        probGana: +(p2 * 100).toFixed(1),            // 2+ goles = gana
-        probDevuelve: +((p1 - p2) * 100).toFixed(1), // exactamente 1 gol = push
-        nota: '1 gol muy probable y 2 factible. El Asiático +1.0 gana con 2+ goles y DEVUELVE el stake con exactamente 1 — cuota real típica 1.7-1.9. Jugada de menor riesgo que el Over 1.5.',
+        jugada: `Hándicap Asiático +1.0 sobre goles restantes (sobre el ${currentGoals === 0 ? '0-0' : 'marcador actual'})`,
+        probGana: +(p2 * 100).toFixed(1),            // 2+ goles más = gana
+        probDevuelve: +((p1 - p2) * 100).toFixed(1), // exactamente 1 gol más = push
+        nota: 'Vienen goles pero 2 más no es seguro: el Asiático +1.0 gana con 2+ goles más y DEVUELVE el stake con exactamente 1 más — cuota real típica 1.7-1.9. Jugada preferida sobre pedir 2 goles más.',
       };
     }
   }
@@ -5201,10 +5203,10 @@ Eres un tipster en vivo. Siempre das picks concretos y accionables — NUNCA ter
 PROHIBIDO recomendar victoria, DNB, doble oportunidad o "no pierde" del equipo que YA va ganando en el marcador. Su cuota en vivo real es 1.10-1.35 — no existe valor, y recomendarla hace ver al tipster como aficionado. Si el dominio del que va ganando es la historia del partido, tradúcelo a mercados con valor: siguiente gol, over/under de goles restantes, corners o hándicap -1.5 del líder (ese sí paga >1.65).
 Igual de PROHIBIDO: citar probabilidades del modelo pre-partido (probLocalGana/probVisitanteGana del modeloPoisson) para justificar picks de resultado en vivo — con el marcador ya alterado esas probabilidades no existen.
 
-⭐ OPORTUNIDAD "2do TIEMPO SE ABRE" (si existe el campo lineasGolesVivo.recomendacion2T):
-Cuando el 1er tiempo va con pocos goles (0-0 o 1 gol) pero el xG en vivo indica que los goles vienen, el motor calcula la mejor jugada de goles para el resto del partido en el campo recomendacion2T. Si ese campo existe, PRESÉNTALO como uno de los picks, usando EXACTAMENTE el mercado (jugada) y la probabilidad que trae:
-- Si jugada es "Over 1.5 goles...": solo recomiéndalo si cuotasVivo confirma cuota ≤ ~2.6 (respeta el campo condicion). Si la cuota real es mucho mayor, di que el modelo ve el gol pero el mercado no lo paga → no forzar.
-- Si jugada es "Hándicap Asiático +1.0...": preséntalo como la jugada de MENOR riesgo (gana con 2+ goles, devuelve el stake con exactamente 1). Explica esa mecánica al usuario. Cuota real típica 1.7-1.9.
+⭐ OPORTUNIDAD "VIENEN MÁS GOLES" (si existe el campo lineasGolesVivo.recomendacion2T):
+En CUALQUIER marcador, cuando el xG en vivo y el contexto indican que vienen más goles, el motor calcula la mejor jugada sobre goles RESTANTES en recomendacion2T. Si ese campo existe, PRESÉNTALO como uno de los picks, usando EXACTAMENTE el mercado (jugada) y la probabilidad que trae:
+- Si jugada empieza con "Over ... (2 goles más)": solo recomiéndalo si cuotasVivo confirma cuota ≤ ~2.2 (respeta el campo condicion). Si la cuota real es mucho mayor, di que el modelo ve los goles pero el mercado no los paga → preferir el Asiático o no forzar.
+- Si jugada empieza con "Hándicap Asiático +1.0...": es la jugada PREFERIDA (menor riesgo). Gana con 2+ goles más y DEVUELVE el stake con exactamente 1 gol más. Explica esa mecánica al usuario. Cuota real típica 1.7-1.9.
 Si recomendacion2T NO existe, NO inventes esta jugada.
 
 CUOTAS EN VIVO:
