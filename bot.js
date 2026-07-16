@@ -504,7 +504,10 @@ function parseFixture(m) {
     elapsed:    m.state?.clock || null,
     leagueId:   m.league.id,
     leagueName: LEAGUE_MAP[m.league.id]?.name || m.league.name,
-    country:    LEAGUE_MAP[m.league.id]?.country || m.country?.name || 'World',
+    // El país real del partido en vivo viene en m.league.country (API-Football);
+    // m.country?.name suele estar vacío en el objeto live → caía a 'World' aunque
+    // el país existiera (ej. "Super League — World" en vez de Uzbekistán).
+    country:    LEAGUE_MAP[m.league.id]?.country || m.league?.country || m.country?.name || 'World',
     round:      m.league?.round || null,
     homeId:     m.homeTeam.id,
     awayId:     m.awayTeam.id,
