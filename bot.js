@@ -1848,6 +1848,35 @@ function validateLiveOdds(odds, elapsed = 0, hg = 0, ag = 0) {
   return odds;
 }
 
+// Gate determinista de picks en vivo. El LLM ignora el prompt y recomienda
+// mercados-lock o inexistentes (caso real 16-jul: "Over 0.5 goles" a cuota real
+// ~1.20 y "Over 0.5 tarjetas" que ni existe en las casas). Elimina esos bloques
+// y renumera. Los mercados de mitad (Over 0.5 2T) y líneas reales (Over 1.5+,
+// Over 2.5 tarjetas) se conservan.
+function sanitizeLivePicks(text) {
+  if (!text) return text;
+  const forbidden = (b) => {
+    const s = b.toLowerCase();
+    if (/(tarjeta|amarilla|card)/.test(s) && (/\b0[.,]5\b/.test(s) || /al menos 1 (tarjeta|amarilla)/.test(s)))
+      return 'Over 0.5 tarjetas (mercado inexistente en casas)';
+    const esMitad = /1t|2t|1er|2do|primer tiempo|segundo tiempo|mitad/.test(s);
+    if (/gol/.test(s) && (/\b0[.,]5\b/.test(s) || /al menos 1 gol/.test(s)) && /(partido|encuentro|\bft\b)/.test(s) && !esMitad)
+      return 'Over 0.5 goles FT (lock sin valor, cuota real ~1.20)';
+    return null;
+  };
+  let footer = '', body = text;
+  const fMatch = text.match(/\n*(?:━+\n)?📈[\s\S]*$/);
+  if (fMatch) { footer = fMatch[0]; body = text.slice(0, fMatch.index); }
+  const kept = body.split(/(?=🎯 PICK \d+)/).filter(part => {
+    if (!/^🎯 PICK \d+/.test(part)) return true;
+    const r = forbidden(part);
+    if (r) { console.log(`🚫 Live gate: pick eliminado (${r})`); return false; }
+    return true;
+  });
+  let n = 0;
+  return (kept.join('') + footer).replace(/🎯 PICK \d+/g, () => `🎯 PICK ${++n}`);
+}
+
 // ─── Alineaciones y lesionados REALES — API-Football ──────────────────────────
 // Highlightly no tiene estos endpoints (stubs null desde la migración). APIF sí:
 // /fixtures/lineups (XI confirmado ~40 min pre-kickoff) y /injuries por fixture.
@@ -7919,10 +7948,11 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       // Sin cuotas en vivo: el bot igual da picks con cuota sugerida mínima.
       // El usuario verifica en su casa si hay valor — necesita la DIRECCIÓN, no el número exacto.
     }
-    const analysis = await sonnet(
+    const analysisRaw = await sonnet(
       INPLAY_SYSTEM,
       `Analiza este partido EN VIVO:\n\n${JSON.stringify(analysisData, null, 2)}`
     );
+    const analysis = sanitizeLivePicks(analysisRaw); // gate: quita locks/mercados inexistentes
     try {
       await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
     } catch {
