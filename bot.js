@@ -1826,6 +1826,28 @@ async function getLiveOdds(hlFixtureId) {
   }
 }
 
+// Filtro de cordura para cuotas en vivo. El feed /odds/live de ligas menores a
+// veces devuelve libros rancios/inconsistentes (caso real 15-jul: The Strongest
+// —favorito real 1.17— salió homeWin=2.75, draw=1.5 al min 5 0-0, y el bot armó
+// un pick de "valor" con una cuota falsa). Si el 1X2 es implausible → se descarta
+// TODO el libro (un feed que se equivoca así en el mercado más líquido tampoco es
+// fiable para O/U ni BTTS) y el análisis cae a estimados honestos.
+function validateLiveOdds(odds, elapsed = 0, hg = 0, ag = 0) {
+  if (!odds) return null;
+  const { homeWin, draw, awayWin } = odds;
+  if (homeWin != null && draw != null && awayWin != null) {
+    const drawEsFavorito = draw <= homeWin && draw <= awayWin;
+    const marcadorIgualado = hg === ag;
+    // El empate como resultado MÁS probable solo es real tarde en un partido
+    // igualado y de pocos goles. Temprano o con marcador desnivelado = feed roto.
+    if (drawEsFavorito && (elapsed < 60 || !marcadorIgualado)) {
+      console.warn(`🚫 Live odds descartadas (1X2 implausible: home=${homeWin} draw=${draw} away=${awayWin} @min${elapsed} ${hg}-${ag}) — se usan estimados`);
+      return null;
+    }
+  }
+  return odds;
+}
+
 // ─── Alineaciones y lesionados REALES — API-Football ──────────────────────────
 // Highlightly no tiene estos endpoints (stubs null desde la migración). APIF sí:
 // /fixtures/lineups (XI confirmado ~40 min pre-kickoff) y /injuries por fixture.
@@ -7888,7 +7910,8 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
 
   // ── En vivo → INPLAY_SYSTEM (necesita contexto del partido activo) ──────────
   if (isLive) {
-    const liveOdds = await getLiveOdds(nextRaw.fixture.id).catch(() => null);
+    const liveOddsRaw = await getLiveOdds(nextRaw.fixture.id).catch(() => null);
+    const liveOdds = validateLiveOdds(liveOddsRaw, elapsed, liveHomeGoals, liveAwayGoals);
     if (liveOdds) {
       analysisData.cuotasVivo = liveOdds;
     } else {
