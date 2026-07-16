@@ -3034,14 +3034,31 @@ function calcCardsProjection(current, elapsed, homeCards = 0, awayCards = 0, tot
  * Calcula qué líneas de GOLES tienen valor real en vivo (prob 20-80%).
  * Usa Poisson con blend entre ritmo actual del partido e histórico de los equipos.
  */
-function calcLiveGoalLines(currentGoals, elapsed, homeFor = 1.3, awayFor = 1.0) {
+function calcLiveGoalLines(currentGoals, elapsed, homeFor = 1.3, awayFor = 1.0, liveXG = null) {
   if (!elapsed || elapsed <= 0) return null;
   const minutesRemaining = Math.max(1, 90 - elapsed);
   const currentPace    = currentGoals / elapsed;
   const historicalRate = (homeFor + awayFor) / 90;
-  const blendWeight    = Math.min(elapsed / 70, 0.65);
-  const blendedRate    = currentPace * blendWeight + historicalRate * (1 - blendWeight);
-  const lambda         = blendedRate * minutesRemaining;
+
+  // Ritmo base para el resto del partido. El xG en vivo (ocasiones reales
+  // generadas) distingue un 0-0 VIVO —muchos tiros/xG, los goles vienen— de uno
+  // MUERTO. Es mejor estimador que el marcador (ruidoso: 0 goles ≠ 0 peligro).
+  let baseRate;
+  if (liveXG != null && liveXG >= 0 && elapsed >= 20) {
+    const xgRate = liveXG / elapsed;                                   // xG/min generado
+    baseRate = xgRate * 0.55 + currentPace * 0.25 + historicalRate * 0.20;
+  } else {
+    const blendWeight = Math.min(elapsed / 70, 0.65);
+    baseRate = currentPace * blendWeight + historicalRate * (1 - blendWeight);
+  }
+  // Piso de regresión a la media: un 1er tiempo con pocos goles es predictor
+  // DÉBIL de un 2T seco (la correlación 1T-2T es baja). Sin este piso, un 0-0 al
+  // descanso colapsaba la proyección (λ 0.46 → Over 1.5 8%) cuando el mercado la
+  // paga ~40%. Ese sesgo hacía al bot CIEGO al mercado "2T se abre".
+  baseRate = Math.max(baseRate, historicalRate * 0.70);
+  // El 2do tiempo marca ~10% más que el 1ero (cansancio, espacios, urgencia).
+  const boost2T = elapsed >= 40 ? 1.10 : 1.0;
+  const lambda  = baseRate * minutesRemaining * boost2T;
 
   const probAtLeast = (k) => {
     if (lambda <= 0) return k <= 0 ? 1 : 0;
@@ -3076,12 +3093,41 @@ function calcLiveGoalLines(currentGoals, elapsed, homeFor = 1.3, awayFor = 1.0) 
   }
 
   const lineasConValor = lines.filter(l => l.overValor || l.underValor);
+
+  // ── Decisión "2T se abre" (estrategia del usuario para 1er tiempo 0-0) ────────
+  // p2 = prob de 2+ goles en lo que resta; p1 = prob de 1+ gol. Con datos reales
+  // (xG + ritmo + histórico) el bot elige la línea, NO una regla ciega:
+  //   • Contexto goleador (2+ goles probable) → Over 1.5, si la cuota real ≤~2.6 confirma.
+  //   • 1 gol muy probable pero 2 solo factible → Asiático +1.0 (gana con 2+, devuelve con 1).
+  // Solo aplica temprano/entrando al 2T (elapsed ≤ 60) y con marcador bajo (≤1 gol).
+  const p1 = probAtLeast(1), p2 = probAtLeast(2);
+  let recomendacion2T = null;
+  if (elapsed >= 40 && elapsed <= 60 && currentGoals <= 1) {
+    if (p2 >= 0.45) {
+      recomendacion2T = {
+        jugada: 'Over 1.5 goles (resto del partido / 2do tiempo)',
+        probModelo: +(p2 * 100).toFixed(1),
+        cuotaJusta: +(1 / p2).toFixed(2),
+        condicion: 'Recomendar SOLO si la cuota real en vivo es ≤ ~2.6 (la confirma el mercado). Si la cuota es mucho más alta, el modelo y el mercado discrepan → abstenerse.',
+      };
+    } else if (p1 >= 0.68 && p2 >= 0.30) {
+      recomendacion2T = {
+        jugada: 'Hándicap Asiático +1.0 en goles (resto del partido / 2do tiempo)',
+        probGana: +(p2 * 100).toFixed(1),            // 2+ goles = gana
+        probDevuelve: +((p1 - p2) * 100).toFixed(1), // exactamente 1 gol = push
+        nota: '1 gol muy probable y 2 factible. El Asiático +1.0 gana con 2+ goles y DEVUELVE el stake con exactamente 1 — cuota real típica 1.7-1.9. Jugada de menor riesgo que el Over 1.5.',
+      };
+    }
+  }
+
   return {
     golesActuales:      currentGoals,
     minutosJugados:     elapsed,
     minutosRestantes:   minutesRemaining,
     golesEsperadosRest: +lambda.toFixed(2),
     proyeccionTotal:    +(currentGoals + lambda).toFixed(1),
+    ...(liveXG != null && { xgEnVivo: liveXG, _fuenteRitmo: 'xG real medido' }),
+    ...(recomendacion2T && { recomendacion2T }),
     lineasConValor:     lineasConValor.length > 0
       ? lineasConValor
       : [{ nota: 'Sin líneas de goles con valor (cuota ≥ 1.50) en este momento — no recomendar' }],
@@ -5154,6 +5200,12 @@ Eres un tipster en vivo. Siempre das picks concretos y accionables — NUNCA ter
 ⛔ RESULTADO DEL EQUIPO QUE YA GANA — REGLA INCONDICIONAL (haya o no cuotas en los datos):
 PROHIBIDO recomendar victoria, DNB, doble oportunidad o "no pierde" del equipo que YA va ganando en el marcador. Su cuota en vivo real es 1.10-1.35 — no existe valor, y recomendarla hace ver al tipster como aficionado. Si el dominio del que va ganando es la historia del partido, tradúcelo a mercados con valor: siguiente gol, over/under de goles restantes, corners o hándicap -1.5 del líder (ese sí paga >1.65).
 Igual de PROHIBIDO: citar probabilidades del modelo pre-partido (probLocalGana/probVisitanteGana del modeloPoisson) para justificar picks de resultado en vivo — con el marcador ya alterado esas probabilidades no existen.
+
+⭐ OPORTUNIDAD "2do TIEMPO SE ABRE" (si existe el campo lineasGolesVivo.recomendacion2T):
+Cuando el 1er tiempo va con pocos goles (0-0 o 1 gol) pero el xG en vivo indica que los goles vienen, el motor calcula la mejor jugada de goles para el resto del partido en el campo recomendacion2T. Si ese campo existe, PRESÉNTALO como uno de los picks, usando EXACTAMENTE el mercado (jugada) y la probabilidad que trae:
+- Si jugada es "Over 1.5 goles...": solo recomiéndalo si cuotasVivo confirma cuota ≤ ~2.6 (respeta el campo condicion). Si la cuota real es mucho mayor, di que el modelo ve el gol pero el mercado no lo paga → no forzar.
+- Si jugada es "Hándicap Asiático +1.0...": preséntalo como la jugada de MENOR riesgo (gana con 2+ goles, devuelve el stake con exactamente 1). Explica esa mecánica al usuario. Cuota real típica 1.7-1.9.
+Si recomendacion2T NO existe, NO inventes esta jugada.
 
 CUOTAS EN VIVO:
 ⛔ PROHIBIDO escribir "cuota real verificada" o "cuota real disponible" basándote en lineasXxxVivo — esas son cuotas matemáticas de breakeven del modelo (campo "cuotaJustaOver"), NO cuotas reales. Solo puedes decir "cuota real" si el dato viene de cuotasVivo.
@@ -7852,8 +7904,14 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const totalLiveGoals   = liveHomeGoals + liveAwayGoals;
   const homeFor = homeBase?.golesAnotadosHome ? parseFloat(homeBase.golesAnotadosHome) : 1.3;
   const awayFor = awayBase?.golesAnotadosAway ? parseFloat(awayBase.golesAnotadosAway) : 1.0;
+  // xG real en vivo (Highlightly lo mide) — distingue el 0-0 vivo del muerto
+  const _liveXG = liveStatsData
+    ? (() => { const h = parseFloat(homeStats(liveStatsData)?.['Expected Goals']);
+               const a = parseFloat(awayStats(liveStatsData)?.['Expected Goals']);
+               return (!isNaN(h) && !isNaN(a)) ? +(h + a).toFixed(2) : null; })()
+    : null;
   const goalLines    = isLive && elapsed > 0
-    ? calcLiveGoalLines(totalLiveGoals, elapsed, homeFor, awayFor)
+    ? calcLiveGoalLines(totalLiveGoals, elapsed, homeFor, awayFor, _liveXG)
     : null;
   const cornersLines = isLive && elapsed > 0
     ? calcLiveCornersLines(totalCorners, elapsed, chaseFactor)
