@@ -1647,6 +1647,8 @@ async function getRealOddsHL(fixtureId) {
     result.cardsUnder25= avgAlt(['Total Yellow Cards 2.5','Under'],['Cards Over/Under 2.5','Under'],['Total Cards 2.5','Under']);
     result.cardsOver35 = avgAlt(['Total Yellow Cards 3.5','Over'], ['Cards Over/Under 3.5','Over'], ['Total Cards 3.5','Over']);
     result.cardsOver45 = avgAlt(['Total Yellow Cards 4.5','Over'], ['Cards Over/Under 4.5','Over'], ['Total Cards 4.5','Over']);
+    result.cardsOver55 = avgAlt(['Total Yellow Cards 5.5','Over'], ['Cards Over/Under 5.5','Over'], ['Total Cards 5.5','Over']);
+    result.cardsOver65 = avgAlt(['Total Yellow Cards 6.5','Over'], ['Cards Over/Under 6.5','Over'], ['Total Cards 6.5','Over']);
     // ── Tarjetas por equipo
     result.homeCardsOver15 = avgAlt(['Home Team Cards 1.5','Over'], ['Team Cards Home 1.5','Over']);
     result.awayCardsOver15 = avgAlt(['Away Team Cards 1.5','Over'], ['Team Cards Away 1.5','Over']);
@@ -1738,6 +1740,8 @@ async function getRealOddsAPIF(dateIso, homeName, awayName) {
     r.cardsOver25  = val(['Cards Over/Under', 'Total Cards'], /^Over 2\.5$/i);
     r.cardsOver35  = val(['Cards Over/Under', 'Total Cards'], /^Over 3\.5$/i);
     r.cardsOver45  = val(['Cards Over/Under', 'Total Cards'], /^Over 4\.5$/i);
+    r.cardsOver55  = val(['Cards Over/Under', 'Total Cards'], /^Over 5\.5$/i);
+    r.cardsOver65  = val(['Cards Over/Under', 'Total Cards'], /^Over 6\.5$/i);
     r.cardsUnder25 = val(['Cards Over/Under', 'Total Cards'], /^Under 2\.5$/i);
     r.ah_home_m05 = val(['Asian Handicap'], /^Home -0\.5$/i);
     r.ah_away_m05 = val(['Asian Handicap'], /^Away -0\.5$/i);
@@ -3577,6 +3581,8 @@ function buildPickCandidates(enrichedFixtures) {
       { _cardsBlock: true, key: 'cardsOver25', label: 'Tarjetas Over 2.5', oddsVal: odds.cardsOver25, cat: 'cards', minOdds: 1.40, minProb: 0.55 },
       { _cardsBlock: true, key: 'cardsOver35', label: 'Tarjetas Over 3.5', oddsVal: odds.cardsOver35, cat: 'cards', minOdds: 1.45, minProb: 0.42 },
       { _cardsBlock: true, key: 'cardsOver45', label: 'Tarjetas Over 4.5', oddsVal: odds.cardsOver45, cat: 'cards', minOdds: 1.65, minProb: 0.35 },
+      { _cardsBlock: true, key: 'cardsOver55', label: 'Tarjetas Over 5.5', oddsVal: odds.cardsOver55, cat: 'cards', minOdds: 1.65, minProb: 0.30 },
+      { _cardsBlock: true, key: 'cardsOver65', label: 'Tarjetas Over 6.5', oddsVal: odds.cardsOver65, cat: 'cards', minOdds: 1.75, minProb: 0.24 },
       { _cardsBlock: true, key: 'cardsUnder25', label: 'Tarjetas Under 2.5', oddsVal: odds.cardsUnder25, cat: 'cards', minOdds: 1.50, minProb: 0.48 },
       // ── Tarjetas por equipo
       { _cardsBlock: true, key: 'homeCardsOver15', label: 'Tarjetas Local Over 1.5', oddsVal: odds.homeCardsOver15, cat: 'team_cards', minOdds: 1.50, minProb: 0.50 },
@@ -3631,6 +3637,10 @@ function buildPickCandidates(enrichedFixtures) {
     const pCardsOver25   = poissonCDF_above(cardsLambda, 3);
     const pCardsOver35   = poissonCDF_above(cardsLambda, 4);
     const pCardsOver45   = poissonCDF_above(cardsLambda, 5);
+    // Líneas altas para ligas muy tarjeteras (Brasil/Argentina): cuando el lambda
+    // es alto, Over 4.5 se vuelve un lock sin valor y la línea con valor sube.
+    const pCardsOver55   = poissonCDF_above(cardsLambda, 6);
+    const pCardsOver65   = poissonCDF_above(cardsLambda, 7);
     const pCardsUnder25  = 1 - pCardsOver25;
     // Tarjetas por equipo: cada equipo recibe ~45% de las tarjetas totales
     const pHomeCardsO15  = poissonCDF_above(cardsLambda * 0.52, 2);
@@ -3670,6 +3680,8 @@ function buildPickCandidates(enrichedFixtures) {
         m.prob = m.key === 'cardsOver25'     ? pCardsOver25
                : m.key === 'cardsOver35'     ? pCardsOver35
                : m.key === 'cardsOver45'     ? pCardsOver45
+               : m.key === 'cardsOver55'     ? pCardsOver55
+               : m.key === 'cardsOver65'     ? pCardsOver65
                : m.key === 'cardsUnder25'    ? pCardsUnder25
                : m.key === 'homeCardsOver15' ? pHomeCardsO15
                : m.key === 'awayCardsOver15' ? pAwayCardsO15
