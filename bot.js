@@ -7284,9 +7284,19 @@ async function generateSuperPickPlan(force = false) {
   try {
     console.log(`🎯 SuperPick: ${day ? 'refrescando' : 'generando'} plan del día...`);
     const g = await gatherDailyCandidates();
+    // NO-WIPE (bug 16-jul): si el gather falla o no trae candidatos, jamás
+    // sobrescribir el plan existente — un refresh flojo borraba picks futuros no
+    // bloqueados y destruía el registro de lo recomendado. Se conserva tal cual.
+    if ((g.status !== 'ok' || !g.candidates.length) && day && (day.picks || []).length) {
+      console.log('🎯 SuperPick: refresh sin candidatos usables — se conserva el plan actual (no-wipe)');
+      return day;
+    }
     // Se conservan: bloqueados (ya vistos por algún lead) y los ya jugándose/jugados
     const kept = (day?.picks || []).filter(p => p.status === 'ok' && (p.locked || new Date(p.kickoff) <= now));
-    let entries = kept;
+    // Futuros existentes no bloqueados: se re-optimizan si el gather trae mejores,
+    // pero si no aparece ninguno nuevo, se PRESERVAN (nunca se pierden por refresh).
+    const futurosExistentes = (day?.picks || []).filter(p => p.status === 'ok' && !p.locked && new Date(p.kickoff) > now);
+    let entries = kept.length ? kept : futurosExistentes;
     if (g.status === 'ok' && g.candidates.length) {
       const fechaBy = new Map(g.enriched.map(e => [e.fixtureId, e.fechaPartido]));
       const ranked = rankSuperPickCandidates(g.candidates, g.enriched, now);
@@ -7310,8 +7320,12 @@ async function generateSuperPickPlan(force = false) {
           }
         } catch {}
       }
-      entries = [...kept, ...nuevos];
+      // Si el gather no aportó picks nuevos, conservar los futuros existentes
+      // (no perder el plan por un refresh sin resultados).
+      entries = nuevos.length ? [...kept, ...nuevos] : [...kept, ...futurosExistentes];
     }
+    // Registrar al historial los que ya se jugaron (track record sin depender de leads)
+    commitFinishedSuperPicks();
     entries.sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
     entries.forEach((p, i) => { p.ordinal = i + 1; });
     const fresh = loadSuperPicks();
@@ -7333,7 +7347,25 @@ async function generateSuperPickPlan(force = false) {
   }
 }
 
-// Bloqueo al primer servicio: lo mostrado jamás cambia + entra al track record
+// Registra un SuperPick en el historial (picks.json) — idempotente por
+// fecha+fixture+selección. evaluatePendingPicks lo liquida tras el partido.
+function commitSuperPick(fecha, p) {
+  const picks = loadPicks();
+  if (picks.some(x => x.source === 'superpick' && x.fecha === fecha && x.fixtureId === p.fixtureId && x.seleccion === p.seleccion)) return false;
+  picks.push({
+    id: `sp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+    emitidoAt: p.servedAt || p.generadoAt || new Date().toISOString(),
+    fecha, fixtureId: p.fixtureId, fechaPartido: p.kickoff,
+    liga: p.liga, local: p.local, visitante: p.visitante,
+    mercado: p.mercado, seleccion: p.seleccion, linea: null, handicap: null,
+    cuota: p.cuota, stake: p.stake, esCombinada: !!p.esCombinada,
+    resultado: null, scoresFinal: null, source: 'superpick', ordinal: p.ordinal,
+  });
+  persistPicks(picks);
+  return true;
+}
+
+// Bloqueo al primer servicio: lo mostrado a un lead jamás cambia + al historial.
 function lockSuperPick(fecha, pick) {
   try {
     const store = loadSuperPicks();
@@ -7342,20 +7374,27 @@ function lockSuperPick(fecha, pick) {
     p.locked = true;
     p.servedAt = new Date().toISOString();
     persistSuperPicks(store);
-    const picks = loadPicks();
-    if (!picks.some(x => x.source === 'superpick' && x.fecha === fecha && x.fixtureId === p.fixtureId && x.seleccion === p.seleccion)) {
-      picks.push({
-        id: `sp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-        emitidoAt: p.servedAt, fecha, fixtureId: p.fixtureId, fechaPartido: p.kickoff,
-        liga: p.liga, local: p.local, visitante: p.visitante,
-        mercado: p.mercado, seleccion: p.seleccion, linea: null, handicap: null,
-        cuota: p.cuota, stake: p.stake, esCombinada: !!p.esCombinada,
-        resultado: null, scoresFinal: null, source: 'superpick', ordinal: p.ordinal,
-      });
-      persistPicks(picks);
-    }
+    commitSuperPick(fecha, p);
     console.log(`🔒 SuperPick #${p.ordinal} bloqueado al servirse: ${p.local} vs ${p.visitante} — ${p.seleccion} @ ${p.cuota}`);
   } catch (e) { console.error('lockSuperPick:', e.message); }
+}
+
+// TRACK RECORD COMPLETO: registra TODO SuperPick del plan cuyo partido ya empezó,
+// lo haya pedido un lead o no. Antes solo entraban los "bloqueados" → sin leads,
+// el historial no crecía y el motor no aprendía de su producto estrella.
+function commitFinishedSuperPicks() {
+  try {
+    const store = loadSuperPicks();
+    const now = Date.now();
+    let n = 0;
+    for (let d = 0; d >= -1; d--) { // hoy y ayer (por si el día ya rodó)
+      const fecha = new Date(now + d * 86400000).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+      for (const p of (store[fecha]?.picks || [])) {
+        if (p.status === 'ok' && new Date(p.kickoff).getTime() <= now && commitSuperPick(fecha, p)) n++;
+      }
+    }
+    if (n) console.log(`📌 SuperPick: ${n} pick(s) registrados al historial al jugarse`);
+  } catch (e) { console.error('commitFinishedSuperPicks:', e.message); }
 }
 
 function superPickTrackRecord(days = 30) {
@@ -7400,6 +7439,7 @@ function superPicksEvaluadosRecientes(horas = 48) {
 // los picks no bloqueados cada SUPERPICK_REFRESH_MIN (cuotas maduran en el día).
 setInterval(async () => {
   try {
+    commitFinishedSuperPicks(); // siempre: registra al historial los ya jugados (sin API, barato)
     if (colombiaHour() < SUPERPICK_BUILD_FROM_HOUR) return;
     if (hlEnCooldown()) return; // Highlightly agotado — no hostigar
     await generateSuperPickPlan();
