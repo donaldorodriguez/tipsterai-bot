@@ -373,10 +373,10 @@ const LEAGUE_BASE_RATES = {
   // ── Sudamérica ─────────────────────────────────────────────────────────────
   10145: { over25: 53, btts: 54, cards: 4.7, corners:  9.1, name: 'Copa Sudamericana' },
   11847: { over25: 54, btts: 55, cards: 4.8, corners:  9.3, name: 'Copa Libertadores' },
-  61205: { over25: 55, btts: 58, cards: 4.5, corners:  9.0, name: 'Brasileirao' },
-  223746:{ over25: 54, btts: 56, cards: 4.3, corners:  9.2, name: 'Liga MX' },
+  61205: { over25: 50, btts: 58, cards: 5.1, corners: 10.0, name: 'Brasileirao' }, // medido jul-2026 (177 pj)
+  223746:{ over25: 55, btts: 59, cards: 4.8, corners:  9.5, name: 'Liga MX' },      // medido Clausura26 (167 pj)
   204173:{ over25: 53, btts: 55, cards: 4.9, corners:  8.8, name: 'Liga BetPlay' },
-  216087:{ over25: 54, btts: 57, cards: 3.8, corners: 10.1, name: 'MLS' },
+  216087:{ over25: 62, btts: 61, cards: 4.5, corners: 10.0, name: 'MLS' },          // medido jul-2026 (218 pj)
   109712:{ over25: 48, btts: 50, cards: 5.1, corners:  8.7, name: 'Liga Argentina' },
   // ── Asia / Oriente Medio ──────────────────────────────────────────────────
   262041:{ over25: 57, btts: 60, cards: 3.9, corners:  9.8, name: 'Saudi Pro League' },
@@ -3681,7 +3681,21 @@ function buildPickCandidates(enrichedFixtures) {
       // implicaban, su probabilidad se encoge ANTES de todos los filtros.
       const _fam = marketFamily(m.key);
       const _cal = calib[_fam];
-      if (_cal?.disabled) continue; // ROI histórico < -15% en 20+ picks → desactivado
+      if (_cal?.disabled) {
+        // El apagado GLOBAL es demasiado bruto para tarjetas/corners: su ROI
+        // negativo agregado viene de contextos de baja tasa (Mundial con
+        // contención FIFA de árbitros, ligas de poco contacto). En una liga donde
+        // el mercado SÍ se da (tasa base ALTA, medida sobre cientos de partidos),
+        // el mercado sigue vivo — la liga decide, no un promedio global de pocos
+        // picks. Los demás mercados sí respetan el apagado (su problema no es de
+        // contexto). La autocalibración vuelve a apagarlo si aun así pierde.
+        const esTasaAlta = baseRates && (
+          (/CARDS/.test(_fam)   && baseRates.cards   >= 4.6) ||   // Brasil 5.1, MX 4.8, Argentina 5.1
+          (/CORNERS/.test(_fam) && baseRates.corners >= 10.3)     // solo ligas de corners elevados
+        );
+        if (!esTasaAlta) continue;
+        console.log(`♻️ ${_fam} rehabilitado en ${f.liga} (tasa base ${/CARDS/.test(_fam) ? baseRates.cards + ' tarj' : baseRates.corners + ' corners'}/p — apagado global no aplica)`);
+      }
       if (_cal && _cal.factor !== 1 && m.prob) m.prob = Math.min(0.97, m.prob * _cal.factor);
 
       if (!m.prob || m.prob < (m.minProb || 0.48)) continue; // prob insuficiente
