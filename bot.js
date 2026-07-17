@@ -891,6 +891,10 @@ const TEAM_ID_OVERRIDES = {
 
 // Aliases de nombres cortos/populares → nombre exacto en la API
 const TEAM_ALIASES = {
+  // Bolivia — Highlightly guarda varios equipos por su sigla, no por nombre completo
+  'academia del balompie':         'ABB',
+  'academia del balompie bolivar': 'ABB',
+  'academia del balompie de bolivar': 'ABB',
   'roma':            'AS Roma',
   'inter':           'Inter Milan',
   'inter milan':     'Inter Milan',
