@@ -7221,7 +7221,7 @@ const SUPERPICK_FILE = fs.existsSync('/data') ? '/data/superpicks.json' : path.j
 const SUPERPICK_MIN_KICKOFF_MIN  = 90;   // para ENTRAR al plan: kickoff ≥90 min futuro
 const SUPERPICK_SERVE_MIN        = 30;   // para SERVIRSE a un lead: kickoff ≥30 min futuro
 const SUPERPICK_SPACING_MIN      = 120;  // separación mínima entre kickoffs del plan
-const SUPERPICK_MAX_PICKS        = 3;
+const SUPERPICK_MAX_PICKS        = 5;
 const SUPERPICK_BUILD_FROM_HOUR  = 6;    // hora Col desde la que se construye el plan
 const SUPERPICK_REFRESH_MIN      = 90;   // re-optimización de picks no bloqueados
 const SUPERPICK_MAX_EV           = 25;   // EV mayor contra cuota real = probable error del modelo
