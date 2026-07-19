@@ -7317,11 +7317,17 @@ async function generateSuperPickPlan(force = false) {
       console.log('🎯 SuperPick: refresh sin candidatos usables — se conserva el plan actual (no-wipe)');
       return day;
     }
-    // Se conservan: bloqueados (ya vistos por algún lead) y los ya jugándose/jugados
-    const kept = (day?.picks || []).filter(p => p.status === 'ok' && (p.locked || new Date(p.kickoff) <= now));
-    // Futuros existentes no bloqueados: se re-optimizan si el gather trae mejores,
-    // pero si no aparece ninguno nuevo, se PRESERVAN (nunca se pierden por refresh).
-    const futurosExistentes = (day?.picks || []).filter(p => p.status === 'ok' && !p.locked && new Date(p.kickoff) > now);
+    // Se conservan: bloqueados (ya vistos por algún lead), los ya jugándose/jugados
+    // y los INMINENTES (a <90 min del kickoff). Estos últimos ya no re-califican como
+    // candidatos (rank exige ≥90 min), así que si no se congelan aquí caen en un hueco
+    // y un refresh los borra ANTES de jugarse → nunca llegan al historial (track record
+    // subcontado). Congelarlos garantiza que commitFinishedSuperPicks los registre.
+    const minAhead = p => (new Date(p.kickoff).getTime() - now.getTime()) / 60000;
+    const kept = (day?.picks || []).filter(p => p.status === 'ok' && (p.locked || minAhead(p) < SUPERPICK_MIN_KICKOFF_MIN));
+    // Futuros existentes re-optimizables (≥90 min, no bloqueados): se re-optimizan si el
+    // gather trae mejores, pero si no aparece ninguno nuevo, se PRESERVAN (nunca se
+    // pierden por refresh). Disjuntos de `kept` para no duplicar en el fallback.
+    const futurosExistentes = (day?.picks || []).filter(p => p.status === 'ok' && !p.locked && minAhead(p) >= SUPERPICK_MIN_KICKOFF_MIN);
     let entries = kept.length ? kept : futurosExistentes;
     if (g.status === 'ok' && g.candidates.length) {
       const fechaBy = new Map(g.enriched.map(e => [e.fixtureId, e.fechaPartido]));
