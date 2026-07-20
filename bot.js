@@ -1866,26 +1866,48 @@ function validateLiveOdds(odds, elapsed = 0, hg = 0, ag = 0) {
 // Over 2.5 tarjetas) se conservan.
 function sanitizeLivePicks(text) {
   if (!text) return text;
+  // Tolerante a markdown del LLM: "🎯 *PICK 1*", "🎯 PICK 1 —", "*🎯 PICK 1:*"…
+  // (caso real 19-jul: variantes con asteriscos esquivaban el regex estricto y
+  // el bloque pasaba entero sin evaluarse).
+  const PICK_HEAD = /^[*_#>\s]*🎯[*_ ]*PICK[*_ ]*\d+/i;
+  const PICK_SPLIT = /(?=[*_#>]*🎯[*_ ]*PICK[*_ ]*\d+)/i;
   const forbidden = (b) => {
     const s = b.toLowerCase();
-    if (/(tarjeta|amarilla|card)/.test(s) && (/\b0[.,]5\b/.test(s) || /al menos 1 (tarjeta|amarilla)/.test(s)))
+    // El mercado lo definen el TÍTULO y la línea "Selección" — no el razonamiento.
+    // (bug 19-jul: "atacará en el 2T" en el razonamiento eximía un Over 0.5 FT
+    // del filtro porque esMitad se evaluaba sobre el bloque entero.)
+    const header = s.split('\n')
+      .filter(l => /pick[*_ ]*\d|selecci[óo]n/.test(l))
+      .join('\n') || s.split('\n').slice(0, 2).join('\n');
+    if (/(tarjeta|amarilla|card)/.test(header) && (/\b0[.,]5\b/.test(header) || /al menos 1 (tarjeta|amarilla)/.test(header)))
       return 'Over 0.5 tarjetas (mercado inexistente en casas)';
-    const esMitad = /1t|2t|1er|2do|primer tiempo|segundo tiempo|mitad/.test(s);
-    if (/gol/.test(s) && (/\b0[.,]5\b/.test(s) || /al menos 1 gol/.test(s)) && /(partido|encuentro|\bft\b)/.test(s) && !esMitad)
+    const esMitad = /\b1t\b|\b2t\b|1er|2do|primer tiempo|segundo tiempo|mitad/.test(header);
+    if (/gol/.test(header) && (/(m[áa]s de|over)\s*0[.,]5/.test(header) || /al menos 1 gol/.test(header)) && !esMitad)
       return 'Over 0.5 goles FT (lock sin valor, cuota real ~1.20)';
+    // Pick contra el propio modelo: cuota ESTIMADA (breakeven, no de bookmaker)
+    // > 2.00 ⟺ el modelo le da < 50% al pick. Sin cuota real que pague por encima
+    // de la justa, es EV cero/negativo por construcción (caso real 19-jul: Over 5.5
+    // córners "42.3%, cuota justa ~2.36" cuando el propio modelo favorecía el Under).
+    const est = s.match(/cuota estimada[^\n]*?(\d+[.,]\d+)/);
+    if (est && parseFloat(est[1].replace(',', '.')) > 2.0)
+      return `pick contra el propio modelo (prob < 50%, cuota estimada ${est[1]} sin cuota real)`;
     return null;
   };
   let footer = '', body = text;
   const fMatch = text.match(/\n*(?:━+\n)?📈[\s\S]*$/);
   if (fMatch) { footer = fMatch[0]; body = text.slice(0, fMatch.index); }
-  const kept = body.split(/(?=🎯 PICK \d+)/).filter(part => {
-    if (!/^🎯 PICK \d+/.test(part)) return true;
+  const kept = body.split(PICK_SPLIT).filter(part => {
+    if (!PICK_HEAD.test(part)) return true;
     const r = forbidden(part);
     if (r) { console.log(`🚫 Live gate: pick eliminado (${r})`); return false; }
     return true;
   });
   let n = 0;
-  return (kept.join('') + footer).replace(/🎯 PICK \d+/g, () => `🎯 PICK ${++n}`);
+  return (kept.join('') + footer)
+    // "Actúa antes del min X" está prohibido en el prompt (dato inventado) pero el
+    // LLM lo sigue emitiendo — se elimina determinísticamente.
+    .replace(/^.*⏰ Act[úu]a antes del.*$\n?/gmi, '')
+    .replace(/🎯([*_ ]*)PICK([*_ ]*)\d+/gi, (_, a, b) => `🎯${a}PICK${b}${++n}`);
 }
 
 // ─── Alineaciones y lesionados REALES — API-Football ──────────────────────────
@@ -3124,11 +3146,16 @@ function calcLiveGoalLines(currentGoals, elapsed, homeFor = 1.3, awayFor = 1.0, 
         condicion: 'Recomendar SOLO si la cuota real en vivo es ≤ ~2.2 (la confirma el mercado). Si es mucho más alta, modelo y mercado discrepan → preferir el Asiático o abstenerse.',
       };
     } else if (p1 >= 0.62 && p2 >= 0.28) {
+      // La línea se expresa ABSOLUTA (total del partido), como aparece en el
+      // bookmaker: 0-0 → Asiático 1.0, 1-0 → 2.0, 1-1 → 3.0… = goles actuales + 1.
+      // "sobre goles restantes" confundía al usuario — la casa no cotiza así.
+      const lineaAsiatica = (currentGoals + 1).toFixed(1);
       recomendacion2T = {
-        jugada: `Hándicap Asiático +1.0 sobre goles restantes (sobre el ${currentGoals === 0 ? '0-0' : 'marcador actual'})`,
+        jugada: `Hándicap Asiático de goles — Over ${lineaAsiatica} (línea TOTAL del partido; con el marcador actual de ${currentGoals} ${currentGoals === 1 ? 'gol' : 'goles'} equivale a: gana con 2+ goles más, devuelve con exactamente 1 más)`,
+        lineaAsiatica: +lineaAsiatica,
         probGana: +(p2 * 100).toFixed(1),            // 2+ goles más = gana
         probDevuelve: +((p1 - p2) * 100).toFixed(1), // exactamente 1 gol más = push
-        nota: 'Vienen goles pero 2 más no es seguro: el Asiático +1.0 gana con 2+ goles más y DEVUELVE el stake con exactamente 1 más — cuota real típica 1.7-1.9. Jugada preferida sobre pedir 2 goles más.',
+        nota: `Vienen goles pero 2 más no es seguro: el Asiático Over ${lineaAsiatica} (total) gana con 2+ goles más y DEVUELVE el stake con exactamente 1 más — cuota real típica 1.7-1.9. Jugada preferida sobre pedir 2 goles más. Presenta SIEMPRE la línea ${lineaAsiatica} tal cual — es la que el usuario verá en su casa de apuestas.`,
       };
     }
   }
@@ -5239,7 +5266,7 @@ Igual de PROHIBIDO: citar probabilidades del modelo pre-partido (probLocalGana/p
 ⭐ OPORTUNIDAD "VIENEN MÁS GOLES" (si existe el campo lineasGolesVivo.recomendacion2T):
 En CUALQUIER marcador, cuando el xG en vivo y el contexto indican que vienen más goles, el motor calcula la mejor jugada sobre goles RESTANTES en recomendacion2T. Si ese campo existe, PRESÉNTALO como uno de los picks, usando EXACTAMENTE el mercado (jugada) y la probabilidad que trae:
 - Si jugada empieza con "Over ... (2 goles más)": solo recomiéndalo si cuotasVivo confirma cuota ≤ ~2.2 (respeta el campo condicion). Si la cuota real es mucho mayor, di que el modelo ve los goles pero el mercado no los paga → preferir el Asiático o no forzar.
-- Si jugada empieza con "Hándicap Asiático +1.0...": es la jugada PREFERIDA (menor riesgo). Gana con 2+ goles más y DEVUELVE el stake con exactamente 1 gol más. Explica esa mecánica al usuario. Cuota real típica 1.7-1.9.
+- Si jugada empieza con "Hándicap Asiático de goles — Over X.X": es la jugada PREFERIDA (menor riesgo). La línea X.X es el TOTAL del partido tal como aparece en el bookmaker (marcador actual + 1.0: con 0-0 es Over 1.0, con 1-0 es Over 2.0, con 1-1 es Over 3.0). Gana con 2+ goles más y DEVUELVE el stake con exactamente 1 gol más. Presenta la línea EXACTA de la jugada y explica esa mecánica al usuario — PROHIBIDO reformularla como "+1.0 sobre goles restantes". Cuota real típica 1.7-1.9.
 Si recomendacion2T NO existe, NO inventes esta jugada.
 
 CUOTAS EN VIVO:
@@ -5449,6 +5476,8 @@ FORMATO OBLIGATORIO — SIEMPRE usa este estructura:
 REGLAS IRROMPIBLES:
 - Cuota mínima 1.65 para cualquier pick. Cuota máxima 2.30.
 - Stakes SOLO del 5 al 10 — si un pick no llega a 5, DESCÁRTALO.
+- COHERENCIA TÍTULO=SELECCIÓN=CUOTA (obligatoria): el título del pick, la línea "Selección" y la "Cuota mínima" deben referirse al MISMO mercado con la MISMA línea. Si tu razonamiento concluye que la línea con valor es el Hándicap -1.5 (y no el -0.5), entonces el título dice -1.5, la Selección dice -1.5 y la cuota mínima es la del -1.5. PROHIBIDO titular un pick con una línea y recomendar otra distinta en el razonamiento — decide UNA línea antes de escribir el pick y sé consistente en las tres partes.
+- En Hándicap Asiático de resultado, indica siempre el equipo y la línea exacta (ej: "Bahia -1.5"), nunca solo "local gana".
 - NUNCA muestres porcentajes de probabilidad al usuario (ni "Probabilidad: X%", ni "45% Crystal Palace", nada). Son datos internos de calibración.
 - NUNCA muestres EV%, lambdas, xG, campos técnicos internos.
 - NUNCA uses # ## ### (Telegram los muestra como texto plano).
@@ -6102,6 +6131,13 @@ async function evaluatePickResult(pick, fixture, stats) {
 
   // 3. Goles — solo si NO es pick de corners ni tarjetas, y no es 1T/2T
   if (es1T || es2T) return '?';
+  // Hándicap asiático de goles con línea ENTERA (Over X.0): push si el total queda
+  // exacto en la línea. Debe evaluarse ANTES del matcher genérico over, que lo
+  // liquidaría binario W/L y convertiría las devoluciones en falsas L.
+  // (La redacción vieja "+1.0 sobre goles restantes" no matcheaba ningún patrón
+  // y esos picks quedaban en '?' para siempre.)
+  const ahGoalMatch = sel.match(/asi[áa]tico[^\n]*?over\s+(\d+)[.,]0\b/i);
+  if (ahGoalMatch) { const l = parseInt(ahGoalMatch[1], 10); return total > l ? 'W' : total === l ? 'V' : 'L'; }
   const overGoalMatch  = sel.match(/(?:over|más de|mas de)\s+(\d+[.,]\d+)\s*(?:goles?|goals?|ft\b|total)?/i) ||
                          sel.match(/(?:goles?|goals?)\s+(?:over|más de|mas de)\s+(\d+[.,]\d+)/i);
   const underGoalMatch = sel.match(/(?:under|menos de)\s+(\d+[.,]\d+)\s*(?:goles?|goals?|ft\b|total)?/i) ||
@@ -8376,10 +8412,11 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
   }
 
   await bot.sendMessage(chatId, '🎯 Identificando picks de valor...');
-  const analysis = await sonnet(
+  const analysisRaw = await sonnet(
     INPLAY_SYSTEM,
-    `DATOS REALES EN VIVO:\n\n${JSON.stringify(enriched, null, 2)}\n\nMáximo 3 picks en total. REGLA IRROMPIBLE DE CUOTA: cuota mínima 1.50 para cualquier pick. Si cuotasVivo es null → solo recomienda mercados cuya cuota estimada (lineasConValor) sea > 1.50; si no hay ninguno → escribe ⛔ Sin picks de valor en este momento. PROHIBIDO dar picks con cuota obvia (< 1.50) aunque el análisis lo favorezca.`
+    `DATOS REALES EN VIVO:\n\n${JSON.stringify(enriched, null, 2)}\n\nMáximo 3 picks en total. REGLA IRROMPIBLE DE CUOTA: cuota mínima 1.50 para cualquier pick. Si cuotasVivo es null → solo recomienda mercados cuya cuota estimada (lineasConValor) sea > 1.50 Y cuyo lado tenga probabilidad ≥ 50% del modelo (recomendar el lado < 50% sin cuota real es apostar contra el propio modelo); si no hay ninguno → escribe ⛔ Sin picks de valor en este momento. PROHIBIDO dar picks con cuota obvia (< 1.50) aunque el análisis lo favorezca.`
   );
+  const analysis = sanitizeLivePicks(analysisRaw); // mismo gate que el análisis de partido específico
   try {
     await sendLong(chatId, `🔴 *PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}*\n\n${analysis}`, { parse_mode: 'Markdown' });
   } catch {
@@ -10285,8 +10322,9 @@ async function handleImage(msg) {
       INPLAY_SYSTEM,
       `DATOS DE LA IMAGEN (fuente principal):\n${JSON.stringify(matchData, null, 2)}\n\nDATOS HISTÓRICOS API:\n${apiContext ? JSON.stringify(apiContext, null, 2) : 'No disponibles'}\n\n${liveOddsCtx ? `CUOTAS EN VIVO REALES (bookmaker):\n${JSON.stringify(liveOddsCtx, null, 2)}\n\n` : ''}NOTA: ${contextNote}${coherencia}`
     );
-    // Gate pre-publicación (antes el flujo de imagen enviaba el texto crudo:
+    // Gates pre-publicación (antes el flujo de imagen enviaba el texto crudo:
     // así salió una combinada con stake 5 y cuotas bajo el piso).
+    analysis = sanitizeLivePicks(analysis); // mismo gate anti-lock que las otras rutas en vivo
     analysis = await applyStakeGate(analysis, [], [{
       fixtureId: liveFixtureId, local: matchData.home_team, visitante: matchData.away_team,
       liga: 'En vivo (imagen)', fechaPartido: new Date().toISOString(),
