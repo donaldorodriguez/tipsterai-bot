@@ -1891,6 +1891,12 @@ function sanitizeLivePicks(text) {
     const est = s.match(/cuota estimada[^\n]*?(\d+[.,]\d+)/);
     if (est && parseFloat(est[1].replace(',', '.')) > 2.0)
       return `pick contra el propio modelo (prob < 50%, cuota estimada ${est[1]} sin cuota real)`;
+    // Mercados MEZCLADOS en una selección (caso real 20-jul: "IDV gana (DNB / AH
+    // -0.5)"): DNB = AH 0.0 (empate devuelve) y AH -0.5 = victoria directa (empate
+    // pierde) son mercados distintos con cuotas distintas — el pick es inevaluable
+    // y la cuota mínima no corresponde a ninguno. Una selección = UN mercado.
+    if (/\bdnb\b|empate devuelve|draw no bet/.test(header) && /h[áa]ndicap|asi[áa]tico|\bah\b/.test(header))
+      return 'mercados mezclados en una selección (DNB + Hándicap Asiático)';
     return null;
   };
   let footer = '', body = text;
@@ -5478,6 +5484,7 @@ REGLAS IRROMPIBLES:
 - Stakes SOLO del 5 al 10 — si un pick no llega a 5, DESCÁRTALO.
 - COHERENCIA TÍTULO=SELECCIÓN=CUOTA (obligatoria): el título del pick, la línea "Selección" y la "Cuota mínima" deben referirse al MISMO mercado con la MISMA línea. Si tu razonamiento concluye que la línea con valor es el Hándicap -1.5 (y no el -0.5), entonces el título dice -1.5, la Selección dice -1.5 y la cuota mínima es la del -1.5. PROHIBIDO titular un pick con una línea y recomendar otra distinta en el razonamiento — decide UNA línea antes de escribir el pick y sé consistente en las tres partes.
 - En Hándicap Asiático de resultado, indica siempre el equipo y la línea exacta (ej: "Bahia -1.5"), nunca solo "local gana".
+- SEMÁNTICA DEL HÁNDICAP ASIÁTICO (no la confundas): AH -0.5 = victoria directa (paga IGUAL que el 1X2, el empate PIERDE). DNB = AH 0.0 (el empate DEVUELVE el stake). Son tres mercados distintos con tres cuotas distintas. Si la victoria directa no tiene valor por cuota baja, el AH -0.5 TAMPOCO (es la misma apuesta) — las líneas que suben la cuota son -1.0 (gana por 1 → devuelve) y -1.5 (necesita ganar por 2+). PROHIBIDO escribir dos mercados en una misma Selección tipo "IDV gana (DNB / AH -0.5)" — elige UNO y su cuota correspondiente.
 - NUNCA muestres porcentajes de probabilidad al usuario (ni "Probabilidad: X%", ni "45% Crystal Palace", nada). Son datos internos de calibración.
 - NUNCA muestres EV%, lambdas, xG, campos técnicos internos.
 - NUNCA uses # ## ### (Telegram los muestra como texto plano).
@@ -8235,6 +8242,9 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     `Analiza este partido en profundidad (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}`
   );
 
+  // Gate determinista de selecciones incoherentes (mercados mezclados tipo
+  // "DNB / AH -0.5", locks 0.5) — mismo sanitizador que las rutas en vivo.
+  analysis = sanitizeLivePicks(analysis);
   // Gate duro pre-publicación: valida stakes y elimina picks con cuota < 1.65
   analysis = await applyStakeGate(analysis, [fixtureForEngine], [{
     fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam,
