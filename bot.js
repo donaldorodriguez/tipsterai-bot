@@ -7337,6 +7337,24 @@ function buildSuperPickPlan(ranked, fechaBy, kept = [], maxPicks = SUPERPICK_MAX
   return chosen;
 }
 
+// Notificación WhatsApp al admin vía el bot de WA (infoproducto-validator en
+// Railway): POST a su endpoint /api/superpick-notify con el mismo Bearer que
+// comparte la API SuperPick. El bot de WA envía por el número de TipsterAI al
+// SUPERPICK_NOTIFY_PHONE/ADMIN_PHONE configurado allá. Fire-and-forget.
+async function notifySuperPickWhatsApp(message) {
+  const url = process.env.SUPERPICK_NOTIFY_URL;
+  if (!url || !process.env.SUPERPICK_API_TOKEN) return;
+  try {
+    await axios.post(url, { message }, {
+      headers: { Authorization: `Bearer ${process.env.SUPERPICK_API_TOKEN}` },
+      timeout: 10000,
+    });
+    console.log('📲 SuperPick: notificación WhatsApp enviada al admin');
+  } catch (e) {
+    console.error('notifySuperPickWhatsApp:', JSON.stringify(e.response?.data || e.message));
+  }
+}
+
 let _superPickGenerating = false;
 async function generateSuperPickPlan(force = false) {
   const today = todayDate();
@@ -7413,6 +7431,27 @@ async function generateSuperPickPlan(force = false) {
     persistSuperPicks(fresh);
     console.log(`🎯 SuperPick plan ${today}: ${entries.length} pick(s)` +
       entries.map(p => `\n   #${p.ordinal} ${p.local} vs ${p.visitante} | ${p.seleccion} @ ${p.cuota} | EV ${p.ev}% | ${p.kickoff}${p.locked ? ' 🔒' : ''}`).join(''));
+    // ── Notificación WhatsApp al admin: plan del día y cambios REALES ─────────
+    // Solo avisa cuando hay novedad de verdad (primer plan del día, o picks que
+    // entran/salen respecto al plan anterior) — un refresh que re-elige los
+    // mismos picks no notifica.
+    try {
+      const prev = day?.picks || [];
+      const mismo = (a, b) => a.fixtureId === b.fixtureId && a.seleccion === b.seleccion;
+      const entran = entries.filter(p => !prev.some(q => mismo(p, q)));
+      const salen  = prev.filter(q => new Date(q.kickoff) > now && !entries.some(p => mismo(p, q)));
+      const linea = p => `#${p.ordinal} ⏰ ${formatHour(p.kickoff)} — *${p.local} vs ${p.visitante}* (${p.liga})\n${p.seleccion} @ ${p.cuota} | EV +${p.ev}% | stake ${p.stake}/10`;
+      let msg = null;
+      if (!day && entries.length) {
+        msg = `🎯 *SuperPicks del día* (${entries.length}):\n\n${entries.map(linea).join('\n\n')}`;
+      } else if (entran.length || salen.length) {
+        const partes = [];
+        if (entran.length) partes.push(`🆕 Entra${entran.length > 1 ? 'n' : ''}:\n\n${entran.map(linea).join('\n\n')}`);
+        if (salen.length)  partes.push(`❌ Sale${salen.length > 1 ? 'n' : ''}: ${salen.map(p => `${p.local} vs ${p.visitante} (${p.seleccion})`).join(' | ')}`);
+        msg = `🔄 *SuperPick — plan actualizado*\n\n${partes.join('\n\n')}`;
+      }
+      if (msg) notifySuperPickWhatsApp(msg); // fire-and-forget
+    } catch (e) { console.error('superpick notify build:', e.message); }
     return fresh[today];
   } catch (e) {
     console.error('generateSuperPickPlan:', e.message);
