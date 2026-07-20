@@ -7341,11 +7341,11 @@ function buildSuperPickPlan(ranked, fechaBy, kept = [], maxPicks = SUPERPICK_MAX
 // Railway): POST a su endpoint /api/superpick-notify con el mismo Bearer que
 // comparte la API SuperPick. El bot de WA envía por el número de TipsterAI al
 // SUPERPICK_NOTIFY_PHONE/ADMIN_PHONE configurado allá. Fire-and-forget.
-async function notifySuperPickWhatsApp(message) {
+async function notifySuperPickWhatsApp(message, picksCount = null) {
   const url = process.env.SUPERPICK_NOTIFY_URL;
   if (!url || !process.env.SUPERPICK_API_TOKEN) return;
   try {
-    await axios.post(url, { message }, {
+    await axios.post(url, { message, picksCount }, {
       headers: { Authorization: `Bearer ${process.env.SUPERPICK_API_TOKEN}` },
       timeout: 10000,
     });
@@ -7450,7 +7450,7 @@ async function generateSuperPickPlan(force = false) {
         if (salen.length)  partes.push(`❌ Sale${salen.length > 1 ? 'n' : ''}: ${salen.map(p => `${p.local} vs ${p.visitante} (${p.seleccion})`).join(' | ')}`);
         msg = `🔄 *SuperPick — plan actualizado*\n\n${partes.join('\n\n')}`;
       }
-      if (msg) notifySuperPickWhatsApp(msg); // fire-and-forget
+      if (msg) notifySuperPickWhatsApp(msg, entries.length); // fire-and-forget
     } catch (e) { console.error('superpick notify build:', e.message); }
     return fresh[today];
   } catch (e) {
@@ -11700,6 +11700,29 @@ app.get('/api/superpick', (req, res) => {
     });
   } catch (e) {
     console.error('/api/superpick:', e.message);
+    res.status(500).json({ error: 'internal' });
+  }
+});
+
+// Plan COMPLETO del día — read-only, NO bloquea picks (a diferencia de
+// /api/superpick que bloquea al servir). Lo usa el bot de WA para el comando
+// PLAN del admin y para las notificaciones. Mismo token.
+app.get('/api/superpick/plan', (req, res) => {
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!process.env.SUPERPICK_API_TOKEN || token !== process.env.SUPERPICK_API_TOKEN) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  try {
+    const today = todayDate();
+    const day = loadSuperPicks()[today] || null;
+    res.json({
+      fecha: today,
+      generadoAt: day?.generadoAt || null,
+      refreshedAt: day?.refreshedAt || null,
+      picks: day?.picks || [],
+    });
+  } catch (e) {
+    console.error('/api/superpick/plan:', e.message);
     res.status(500).json({ error: 'internal' });
   }
 });
