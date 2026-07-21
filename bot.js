@@ -3929,7 +3929,22 @@ function buildPickCandidates(enrichedFixtures) {
                       : leagueP >= 45 ? 1.00   // Tier 4: Championship, LaLiga2, Colombia A
                       : leagueP >= 30 ? 0.90   // Tier 5: Ligas medianas europeas
                       :                0.75;   // Tier 6-7: Ligas sin datos confiables
-      const ev = +(evRaw * tierMult).toFixed(2);
+      const evModel = +(evRaw * tierMult).toFixed(2);
+      // ── Ancla del EV al ROI real del mercado (corrige winner's curse) ────────
+      // El factor de prob solo castiga cuando acertamos MENOS que la cuota. Un
+      // mercado bien preciado donde NO tenemos edge (acierto≈implícita, ROI~0)
+      // pasa con factor≈1 y el modelo infla su EV igual → se cuela (caso real
+      // Under de goles: 54% acierto, ROI 0%, pero emitido como +9% EV). Aquí
+      // encogemos el EV hacia el ROI medido, ponderado por muestra (w≤0.6). SOLO
+      // encoge (min), nunca infla — no premiar ROI alto de muestra chica. Los
+      // mercados apagados quedan fuera (ya filtrados, o rehabilitados por tasa
+      // base de liga — ahí manda la liga, no el ROI global).
+      let ev = evModel;
+      if (_cal && !_cal.disabled && _cal.roi != null && _cal.n >= CALIB_MIN_N) {
+        const w = Math.min(0.6, _cal.n / 60);
+        ev = Math.min(evModel, +(evModel * (1 - w) + _cal.roi * w).toFixed(2));
+        if (ev < evModel - 0.5) console.log(`⚓ EV anclado ${f.local} vs ${f.visitante} [${_fam}] ${evModel}%→${ev}% (ROI ${_cal.roi}%, n${_cal.n}, w${w.toFixed(2)})`);
+      }
       if (ev < -5) continue;
 
       // ── Umbral de valor profesional: con cuota real, solo publicar EV ≥ +3% ──
