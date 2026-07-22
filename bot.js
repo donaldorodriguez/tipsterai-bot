@@ -7625,6 +7625,94 @@ setInterval(async () => {
   } catch (e) { console.error('superpick cron:', e.message); }
 }, 5 * 60 * 1000);
 
+// ─── Alerta de gol PROACTIVA — push automático al WhatsApp del admin ──────────
+// Convierte el reglamento más fuerte (alerta de gol 1T: over05_1T 92%, over_1T
+// 100%) en avisos automáticos, sin que el usuario los pida. FRUGAL con la API:
+// pre-filtra con la lista de en vivo (cacheada 30s, gratis) a solo 1T/min 8-32/0-0
+// ANTES de pedir stats; salta eventos; dedup por fixture; cooldown de stats.
+const GOALSCAN = {
+  MIN_ELAPSED: 8, MAX_ELAPSED: 32,   // ventana de valor del 1T: tiempo para el gol + la cuota aún paga
+  MIN_PROB: 60,                       // prob mínima (calcGoalAlert ya exige cuota >1.50)
+  MAX_FIXTURES: 6,                    // tope de fixtures a los que pedir stats por pasada
+  HOUR_FROM: 7, HOUR_TO: 22,          // 7am–10pm Col
+  MAX_PER_HOUR: 5,
+  STATS_COOLDOWN_MIN: 6,              // no re-pedir stats del mismo fixture antes de esto
+};
+const _goalAlertSent     = new Map(); // fixtureId → fecha (dedup: 1 alerta/partido/día)
+const _goalStatsFetchedAt = new Map();// fixtureId → ts (cooldown de stats)
+let   _goalAlertTimes    = [];        // timestamps de envíos (tope MAX_PER_HOUR)
+
+async function notifyGoalAlertWhatsApp(a) {
+  const url = process.env.SUPERPICK_NOTIFY_URL;
+  if (!url || !process.env.SUPERPICK_API_TOKEN) return;
+  const l1 = `${a.liga || ''} · ${a.local} vs ${a.visitante} · min ${a.minuto} (${a.marcador || '0-0'})`;
+  const l2 = `Viene gol en el 1er tiempo → ${a.market} · cuota ~${a.impliedOdds} · prob ${a.pGoal}%`;
+  try {
+    await axios.post(url, {
+      message: `⚡ *ALERTA DE GOL*\n${l1}\n${l2}`,
+      template: { name: 'alerta_gol', params: [l1, l2] },
+    }, { headers: { Authorization: `Bearer ${process.env.SUPERPICK_API_TOKEN}` }, timeout: 10000 });
+    console.log('⚡📲 Alerta de gol enviada al WhatsApp del admin');
+  } catch (e) { console.error('notifyGoalAlertWhatsApp:', JSON.stringify(e.response?.data || e.message)); }
+}
+
+async function scanGoalAlertsProactive() {
+  try {
+    const h = colombiaHour();
+    if (h < GOALSCAN.HOUR_FROM || h >= GOALSCAN.HOUR_TO) return; // fuera de horario → 0 llamadas
+    if (hlEnCooldown()) return;                                  // HL agotado → no hostigar
+    if (!process.env.SUPERPICK_NOTIFY_URL) return;
+    const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    for (const [fid, d] of _goalAlertSent) if (d !== today) _goalAlertSent.delete(fid);
+    const now = Date.now();
+    _goalAlertTimes = _goalAlertTimes.filter(t => now - t < 3600e3);
+    if (_goalAlertTimes.length >= GOALSCAN.MAX_PER_HOUR) return;
+
+    const liveRaw = await fetchLiveRaw().catch(() => liveCache.raw || []);
+    // PRE-FILTRO GRATIS (sin llamadas por-fixture): 1er tiempo, ventana de min, 0-0
+    const pre = [];
+    for (const m of (liveRaw || [])) {
+      if (m.state?.description !== 'First half') continue;
+      const p = parseFixture(m);
+      if (p.homeGoals !== 0 || p.awayGoals !== 0) continue;
+      const el = p.elapsed || 0;
+      if (el < GOALSCAN.MIN_ELAPSED || el > GOALSCAN.MAX_ELAPSED) continue;
+      if (PICKS_EXCLUDE_LEAGUES.has(p.leagueId)) continue;
+      if (_goalAlertSent.has(p.fixtureId)) continue;
+      if (now - (_goalStatsFetchedAt.get(p.fixtureId) || 0) < GOALSCAN.STATS_COOLDOWN_MIN * 60e3) continue;
+      pre.push({ raw: m, parsed: p });
+    }
+    if (!pre.length) return;
+
+    const batch = pre.slice(0, GOALSCAN.MAX_FIXTURES);
+    const alerts = [];
+    for (const { raw, parsed } of batch) {
+      _goalStatsFetchedAt.set(parsed.fixtureId, now);
+      const [liveStats, homeStats, awayStats] = await Promise.all([
+        getFixtureStatistics(raw.id).catch(() => null),          // única llamada nueva/fixture
+        getTeamStats(raw.homeTeam.id, raw.league?.id).catch(() => null), // cacheada 24h
+        getTeamStats(raw.awayTeam.id, raw.league?.id).catch(() => null), // cacheada 24h
+      ]);
+      const alert = calcGoalAlert(parsed, liveStats, homeStats, awayStats, {});
+      if (!alert || alert._rechazado) continue;
+      if (!['over05_1T', 'over_1T', 'gol_equipo_1T'].includes(alert.tipo)) continue; // SOLO 1T
+      if ((alert.pGoal || 0) < GOALSCAN.MIN_PROB) continue;
+      if ((alert.impliedOdds || 0) < 1.50) continue;
+      alerts.push(alert);
+    }
+    if (!alerts.length) return;
+
+    alerts.sort((a, b) => (b.pGoal || 0) - (a.pGoal || 0));      // la mejor por pasada
+    const a = alerts[0];
+    _goalAlertSent.set(a.fixtureId, today);
+    _goalAlertTimes.push(now);
+    await notifyGoalAlertWhatsApp(a);
+    try { saveAlertaGolPicks([a]); } catch {}                    // al track record, igual que on-demand
+    console.log(`⚡ Alerta proactiva: ${a.local} vs ${a.visitante} min ${a.minuto} — ${a.market} @ ~${a.impliedOdds} (${a.pGoal}%)`);
+  } catch (e) { console.error('scanGoalAlertsProactive:', e.message); }
+}
+setInterval(() => scanGoalAlertsProactive().catch(e => console.error('goalscan cron:', e.message)), 5 * 60 * 1000);
+
 // ─── Sistema del Día (admin-only) ────────────────────────────────────────────
 // Escanea TODOS los partidos de hoy, calcula EV por pick y arma la apuesta de sistema
 // óptima (2/3, 3/4, 3/5 etc.) basada en probabilidades Poisson + cuotas reales.
