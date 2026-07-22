@@ -763,6 +763,11 @@ function normalizeTeamName(str) {
   return str
     .toLowerCase()
     .normalize('NFD').replace(/[\u0300-\u036f]/g, '') // quita tildes y diacríticos (ç→c, ü→u, ö→o, etc.)
+    // Letras que NO se descomponen en NFD (nórdicas/eslavas) — sin esto "Bodø/Glimt"
+    // quedaba "bodø glimt" y no matcheaba "bodo glimt" (toda la Eliteserien noruega).
+    .replace(/ø/g, 'o').replace(/æ/g, 'ae').replace(/œ/g, 'oe')
+    .replace(/ð/g, 'd').replace(/þ/g, 'th').replace(/ß/g, 'ss')
+    .replace(/đ/g, 'd').replace(/ł/g, 'l').replace(/ı/g, 'i').replace(/ħ/g, 'h')
     .replace(/[/\-_.&']/g, ' ')                       // normaliza separadores (Bodo/Glimt → bodo glimt)
     .replace(/\s+/g, ' ')
     .trim();
@@ -11227,6 +11232,11 @@ bot.on('message', async (msg) => {
         }
         break;
       case 'en_vivo': {
+        // Si nombró un EQUIPO ("Bodø/Glimt en vivo"), quiere el análisis de ESE
+        // partido (en vivo si está jugando), no la lista general. Antes se ignoraba
+        // intent.equipo → caía a handleVivo (top-4 en vivo) y "no lo encontraba".
+        // handlePartido detecta el estado real del fixture y da análisis in-play si aplica.
+        if (intent.equipo) { await handlePartido(chatId, intent.equipo, intent.liga || ''); break; }
         const lid = intent.liga ? findLeagueId(intent.liga) : null;
         const lname = lid ? (LEAGUE_MAP[lid]?.name || intent.liga) : intent.liga || null;
         await handleVivo(chatId, lid, lname);
