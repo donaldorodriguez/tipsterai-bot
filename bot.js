@@ -1152,6 +1152,13 @@ const TEAM_SEARCH_ALTERNATES = {
 async function findTeamInFixtureCache(query) {
   const q = normalizeTeamName(translateTeamName(query));
   if (!q) return null;
+  // Un query masculino de clubes no debe resolver a un fixture FEMENINO o JUVENIL
+  // (bug real: "Ham-Kam"/"Hammarby" caía en "Norrköping Women vs Hammarby" de la
+  // Damallsvenskan). OJO: no usar el token de "reserva" con 'b' suelta — matchearía
+  // "Serie B" y hundiría esos partidos. Solo mujeres + juvenil explícito.
+  const FEM   = /\b(women|femenin[ao]|ladies|femmes|damen|vrouwen|mujer|fem)\b| w$/i;
+  const YOUTH = /\b(sub|youth|juvenil|u-?\d{2})\b/i;
+  const wantsFemYouth = FEM.test(query) || YOUTH.test(query);
   const pools = [liveCache.raw || []];
   for (let d = -1; d <= 2; d++) { // ayer incluido: "¿cómo quedó X?" de partidos recién jugados
     const ds = new Date(Date.now() + d * 86400000)
@@ -1163,6 +1170,8 @@ async function findTeamInFixtureCache(query) {
   let best = null, bestScore = 0;
   for (const pool of pools) {
     for (const m of pool) {
+      const femYouth = !wantsFemYouth &&
+        [m.homeTeam?.name, m.awayTeam?.name, m.league?.name].some(n => n && (FEM.test(n) || YOUTH.test(n)));
       for (const t of [m.homeTeam, m.awayTeam]) {
         if (!t?.name || !t?.id) continue;
         const tn = normalizeTeamName(t.name);
@@ -1170,6 +1179,7 @@ async function findTeamInFixtureCache(query) {
         if (tn === q) s = 100;
         else if (tn.startsWith(q + ' ') || tn.endsWith(' ' + q)) s = 80;
         else if (q.length >= 5 && tn.includes(q)) s = 60;
+        if (femYouth && s > 0) s -= 45;   // fixture fem/juvenil: gana un match masculino real en otro pool
         if (s > bestScore) { bestScore = s; best = { id: t.id, name: t.name }; }
       }
     }
@@ -5535,6 +5545,8 @@ Responde en español. Sé analítico pero directo.`;
 // ─── Intent detection ─────────────────────────────────────────────────────────
 
 const INTENT_SYSTEM = `Eres un clasificador de intenciones para un bot tipster de fútbol. Responde ÚNICAMENTE con JSON válido.
+
+⛔ REGLA CRÍTICA — NOMBRES DE EQUIPO TEXTUALES: copia el nombre del equipo EXACTAMENTE como lo escribió el usuario en el campo "equipo". PROHIBIDO "corregir", completar o cambiarlo por un equipo más conocido aunque no lo reconozcas. Ejemplos: "Ham-Kam" → equipo:"Ham-Kam" (NO "Hammarby"); "Bodø/Glimt" → "Bodø/Glimt"; "Nvo Hamburgo" → "Nvo Hamburgo". Si no conoces el equipo, cópialo igual — el sistema lo resuelve después.
 
 Intenciones disponibles:
 - "picks_hoy": picks generales del día en todas las ligas
