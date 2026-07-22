@@ -4096,25 +4096,42 @@ function buildPickCandidates(enrichedFixtures) {
           if (!best || score > best._score) best = { p, comboOdds, comboProb, comboEV, _score: score };
         }
         if (best) {
-          const kellyPct = 25 * (best.comboProb * best.comboOdds - 1) / (best.comboOdds - 1);
-          candidates.push({
-            ...base,
-            market:      'combinada',
-            marketLabel: `Combinada: ${base.marketLabel} + ${best.p.marketLabel}`,
-            category:    'combinada',
-            esCombinada: true,
-            legs: [
-              { mercado: base.marketLabel,   cuota: base.odds,   cuotaSintetica: !!base._syntheticOdds },
-              { mercado: best.p.marketLabel, cuota: best.p.odds, cuotaSintetica: !!best.p._syntheticOdds },
-            ],
-            prob:  +(best.comboProb * 100).toFixed(1),
-            odds:  best.comboOdds,
-            _syntheticOdds: !!(base._syntheticOdds || best.p._syntheticOdds),
-            ev:    +best.comboEV.toFixed(2),
-            stake: Math.max(5, Math.min(7, 5 + Math.round(kellyPct))),
-            _notaCombo: `El favorito solo paga ${base.odds} — combinado con "${best.p.marketLabel}" (${best.p.odds}) alcanza cuota vendible ${best.comboOdds}.`,
-          });
-          console.log(`🎰 Combinada ${f.local} vs ${f.visitante}: ${base.marketLabel} (${base.odds}) + ${best.p.marketLabel} (${best.p.odds}) = ${best.comboOdds} | EV ${best.comboEV.toFixed(1)}%`);
+          // ── Ancla del EV del combo al ROI real de SUS DOS patas ──────────────
+          // El combo calcula su EV con prob cruda (bypassa el ancla de los
+          // singles), así que una pata sin edge (Under goles) inflaría el EV.
+          // Anclamos al ROI compuesto de ambos mercados: (1+roiA)(1+roiB)−1.
+          // Solo encoge; exime patas de mercado apagado (rehabilitadas por liga).
+          let comboEV = best.comboEV;
+          const cB = calib[marketFamily(base.market)];
+          const cP = calib[marketFamily(best.p.market)];
+          if (cB && cP && !cB.disabled && !cP.disabled &&
+              cB.roi != null && cP.roi != null && cB.n >= CALIB_MIN_N && cP.n >= CALIB_MIN_N) {
+            const roiComp = ((1 + cB.roi / 100) * (1 + cP.roi / 100) - 1) * 100;
+            const w = Math.min(0.6, Math.min(cB.n, cP.n) / 60);
+            comboEV = Math.min(best.comboEV, +(best.comboEV * (1 - w) + roiComp * w).toFixed(2));
+            if (comboEV < best.comboEV - 0.5) console.log(`⚓ Combo anclado ${f.local} vs ${f.visitante}: ${best.comboEV.toFixed(1)}%→${comboEV.toFixed(1)}% (ROI patas ${cB.roi}%/${cP.roi}%)`);
+          }
+          if (comboEV >= 3) {
+            const kellyPct = 25 * (best.comboProb * best.comboOdds - 1) / (best.comboOdds - 1);
+            candidates.push({
+              ...base,
+              market:      'combinada',
+              marketLabel: `Combinada: ${base.marketLabel} + ${best.p.marketLabel}`,
+              category:    'combinada',
+              esCombinada: true,
+              legs: [
+                { mercado: base.marketLabel,   cuota: base.odds,   cuotaSintetica: !!base._syntheticOdds },
+                { mercado: best.p.marketLabel, cuota: best.p.odds, cuotaSintetica: !!best.p._syntheticOdds },
+              ],
+              prob:  +(best.comboProb * 100).toFixed(1),
+              odds:  best.comboOdds,
+              _syntheticOdds: !!(base._syntheticOdds || best.p._syntheticOdds),
+              ev:    comboEV,
+              stake: Math.max(5, Math.min(7, 5 + Math.round(kellyPct))),
+              _notaCombo: `El favorito solo paga ${base.odds} — combinado con "${best.p.marketLabel}" (${best.p.odds}) alcanza cuota vendible ${best.comboOdds}.`,
+            });
+            console.log(`🎰 Combinada ${f.local} vs ${f.visitante}: ${base.marketLabel} (${base.odds}) + ${best.p.marketLabel} (${best.p.odds}) = ${best.comboOdds} | EV ${comboEV.toFixed(1)}%`);
+          }
         }
       }
     }
@@ -7283,7 +7300,11 @@ const SUPERPICK_MAX_PICKS        = 5;
 const SUPERPICK_BUILD_FROM_HOUR  = 6;    // hora Col desde la que se construye el plan
 const SUPERPICK_REFRESH_MIN      = 90;   // re-optimización de picks no bloqueados
 const SUPERPICK_MAX_EV           = 25;   // EV mayor contra cuota real = probable error del modelo
+const SUPERPICK_MAX_EV_COMBO     = 45;   // en combinadas de 2 patas el EV se multiplica
+                                         // legítimamente (dos legs +18% ≈ +39%); tope más alto,
+                                         // ya con el EV anclado al ROI real de ambas patas
 const SUPERPICK_MIN_PROB         = 60;   // prob mínima: el SuperPick es "favorito con valor", no lotería
+const SUPERPICK_MIN_PROB_COMBO   = 50;   // combinada de 2 patas: prob combinada más baja (producto)
                                          // (EV puro elegía cuotas 2.1-2.5 con prob ~50% → rachas de 5L
                                          // matemáticamente normales pero invendibles; con ≥60% la racha
                                          // de 5L pasa del 2.5% al 0.7% de los días)
@@ -7326,9 +7347,15 @@ function rankSuperPickCandidates(candidates, enriched, now = new Date()) {
       if (minAhead < SUPERPICK_MIN_KICKOFF_MIN) return false;        // ya jugado o demasiado próximo
       if (c.odds == null || c.odds < PUBLISH_MIN_ODDS) return false;  // piso de producto
       if (c._syntheticOdds) return false;                             // solo EV validado contra cuota REAL
-      if (!(c.ev >= 3 && c.ev <= SUPERPICK_MAX_EV)) return false;
-      if (!(c.prob >= SUPERPICK_MIN_PROB)) return false;              // favorito con valor, no cuota-lotería
       if (c.esCombinada && (c.legs || []).length !== 2) return false; // mini combinada: 2 patas, mismo partido
+      // Combinadas de 2 patas: tope de EV más alto (el EV se multiplica) y piso de
+      // prob más bajo (la prob combinada es el producto de dos patas). La cuota ya
+      // está capada a ≤2.80 en la construcción, así que no son lotería. El EV ya
+      // viene anclado al ROI real de ambas patas.
+      const maxEV   = c.esCombinada ? SUPERPICK_MAX_EV_COMBO : SUPERPICK_MAX_EV;
+      const minProb = c.esCombinada ? SUPERPICK_MIN_PROB_COMBO : SUPERPICK_MIN_PROB;
+      if (!(c.ev >= 3 && c.ev <= maxEV)) return false;
+      if (!(c.prob >= minProb)) return false;                         // favorito con valor, no cuota-lotería
       return true;
     })
     .sort((a, b) => (b.ev - a.ev) || ((b.stake || 0) - (a.stake || 0)));
@@ -7336,18 +7363,24 @@ function rankSuperPickCandidates(candidates, enriched, now = new Date()) {
 
 // Selección con espaciado: mejor EV primero, respetando ≥2h entre kickoffs y
 // sin repetir fixture (incluye los picks ya bloqueados que se conservan).
+const SUPERPICK_MAX_COMBOS = 2;   // tope de combinadas por plan — llenan a 5 con
+                                  // balance (ej. 3 singles + 2 combos), sin que el
+                                  // plan se vuelva todo combos (más varianza).
 function buildSuperPickPlan(ranked, fechaBy, kept = [], maxPicks = SUPERPICK_MAX_PICKS) {
   const chosen = [];
   const usedFixtures = new Set(kept.map(p => p.fixtureId));
   const kickoffs = kept.map(p => +new Date(p.kickoff));
+  let combos = kept.filter(p => p.esCombinada).length;
   for (const c of ranked) {
     if (kept.length + chosen.length >= maxPicks) break;
     if (usedFixtures.has(c.fixtureId)) continue;
+    if (c.esCombinada && combos >= SUPERPICK_MAX_COMBOS) continue;   // tope de combos
     const ko = +new Date(fechaBy.get(c.fixtureId));
     if (kickoffs.some(k => Math.abs(k - ko) < SUPERPICK_SPACING_MIN * 60000)) continue;
     chosen.push(c);
     usedFixtures.add(c.fixtureId);
     kickoffs.push(ko);
+    if (c.esCombinada) combos++;
   }
   return chosen;
 }
