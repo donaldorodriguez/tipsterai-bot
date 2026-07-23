@@ -773,6 +773,40 @@ function normalizeTeamName(str) {
     .trim();
 }
 
+// ── Matching de nombres tolerante a afijos de club ───────────────────────────
+// Los feeds traen "Benfica SL", "Pafos FC", "Djurgårdens IF" y el usuario escribe
+// "Benfica", "Pafos". Quita afijos comunes de club para comparar el NÚCLEO.
+const _CLUB_AFFIX = new Set([
+  'fc','cf','sc','cd','ac','sl','sa','sad','sv','fk','sk','bk','if','ik','os',
+  'afc','cfc','rc','as','us','ud','ca','sd','ss','aik','nk','hnk','gnk','kf','fs','ff','cd','club','de','the','fk','sk',
+]);
+function teamCore(name) {
+  const toks = _eloKey(String(name || '')).split(' ').filter(t => t && !_CLUB_AFFIX.has(t));
+  return (toks.length ? toks.join(' ') : _eloKey(String(name || ''))).trim();
+}
+function coreMatch(a, b) {
+  if (!a || !b) return false;
+  if (a === b) return true;
+  if (a.endsWith(' ' + b) || b.endsWith(' ' + a) || a.startsWith(b + ' ') || b.startsWith(a + ' ')) return true;
+  if (b.length >= 4 && a.includes(b)) return true;
+  if (a.length >= 4 && b.includes(a)) return true;
+  return false;
+}
+// Fixtures de API-Football por fecha (mejor cobertura que Highlightly en
+// clasificatorias/amistosos; APIF Pro). Cacheado 10 min. Ya vienen en formato APIF.
+const _apifFixturesByDate = new Map(); // dateStr → { ts, fixtures }
+async function fetchApifFixturesByDate(dateStr) {
+  const c = _apifFixturesByDate.get(dateStr);
+  if (c && Date.now() - c.ts < 10 * 60000) return c.fixtures;
+  try {
+    const { data } = await APIF.get('/fixtures', { params: { date: dateStr } });
+    const fixtures = data?.response || [];
+    _apifFixturesByDate.set(dateStr, { ts: Date.now(), fixtures });
+    if (_apifFixturesByDate.size > 8) _apifFixturesByDate.delete(_apifFixturesByDate.keys().next().value);
+    return fixtures;
+  } catch { return c?.fixtures || []; }
+}
+
 // TEAM_ID_OVERRIDES removed — Highlightly team IDs differ from API-Football.
 // searchTeam uses text search with scoring instead.
 const TEAM_ID_OVERRIDES = {
@@ -1152,34 +1186,44 @@ const TEAM_SEARCH_ALTERNATES = {
 async function findTeamInFixtureCache(query) {
   const q = normalizeTeamName(translateTeamName(query));
   if (!q) return null;
+  const qCore = teamCore(query);
   // Un query masculino de clubes no debe resolver a un fixture FEMENINO o JUVENIL
-  // (bug real: "Ham-Kam"/"Hammarby" caía en "Norrköping Women vs Hammarby" de la
-  // Damallsvenskan). OJO: no usar el token de "reserva" con 'b' suelta — matchearía
-  // "Serie B" y hundiría esos partidos. Solo mujeres + juvenil explícito.
+  // (bug real "Norrköping Women vs Hammarby"). No usar el token 'b'/'ii' (matchea
+  // "Serie B"). Solo mujeres + juvenil explícito.
   const FEM   = /\b(women|femenin[ao]|ladies|femmes|damen|vrouwen|mujer|fem)\b| w$/i;
   const YOUTH = /\b(sub|youth|juvenil|u-?\d{2})\b/i;
   const wantsFemYouth = FEM.test(query) || YOUTH.test(query);
+  // Pools: en vivo + Highlightly (ids nativos) + API-Football (mejor cobertura de
+  // clasificatorias/amistosos: Pafos, Ilves, Benfica en copas). Se prefiere HL en
+  // empates porque sus ids funcionan con getTeamStats.
   const pools = [liveCache.raw || []];
-  for (let d = -1; d <= 2; d++) { // ayer incluido: "¿cómo quedó X?" de partidos recién jugados
-    const ds = new Date(Date.now() + d * 86400000)
-      .toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
-    // fetchFixturesByDate cachea internamente — solo cuesta 1 llamada la primera vez
-    const fixtures = await fetchFixturesByDate(ds).catch(() => []);
-    pools.push(fixtures || []);
+  for (let d = -1; d <= 2; d++) {
+    const dObj = new Date(Date.now() + d * 86400000);
+    const dsCol = dObj.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const dsUtc = dObj.toISOString().split('T')[0];
+    const [hl, apif] = await Promise.all([
+      fetchFixturesByDate(dsCol).catch(() => []),
+      fetchApifFixturesByDate(dsUtc).catch(() => []),
+    ]);
+    pools.push(hl || [], apif || []);
   }
   let best = null, bestScore = 0;
   for (const pool of pools) {
     for (const m of pool) {
+      const h = m.homeTeam || m.teams?.home;   // HL o APIF
+      const a = m.awayTeam || m.teams?.away;
+      const lg = m.league?.name;
       const femYouth = !wantsFemYouth &&
-        [m.homeTeam?.name, m.awayTeam?.name, m.league?.name].some(n => n && (FEM.test(n) || YOUTH.test(n)));
-      for (const t of [m.homeTeam, m.awayTeam]) {
-        if (!t?.name || !t?.id) continue;
+        [h?.name, a?.name, lg].some(n => n && (FEM.test(n) || YOUTH.test(n)));
+      for (const t of [h, a]) {
+        if (!t?.name || t?.id == null) continue;
         const tn = normalizeTeamName(t.name);
         let s = 0;
         if (tn === q) s = 100;
         else if (tn.startsWith(q + ' ') || tn.endsWith(' ' + q)) s = 80;
         else if (q.length >= 5 && tn.includes(q)) s = 60;
-        if (femYouth && s > 0) s -= 45;   // fixture fem/juvenil: gana un match masculino real en otro pool
+        else if (coreMatch(teamCore(t.name), qCore)) s = 70;   // afijos: Benfica SL ↔ Benfica, Pafos FC ↔ Pafos
+        if (femYouth && s > 0) s -= 45;
         if (s > bestScore) { bestScore = s; best = { id: t.id, name: t.name }; }
       }
     }
@@ -1320,7 +1364,7 @@ async function findTeamWithButtons(chatId, name, countryHint = '', intent = null
   return 'PENDING';
 }
 
-async function findNextFixtureByDate(teamId, daysAhead = 14) {
+async function findNextFixtureByDate(teamId, daysAhead = 14, teamName = null) {
   const LIVE_STATUSES   = new Set(['First half', 'Half time', 'Second half', 'Extra time', 'Penalties', 'Break time']);
   const UPCOMING_STATUSES = new Set(['Not started', ...LIVE_STATUSES]);
   const cutoff = new Date();
@@ -1377,6 +1421,30 @@ async function findNextFixtureByDate(teamId, daysAhead = 14) {
       .sort((x, y) => new Date(x.date) - new Date(y.date))[0];
     if (next) return hlToApif(next);
   } catch {}
+
+  // 3. Fallback API-Football por NOMBRE — cubre los huecos de cobertura de
+  // Highlightly (clasificatorias europeas, amistosos: caso Benfica/Pafos). APIF
+  // ya viene en el formato que consume handlePartido. Match tolerante a afijos.
+  if (teamName) {
+    try {
+      const core = teamCore(teamName);
+      const UP = new Set(['NS', 'TBD', '1H', 'HT', '2H', 'ET', 'BT', 'P', 'LIVE', 'INT', 'SUSP']);
+      const nowMs = Date.now();
+      for (let d = 0; d <= Math.min(daysAhead, 10); d++) {
+        const ds = new Date(nowMs + d * 86400000).toISOString().split('T')[0];
+        const fx = await fetchApifFixturesByDate(ds);
+        const propios = fx
+          .filter(m => UP.has(m.fixture?.status?.short) &&
+            new Date(m.fixture.date) >= new Date(nowMs - 3 * 3600e3) &&
+            (coreMatch(teamCore(m.teams.home.name), core) || coreMatch(teamCore(m.teams.away.name), core)))
+          .sort((x, y) => new Date(x.fixture.date) - new Date(y.fixture.date));
+        if (propios.length) {
+          console.log(`🔁 findNextFixture: "${teamName}" resuelto vía APIF (HL sin cobertura) → ${propios[0].teams.home.name} vs ${propios[0].teams.away.name}`);
+          return propios[0]; // ya está en formato APIF
+        }
+      }
+    } catch (e) { console.warn('findNextFixtureByDate APIF fallback:', e.message); }
+  }
 
   return null;
 }
@@ -8160,7 +8228,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const teamFull = teamData.team.name;
   await bot.sendMessage(chatId, `✅ *${teamFull}* encontrado. Analizando próximo partido...`, { parse_mode: 'Markdown' });
 
-  const nextRaw = await findNextFixtureByDate(teamId, 14);
+  const nextRaw = await findNextFixtureByDate(teamId, 14, teamFull);
   if (!nextRaw) {
     return bot.sendMessage(chatId, `😔 No encontré próximos partidos para *${teamFull}* en los próximos 14 días.`, { parse_mode: 'Markdown' });
   }
@@ -8905,7 +8973,7 @@ async function handleEspecifica(chatId, intent) {
   const teamId   = teamData.team.id;
   const teamFull = teamData.team.name;
 
-  const nextRaw = await findNextFixtureByDate(teamId, 14);
+  const nextRaw = await findNextFixtureByDate(teamId, 14, teamFull);
   if (!nextRaw) {
     return bot.sendMessage(chatId, `😔 No encontré próximos partidos para *${teamFull}* en los próximos 14 días.`, { parse_mode: 'Markdown' });
   }
