@@ -1303,6 +1303,18 @@ async function getTeamPlayingPriority(teamId) {
 }
 
 async function findTeamWithButtons(chatId, name, countryHint = '', intent = null) {
+  // 1. Resolver primero por el caché de fixtures (HL + API-Football, tolerante a
+  //    afijos FC/SL/SA y tildes). Cubre equipos que el /teams de Highlightly no
+  //    tiene (clasificatorias europeas, amistosos: Pafos, Benfica, Ilves) y es
+  //    context-aware (elige el equipo que realmente juega). Antes esta función iba
+  //    directo a HL /teams y se saltaba todo el fix de APIF.
+  const cached = await findTeamInFixtureCache(name).catch(() => null);
+  if (cached) {
+    console.log(`🔎 findTeamWithButtons("${name}") resuelto vía caché de fixtures (HL+APIF) → ${cached.name} (${cached.id})`);
+    return { team: { id: cached.id, name: cached.name, country: '', national: false } };
+  }
+
+  // 2. Fallback: /teams de Highlightly (equipos fuera de la ventana de fixtures).
   const apiName = translateTeamName(name);
   let results = [];
   const namesToTry = [apiName, ...(TEAM_SEARCH_ALTERNATES[apiName] || [])];
