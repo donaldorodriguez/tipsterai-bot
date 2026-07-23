@@ -7322,6 +7322,9 @@ const SUPERPICK_MAX_EV_COMBO     = 45;   // en combinadas de 2 patas el EV se mu
                                          // ya con el EV anclado al ROI real de ambas patas
 const SUPERPICK_MIN_PROB         = 60;   // prob mínima: el SuperPick es "favorito con valor", no lotería
 const SUPERPICK_MIN_PROB_COMBO   = 50;   // combinada de 2 patas: prob combinada más baja (producto)
+const SUPERPICK_FREEZE_H         = 6;    // horas antes del kickoff en que un pick se CONGELA —
+                                         // jamás se saca (protege a quien ya apostó). Solo se
+                                         // puede soltar un pick con ≥6h de antelación.
                                          // (EV puro elegía cuotas 2.1-2.5 con prob ~50% → rachas de 5L
                                          // matemáticamente normales pero invendibles; con ≥60% la racha
                                          // de 5L pasa del 2.5% al 0.7% de los días)
@@ -7470,17 +7473,25 @@ async function generateSuperPickPlan(force = false) {
     // candidatos (rank exige ≥90 min), así que si no se congelan aquí caen en un hueco
     // y un refresh los borra ANTES de jugarse → nunca llegan al historial (track record
     // subcontado). Congelarlos garantiza que commitFinishedSuperPicks los registre.
-    const minAhead = p => (new Date(p.kickoff).getTime() - now.getTime()) / 60000;
-    const kept = (day?.picks || []).filter(p => p.status === 'ok' && (p.locked || minAhead(p) < SUPERPICK_MIN_KICKOFF_MIN));
-    // Futuros existentes re-optimizables (≥90 min, no bloqueados): se re-optimizan si el
-    // gather trae mejores, pero si no aparece ninguno nuevo, se PRESERVAN (nunca se
-    // pierden por refresh). Disjuntos de `kept` para no duplicar en el fallback.
-    const futurosExistentes = (day?.picks || []).filter(p => p.status === 'ok' && !p.locked && minAhead(p) >= SUPERPICK_MIN_KICKOFF_MIN);
-    let entries = kept.length ? kept : futurosExistentes;
+    // ESTABILIDAD DEL PLAN (crítico para el lanzamiento): cambiar picks a última
+    // hora rompe la confianza (un cliente apuesta temprano y luego "ese ya no es
+    // SuperPick"). Reglas: (1) un pick a <SUPERPICK_FREEZE_H del kickoff, bloqueado
+    // o ya jugado se CONGELA — jamás se saca. (2) los lejanos se conservan mientras
+    // sigan siendo candidato válido; solo se sueltan con ≥FREEZE_H de antelación si
+    // el gather fresco ya no los tiene. (3) los nuevos solo LLENAN cupos libres,
+    // nunca desplazan a uno existente.
+    const hAhead = p => (new Date(p.kickoff).getTime() - now.getTime()) / 3600000;
+    const congelados = (day?.picks || []).filter(p => p.status === 'ok' && (p.locked || hAhead(p) < SUPERPICK_FREEZE_H));
+    const lejanos    = (day?.picks || []).filter(p => p.status === 'ok' && !p.locked && hAhead(p) >= SUPERPICK_FREEZE_H);
+    let entries = [...congelados, ...lejanos];
     if (g.status === 'ok' && g.candidates.length) {
       const fechaBy = new Map(g.enriched.map(e => [e.fixtureId, e.fechaPartido]));
       const ranked = rankSuperPickCandidates(g.candidates, g.enriched, now);
-      const nuevos = buildSuperPickPlan(ranked, fechaBy, kept).map(c => ({
+      // Lejanos que siguen siendo oportunidad válida se conservan; los que ya no
+      // aparecen en el gather fresco se sueltan (solo con ≥FREEZE_H de antelación).
+      const validFix = new Set(ranked.map(c => c.fixtureId));
+      const base = [...congelados, ...lejanos.filter(p => validFix.has(p.fixtureId))];
+      const nuevos = buildSuperPickPlan(ranked, fechaBy, base).map(c => ({
         status: 'ok', fecha: today, generadoAt: now.toISOString(),
         fixtureId: c.fixtureId, liga: c.liga, local: c.local, visitante: c.visitante,
         kickoff: fechaBy.get(c.fixtureId), mercado: superPickMercado(c.market),
@@ -7500,9 +7511,7 @@ async function generateSuperPickPlan(force = false) {
           }
         } catch {}
       }
-      // Si el gather no aportó picks nuevos, conservar los futuros existentes
-      // (no perder el plan por un refresh sin resultados).
-      entries = nuevos.length ? [...kept, ...nuevos] : [...kept, ...futurosExistentes];
+      entries = [...base, ...nuevos];   // base (congelados + lejanos válidos) + nuevos en cupos libres
     }
     // Registrar al historial los que ya se jugaron (track record sin depender de leads)
     commitFinishedSuperPicks();
@@ -7518,24 +7527,21 @@ async function generateSuperPickPlan(force = false) {
     persistSuperPicks(fresh);
     console.log(`🎯 SuperPick plan ${today}: ${entries.length} pick(s)` +
       entries.map(p => `\n   #${p.ordinal} ${p.local} vs ${p.visitante} | ${p.seleccion} @ ${p.cuota} | EV ${p.ev}% | ${p.kickoff}${p.locked ? ' 🔒' : ''}`).join(''));
-    // ── Notificación WhatsApp al admin: plan del día y cambios REALES ─────────
-    // Solo avisa cuando hay novedad de verdad (primer plan del día, o picks que
-    // entran/salen respecto al plan anterior) — un refresh que re-elige los
-    // mismos picks no notifica.
+    // ── Notificación WhatsApp al admin: plan del día y picks NUEVOS ───────────
+    // Solo avisa el primer plan del día y cuando ENTRA un pick nuevo. JAMÁS avisa
+    // "salió X" — con el plan estable las salidas son raras (solo lejanas ≥6h,
+    // antes de que nadie apueste) y esa alarma rompía la confianza. Un refresh que
+    // no añade nada no notifica.
     try {
       const prev = day?.picks || [];
       const mismo = (a, b) => a.fixtureId === b.fixtureId && a.seleccion === b.seleccion;
       const entran = entries.filter(p => !prev.some(q => mismo(p, q)));
-      const salen  = prev.filter(q => new Date(q.kickoff) > now && !entries.some(p => mismo(p, q)));
       const linea = p => `#${p.ordinal} ⏰ ${formatHour(p.kickoff)} — *${p.local} vs ${p.visitante}* (${p.liga})\n${p.seleccion} @ ${p.cuota} | EV +${p.ev}% | stake ${p.stake}/10`;
       let msg = null;
       if (!day && entries.length) {
         msg = `🎯 *SuperPicks del día* (${entries.length}):\n\n${entries.map(linea).join('\n\n')}`;
-      } else if (entran.length || salen.length) {
-        const partes = [];
-        if (entran.length) partes.push(`🆕 Entra${entran.length > 1 ? 'n' : ''}:\n\n${entran.map(linea).join('\n\n')}`);
-        if (salen.length)  partes.push(`❌ Sale${salen.length > 1 ? 'n' : ''}: ${salen.map(p => `${p.local} vs ${p.visitante} (${p.seleccion})`).join(' | ')}`);
-        msg = `🔄 *SuperPick — plan actualizado*\n\n${partes.join('\n\n')}`;
+      } else if (entran.length) {
+        msg = `🆕 *SuperPick — pick${entran.length > 1 ? 's' : ''} nuevo${entran.length > 1 ? 's' : ''} del día*\n\n${entran.map(linea).join('\n\n')}`;
       }
       if (msg) notifySuperPickWhatsApp(msg, entries.length); // fire-and-forget
     } catch (e) { console.error('superpick notify build:', e.message); }
