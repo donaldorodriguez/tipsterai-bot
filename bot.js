@@ -2089,6 +2089,58 @@ function eloExpectedLambdas(diff) {
   };
 }
 
+// ─── Elo de CLUBES (api.clubelo.com) — jerarquía real entre ligas ─────────────
+// El Elo de selecciones no cubre clubes, así que en cruces europeos (ej. Gent
+// belga vs LNZ ucraniano) el motor no sabía quién era superior y podía backear al
+// local débil. ClubElo pone a TODOS los clubes europeos en una sola escala.
+let _clubEloCache = { map: null, ts: 0 };
+async function getClubEloMap() {
+  if (_clubEloCache.map && Date.now() - _clubEloCache.ts < 24 * 60 * 60 * 1000) return _clubEloCache.map;
+  try {
+    const date = new Date().toISOString().split('T')[0];
+    const { data } = await axios.get(`http://api.clubelo.com/${date}`, { timeout: 12000, headers: { 'User-Agent': 'Mozilla/5.0' } });
+    // CSV: Rank,Club,Country,Level,Elo,From,To
+    const map = new Map();
+    const lines = String(data).split('\n');
+    for (let i = 1; i < lines.length; i++) {
+      const cols = lines[i].split(',');
+      if (cols.length < 5) continue;
+      const club = (cols[1] || '').trim();
+      const elo  = parseFloat(cols[4]);
+      if (!club || !(elo >= 1000 && elo <= 2200)) continue;
+      const k = _eloKey(club);
+      map.set(k, Math.max(map.get(k) || 0, elo)); // el rating más alto si hay homónimos
+    }
+    if (map.size < 100) throw new Error(`solo ${map.size} clubes — formato inesperado`);
+    console.log(`🏅 ClubElo: ${map.size} clubes cargados`);
+    _clubEloCache = { map, ts: Date.now() };
+    return map;
+  } catch (e) {
+    console.warn(`getClubEloMap: ${e.message}`);
+    return _clubEloCache.map || null;
+  }
+}
+// Lookup tolerante: nuestros nombres traen prefijos ("KAA Gent", "KRC Genk") que
+// ClubElo no usa ("Gent", "Genk"). Prueba exacto → sufijo/prefijo → substring larga.
+function clubEloRating(map, name) {
+  if (!map) return null;
+  const k = _eloKey(translateTeamName(name));
+  if (!k) return null;
+  if (map.has(k)) return map.get(k);
+  for (const [ck, r] of map) {
+    if (k === ck) return r;
+    if (k.endsWith(' ' + ck) || k.startsWith(ck + ' ')) return r;
+    if (ck.length >= 6 && (k.includes(' ' + ck + ' ') || k.includes(ck))) return r;
+  }
+  return null;
+}
+function clubEloAdjust(map, homeName, awayName) {
+  const eH = clubEloRating(map, homeName), eA = clubEloRating(map, awayName);
+  if (!eH || !eA) return null;
+  const dr = Math.max(-400, Math.min(400, eH - eA));
+  return { eloHome: Math.round(eH), eloAway: Math.round(eA), diff: Math.round(dr), hMult: 1 + dr * 0.0006, aMult: 1 - dr * 0.0006 };
+}
+
 async function prefetchOddsApi(fixtures, _date) {
   const map = new Map();
   const top = fixtures.slice(0, 30);
@@ -6720,6 +6772,8 @@ async function gatherDailyCandidates(progress = async () => {}) {
 
   // Elo de selecciones (solo se usa en torneos de selecciones; 1 fetch/24h)
   const eloMap = await getEloMap();
+  // Elo de clubes (jerarquía entre ligas — cruces europeos; 1 fetch/24h)
+  const clubEloMap = await getClubEloMap();
 
   // ── Stats REALES por equipo para el top-12 de fixtures ──────────────────────
   // /teams/statistics solo trae goles → corners/tarjetas por equipo corrían con
@@ -6782,6 +6836,17 @@ async function gatherDailyCandidates(progress = async () => {}) {
         hAgtAdj = 0.5 * hAgtAdj + 0.5 * eloLam.a;  // defensa local absorbe el ataque Elo del rival
         aAgtAdj = 0.5 * aAgtAdj + 0.5 * eloLam.h;
         console.log(`🏅 Elo ${f.homeTeam}(${_elo.eloHome}) vs ${f.awayTeam}(${_elo.eloAway}) We=${eloLam.we} → λ blend ${hForAdj.toFixed(2)}/${aForAdj.toFixed(2)}`);
+      }
+    } else if (clubEloMap) {
+      // ── Elo de CLUBES: nudge suave por jerarquía (±6%/100pts). Más gentil que
+      // el 50/50 de selecciones porque en clubes las stats de temporada SÍ son
+      // fiables; el Elo solo corrige la jerarquía entre ligas (Gent >> LNZ). Solo
+      // aplica si hay diferencia real (≥40 pts) para no meter ruido en duelos parejos.
+      const _cElo = clubEloAdjust(clubEloMap, f.homeTeam, f.awayTeam);
+      if (_cElo && Math.abs(_cElo.diff) >= 40) {
+        hForAdj *= _cElo.hMult; aForAdj *= _cElo.aMult;
+        hAgtAdj *= _cElo.aMult; aAgtAdj *= _cElo.hMult;
+        console.log(`🏅 ClubElo ${f.homeTeam}(${_cElo.eloHome}) vs ${f.awayTeam}(${_cElo.eloAway}) Δ${_cElo.diff} → λ ${hForAdj.toFixed(2)}/${aForAdj.toFixed(2)}`);
       }
     }
     // Corners reales del equipo (si la fuente los trae) + sede neutral
@@ -7403,6 +7468,28 @@ function superPickFamily(p) {
   return 'otro';
 }
 
+// ExtraPicks +10%: segundo nivel — candidatos con EV ≥10% y cuota REAL que no
+// entraron al SuperPick. Más laxo en prob (55 vs 60), sin diversidad ni espaciado
+// (son oportunidades extra, no el pick curado del día). excludeKeys = SuperPicks.
+const EXTRAPICK_MIN_EV   = 10;
+const EXTRAPICK_MIN_PROB = 55;
+const EXTRAPICK_MAX      = 8;   // tope de volumen
+function rankExtraPicks(candidates, fechaBy, now, excludeKeys) {
+  return candidates.filter(c => {
+    const fecha = fechaBy.get(c.fixtureId);
+    if (!fecha) return false;
+    if ((new Date(fecha) - now) / 60000 < SUPERPICK_MIN_KICKOFF_MIN) return false;
+    if (c.odds == null || c.odds < PUBLISH_MIN_ODDS || c._syntheticOdds) return false; // solo cuota real
+    if (!(c.ev >= EXTRAPICK_MIN_EV)) return false;                    // el corte +10%
+    const maxEV = c.esCombinada ? SUPERPICK_MAX_EV_COMBO : SUPERPICK_MAX_EV;
+    if (c.ev > maxEV) return false;                                   // mismo techo anti-error de modelo
+    if (!(c.prob >= EXTRAPICK_MIN_PROB)) return false;
+    if (c.esCombinada && (c.legs || []).length !== 2) return false;
+    if (excludeKeys.has(`${c.fixtureId}|${c.marketLabel}`)) return false; // no repetir SuperPicks
+    return true;
+  }).sort((a, b) => (b.ev - a.ev) || ((b.prob || 0) - (a.prob || 0)));
+}
+
 function buildSuperPickPlan(ranked, fechaBy, kept = [], maxPicks = SUPERPICK_MAX_PICKS) {
   const chosen = [];
   const usedFixtures = new Set(kept.map(p => p.fixtureId));
@@ -7517,15 +7604,37 @@ async function generateSuperPickPlan(force = false) {
     commitFinishedSuperPicks();
     entries.sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
     entries.forEach((p, i) => { p.ordinal = i + 1; });
+    // ── ExtraPicks +10%: segundo nivel (se recalcula en cada refresh) ──────────
+    let extras = [];
+    try {
+      if (g.status === 'ok' && g.candidates.length) {
+        const fechaByE = new Map(g.enriched.map(e => [e.fixtureId, e.fechaPartido]));
+        const spKeys = new Set(entries.map(p => `${p.fixtureId}|${p.seleccion}`));
+        const spFix  = new Set(entries.map(p => p.fixtureId));
+        const seenFix = new Set();
+        extras = rankExtraPicks(g.candidates, fechaByE, now, spKeys)
+          .filter(c => { if (spFix.has(c.fixtureId) || seenFix.has(c.fixtureId)) return false; seenFix.add(c.fixtureId); return true; }) // 1 por partido, sin repetir SuperPick
+          .slice(0, EXTRAPICK_MAX)
+          .map((c, i) => ({
+            ordinal: i + 1, fixtureId: c.fixtureId, liga: c.liga, local: c.local, visitante: c.visitante,
+            kickoff: fechaByE.get(c.fixtureId), mercado: superPickMercado(c.market),
+            seleccion: c.marketLabel, esCombinada: !!c.esCombinada, legs: c.legs || null,
+            cuota: c.odds, ev: c.ev, prob: c.prob, stake: c.stake,
+          }));
+        extras.sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
+        extras.forEach((p, i) => { p.ordinal = i + 1; });
+      }
+    } catch (e) { console.error('extraPicks:', e.message); }
     const fresh = loadSuperPicks();
     fresh[today] = {
       generadoAt: day?.generadoAt || now.toISOString(),
       refreshedAt: now.toISOString(),
       picks: entries,
+      extras,
       ...(entries.length === 0 && { motivo: g.status === 'sin_partidos' ? 'sin_partidos_hoy' : 'sin_valor_validado' }),
     };
     persistSuperPicks(fresh);
-    console.log(`🎯 SuperPick plan ${today}: ${entries.length} pick(s)` +
+    console.log(`🎯 SuperPick plan ${today}: ${entries.length} pick(s) + ${extras.length} ExtraPick(s)` +
       entries.map(p => `\n   #${p.ordinal} ${p.local} vs ${p.visitante} | ${p.seleccion} @ ${p.cuota} | EV ${p.ev}% | ${p.kickoff}${p.locked ? ' 🔒' : ''}`).join(''));
     // ── Notificación WhatsApp al admin: plan del día y picks NUEVOS ───────────
     // Solo avisa el primer plan del día y cuando ENTRA un pick nuevo. JAMÁS avisa
@@ -11916,6 +12025,7 @@ app.get('/api/superpick/plan', (req, res) => {
       generadoAt: day?.generadoAt || null,
       refreshedAt: day?.refreshedAt || null,
       picks: day?.picks || [],
+      extras: day?.extras || [],   // ExtraPicks +10% (segundo nivel)
     });
   } catch (e) {
     console.error('/api/superpick/plan:', e.message);
