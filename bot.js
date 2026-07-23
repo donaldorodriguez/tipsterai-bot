@@ -7796,6 +7796,7 @@ async function notifyGoalAlertWhatsApp(a) {
     await axios.post(url, {
       message: `⚡ *ALERTA DE GOL*\n${l1}\n${l2}`,
       template: { name: 'alerta_gol', params: [l1, l2] },
+      soloTemplate: true, // la plantilla ya trae todo el detalle → no duplicar con texto libre
     }, { headers: { Authorization: `Bearer ${process.env.SUPERPICK_API_TOKEN}` }, timeout: 10000 });
     console.log('⚡📲 Alerta de gol enviada al WhatsApp del admin');
   } catch (e) { console.error('notifyGoalAlertWhatsApp:', JSON.stringify(e.response?.data || e.message)); }
