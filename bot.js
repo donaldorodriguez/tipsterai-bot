@@ -7578,6 +7578,23 @@ async function generateSuperPickPlan(force = false) {
       // aparecen en el gather fresco se sueltan (solo con ≥FREEZE_H de antelación).
       const validFix = new Set(ranked.map(c => c.fixtureId));
       const base = [...congelados, ...lejanos.filter(p => validFix.has(p.fixtureId))];
+      // RE-RATEO de los conservados con números FRESCOS (ClubElo + cuotas del día)
+      // SIN cambiar el pick: estabilidad = mismo pick; honestidad = EV/prob actuales.
+      // El EV se recalcula a la cuota ORIGINAL recomendada (fresh_prob × cuota − 1);
+      // valorBajo = el valor cayó bajo el piso desde que entró. Guarda evOriginal.
+      const candByKey = new Map(g.candidates.map(c => [`${c.fixtureId}|${c.marketLabel}`, c]));
+      for (const p of base) {
+        const fr = candByKey.get(`${p.fixtureId}|${p.seleccion}`);
+        if (fr && fr.prob != null && p.cuota) {
+          p.evOriginal = p.evOriginal ?? p.ev;
+          p.prob = fr.prob;
+          p.ev = +((fr.prob / 100 * p.cuota - 1) * 100).toFixed(2);
+          const antes = p.valorBajo;
+          p.valorBajo = p.ev < 3;
+          if (p.valorBajo && !antes) console.log(`⚠️ SuperPick valor bajó: ${p.local} vs ${p.visitante} ${p.evOriginal}%→${p.ev}%`);
+          if (!p.valorBajo) delete p.valorBajo;
+        }
+      }
       const nuevos = buildSuperPickPlan(ranked, fechaBy, base).map(c => ({
         status: 'ok', fecha: today, generadoAt: now.toISOString(),
         fixtureId: c.fixtureId, liga: c.liga, local: c.local, visitante: c.visitante,
@@ -7645,12 +7662,17 @@ async function generateSuperPickPlan(force = false) {
       const prev = day?.picks || [];
       const mismo = (a, b) => a.fixtureId === b.fixtureId && a.seleccion === b.seleccion;
       const entran = entries.filter(p => !prev.some(q => mismo(p, q)));
-      const linea = p => `#${p.ordinal} ⏰ ${formatHour(p.kickoff)} — *${p.local} vs ${p.visitante}* (${p.liga})\n${p.seleccion} @ ${p.cuota} | EV +${p.ev}% | stake ${p.stake}/10`;
+      // Picks que ACABAN de caer de valor (no lo estaban antes) — aviso de honestidad.
+      const bajaron = entries.filter(p => p.valorBajo && !prev.some(q => mismo(p, q) && q.valorBajo));
+      const linea = p => `#${p.ordinal} ⏰ ${formatHour(p.kickoff)} — *${p.local} vs ${p.visitante}* (${p.liga})\n${p.seleccion} @ ${p.cuota} | EV +${p.ev}% | stake ${p.stake}/10${p.valorBajo ? ' ⚠️ valor bajó' : ''}`;
       let msg = null;
       if (!day && entries.length) {
         msg = `🎯 *SuperPicks del día* (${entries.length}):\n\n${entries.map(linea).join('\n\n')}`;
       } else if (entran.length) {
         msg = `🆕 *SuperPick — pick${entran.length > 1 ? 's' : ''} nuevo${entran.length > 1 ? 's' : ''} del día*\n\n${entran.map(linea).join('\n\n')}`;
+      } else if (bajaron.length) {
+        // No entró nada nuevo, pero un congelado perdió valor → avisar (sin sacarlo).
+        msg = `⚠️ *SuperPick — ojo, el valor bajó* (el pick sigue en pie, no lo saco):\n\n${bajaron.map(p => `${p.local} vs ${p.visitante} — ${p.seleccion}\nEV ahora +${p.ev}% (entró en +${p.evOriginal}%). Apuesta bajo tu criterio.`).join('\n\n')}`;
       }
       if (msg) notifySuperPickWhatsApp(msg, entries.length); // fire-and-forget
     } catch (e) { console.error('superpick notify build:', e.message); }
