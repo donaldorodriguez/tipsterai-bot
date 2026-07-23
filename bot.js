@@ -7894,6 +7894,9 @@ async function notifyGoalAlertWhatsApp(a) {
 
 async function scanGoalAlertsProactive() {
   try {
+    // SUSPENDIDO (23-jul): agotaba la cuota de Highlightly. Reactivar sin redeploy
+    // poniendo la variable GOAL_ALERT_SCAN=on en Railway (cuando suba el plan HL).
+    if (process.env.GOAL_ALERT_SCAN !== 'on') return;
     const h = colombiaHour();
     if (h < GOALSCAN.HOUR_FROM || h >= GOALSCAN.HOUR_TO) return; // fuera de horario → 0 llamadas
     if (hlEnCooldown()) return;                                  // HL agotado → no hostigar
