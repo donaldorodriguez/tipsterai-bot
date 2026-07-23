@@ -7642,6 +7642,14 @@ const _goalAlertSent     = new Map(); // fixtureId → fecha (dedup: 1 alerta/pa
 const _goalStatsFetchedAt = new Map();// fixtureId → ts (cooldown de stats)
 let   _goalAlertTimes    = [];        // timestamps de envíos (tope MAX_PER_HOUR)
 
+// Excluye fútbol femenino y juvenil de las alertas (se colaron PAOK W, Pyunik W).
+// Chequea liga + ambos equipos. NO usa el token 'b'/'ii' (matchearía "Serie B").
+const _FEM_RE   = /\b(women|femenin[ao]|ladies|femmes|damen|vrouwen|mujer|fem)\b| w$/i;
+const _YOUTH_RE = /\b(sub|youth|juvenil|u-?\d{2})\b/i;
+function esFemOJuvenil(...names) {
+  return names.some(n => n && (_FEM_RE.test(n) || _YOUTH_RE.test(n)));
+}
+
 async function notifyGoalAlertWhatsApp(a) {
   const url = process.env.SUPERPICK_NOTIFY_URL;
   if (!url || !process.env.SUPERPICK_API_TOKEN) return;
@@ -7678,6 +7686,7 @@ async function scanGoalAlertsProactive() {
       const el = p.elapsed || 0;
       if (el < GOALSCAN.MIN_ELAPSED || el > GOALSCAN.MAX_ELAPSED) continue;
       if (PICKS_EXCLUDE_LEAGUES.has(p.leagueId)) continue;
+      if (esFemOJuvenil(p.leagueName, p.homeTeam, p.awayTeam)) continue; // sin femenino/juvenil
       if (_goalAlertSent.has(p.fixtureId)) continue;
       if (now - (_goalStatsFetchedAt.get(p.fixtureId) || 0) < GOALSCAN.STATS_COOLDOWN_MIN * 60e3) continue;
       pre.push({ raw: m, parsed: p });
@@ -8634,9 +8643,10 @@ async function handleAlertaGol(chatId) {
 
   // 1. Obtener todos los partidos en vivo
   const liveRaw = await fetchLiveRaw();
-  // Sin filtro de liga — analiza cualquier partido activo en vivo
+  // Sin filtro de liga — analiza cualquier partido activo en vivo (excepto femenino/juvenil)
   const liveActive = liveRaw.filter(f =>
-    ['First half', 'Second half', 'Extra time'].includes(f.state?.description)
+    ['First half', 'Second half', 'Extra time'].includes(f.state?.description) &&
+    !esFemOJuvenil(f.league?.name, f.homeTeam?.name, f.awayTeam?.name)
   );
 
   if (liveActive.length === 0) {
