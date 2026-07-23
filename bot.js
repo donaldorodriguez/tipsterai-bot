@@ -7380,24 +7380,46 @@ function rankSuperPickCandidates(candidates, enriched, now = new Date()) {
 
 // Selección con espaciado: mejor EV primero, respetando ≥2h entre kickoffs y
 // sin repetir fixture (incluye los picks ya bloqueados que se conservan).
-const SUPERPICK_MAX_COMBOS = 2;   // tope de combinadas por plan — llenan a 5 con
-                                  // balance (ej. 3 singles + 2 combos), sin que el
-                                  // plan se vuelva todo combos (más varianza).
+const SUPERPICK_MAX_COMBOS     = 2;   // tope de combinadas por plan — balance, no todo combos.
+const SUPERPICK_MAX_PER_FAMILY = 2;   // tope por familia GRUESA de mercado (diversidad): sin
+                                      // esto el ranking por EV llenaba el plan de puro
+                                      // DNB/Doble Op (los de mayor ROI) y desaparecían
+                                      // goles/BTTS. DNB y DC son la MISMA familia "resultado".
+
+// Familia gruesa para el tope de diversidad. Se apoya en el texto de la selección
+// (presente tanto en candidatos [marketLabel] como en picks guardados [seleccion]).
+// Orden importa: córners/tarjetas antes que goles ("Over 5.5 córners" trae "over").
+function superPickFamily(p) {
+  const s = String(p.seleccion || p.marketLabel || p.market || p.mercado || '').toLowerCase();
+  if (/c[óo]rner|esquina/.test(s))                     return 'corners';
+  if (/tarjeta|amarilla|card/.test(s))                 return 'cards';
+  if (/ambos marcan|btts|both.*score/.test(s))         return 'btts';
+  if (/1er tiempo|primer tiempo|primera mitad|\b1t\b/.test(s)) return 'mitades';
+  if (/m[áa]s de|menos de|over|under|\bgoles?\b/.test(s)) return 'goles';
+  if (/draw no bet|dnb|doble oportunidad|h[áa]ndicap|no pierde|\bgana\b|\b1x\b|\bx2\b|\b12\b/.test(s)) return 'resultado';
+  return 'otro';
+}
+
 function buildSuperPickPlan(ranked, fechaBy, kept = [], maxPicks = SUPERPICK_MAX_PICKS) {
   const chosen = [];
   const usedFixtures = new Set(kept.map(p => p.fixtureId));
   const kickoffs = kept.map(p => +new Date(p.kickoff));
   let combos = kept.filter(p => p.esCombinada).length;
+  // Familias ya ocupadas por los picks conservados (kept) — cuentan para el tope.
+  const famCount = {};
+  for (const p of kept) if (!p.esCombinada) { const f = superPickFamily(p); famCount[f] = (famCount[f] || 0) + 1; }
   for (const c of ranked) {
     if (kept.length + chosen.length >= maxPicks) break;
     if (usedFixtures.has(c.fixtureId)) continue;
     if (c.esCombinada && combos >= SUPERPICK_MAX_COMBOS) continue;   // tope de combos
+    const fam = c.esCombinada ? null : superPickFamily(c);           // combos: su propio tope
+    if (fam && (famCount[fam] || 0) >= SUPERPICK_MAX_PER_FAMILY) continue; // tope de diversidad
     const ko = +new Date(fechaBy.get(c.fixtureId));
     if (kickoffs.some(k => Math.abs(k - ko) < SUPERPICK_SPACING_MIN * 60000)) continue;
     chosen.push(c);
     usedFixtures.add(c.fixtureId);
     kickoffs.push(ko);
-    if (c.esCombinada) combos++;
+    if (c.esCombinada) combos++; else famCount[fam] = (famCount[fam] || 0) + 1;
   }
   return chosen;
 }
