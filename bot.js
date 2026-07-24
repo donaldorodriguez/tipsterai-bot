@@ -218,6 +218,48 @@ const LEAGUE_MAP = {
   1049216:{ name:'Copa de la Liga PE',country:'Peru'        },
 };
 
+// ── País del partido para notificaciones/brief ──────────────────────────────
+// country del fixture viene en INGLÉS ('Poland', 'Ireland', 'Argentina', 'Europe',
+// 'World'…). Lo mostramos en español con bandera. Si un dato viejo no trae country,
+// caemos a un mapa de ligas INEQUÍVOCAS (jamás adivinamos nombres compartidos como
+// 'Serie A' / 'Cup' / 'First Division' / 'Super League' — quedan sin país).
+const COUNTRY_ES = {
+  England:'🏴 Inglaterra', Scotland:'🏴 Escocia', Wales:'🏴 Gales', 'Northern Ireland':'🇬🇧 Irlanda del N.',
+  Ireland:'🇮🇪 Irlanda', Spain:'🇪🇸 España', Italy:'🇮🇹 Italia', Germany:'🇩🇪 Alemania',
+  France:'🇫🇷 Francia', Netherlands:'🇳🇱 P. Bajos', Portugal:'🇵🇹 Portugal', Belgium:'🇧🇪 Bélgica',
+  Turkey:'🇹🇷 Turquía', Greece:'🇬🇷 Grecia', Poland:'🇵🇱 Polonia', 'Saudi Arabia':'🇸🇦 A. Saudí',
+  'South Korea':'🇰🇷 Corea del Sur', Japan:'🇯🇵 Japón', China:'🇨🇳 China', Egypt:'🇪🇬 Egipto',
+  Morocco:'🇲🇦 Marruecos', Iran:'🇮🇷 Irán', India:'🇮🇳 India', Australia:'🇦🇺 Australia',
+  Sweden:'🇸🇪 Suecia', Norway:'🇳🇴 Noruega', Finland:'🇫🇮 Finlandia', Denmark:'🇩🇰 Dinamarca',
+  Iceland:'🇮🇸 Islandia', 'Faroe Islands':'🇫🇴 Islas Feroe', Estonia:'🇪🇪 Estonia', Latvia:'🇱🇻 Letonia',
+  Lithuania:'🇱🇹 Lituania', Austria:'🇦🇹 Austria', Switzerland:'🇨🇭 Suiza', Croatia:'🇭🇷 Croacia',
+  Serbia:'🇷🇸 Serbia', Ukraine:'🇺🇦 Ucrania', Russia:'🇷🇺 Rusia', Romania:'🇷🇴 Rumanía',
+  Brazil:'🇧🇷 Brasil', Argentina:'🇦🇷 Argentina', Colombia:'🇨🇴 Colombia', Mexico:'🇲🇽 México',
+  USA:'🇺🇸 EE. UU.', Canada:'🇨🇦 Canadá', Peru:'🇵🇪 Perú', Bolivia:'🇧🇴 Bolivia',
+  Ecuador:'🇪🇨 Ecuador', Uruguay:'🇺🇾 Uruguay', Chile:'🇨🇱 Chile', Paraguay:'🇵🇾 Paraguay',
+  Venezuela:'🇻🇪 Venezuela',
+  Europe:'🇪🇺 Europa', 'South Am.':'🌎 Sudamérica', World:'🌍 Internacional',
+};
+const LIGA_PAIS = {
+  'Ekstraklasa':'Poland',
+  'First Division IE':'Ireland', 'League of Ireland':'Ireland',
+  'Liga Argentina':'Argentina', 'Liga Profesional Argentina':'Argentina',
+  'Primera Nacional':'Argentina', 'Copa Argentina':'Argentina', 'Torneo Federal A':'Argentina',
+  'Primera B Metropolitana':'Argentina', 'Primera C':'Argentina', 'Copa De La Liga':'Argentina',
+  'Liga MX':'Mexico',
+  'Brasileirao':'Brazil', 'Brasileirao B':'Brazil',
+  'Allsvenskan':'Sweden', 'Damallsvenskan':'Sweden',
+  'Eliteserien':'Norway', 'Veikkausliiga':'Finland',
+  'MLS':'USA', 'Major League Soccer':'USA', 'Canadian Premier League':'Canada', 'Canadian Championship':'Canada',
+  'Liga 1 Perú':'Peru', 'Liga Boliviana':'Bolivia', 'LigaPro Ecuador':'Ecuador',
+  'Apertura Uruguay':'Uruguay', 'Copa Chile':'Chile',
+  'K League 1':'South Korea', 'K League 2':'South Korea', 'Botola Pro':'Morocco', 'Azadegan League':'Iran',
+};
+function paisDeMatch(p) {
+  const c = p?.pais || p?.country || LIGA_PAIS[p?.liga] || null;
+  return c ? (COUNTRY_ES[c] || c) : '';
+}
+
 // Maps user-written league names → league ID
 const LEAGUE_NAME_TO_ID = {
   'fifa world cup':1635, 'world cup':1635, 'mundial':1635, 'copa del mundo':1635,
@@ -7713,7 +7755,7 @@ async function generateSuperPickPlan(force = false) {
       }
       const nuevos = buildSuperPickPlan(ranked, fechaBy, base).map(c => ({
         status: 'ok', fecha: today, generadoAt: now.toISOString(),
-        fixtureId: c.fixtureId, liga: c.liga, local: c.local, visitante: c.visitante,
+        fixtureId: c.fixtureId, liga: c.liga, pais: c.country || null, local: c.local, visitante: c.visitante,
         kickoff: fechaBy.get(c.fixtureId), mercado: superPickMercado(c.market),
         seleccion: c.marketLabel, esCombinada: !!c.esCombinada, legs: c.legs || null,
         cuota: c.odds, ev: c.ev, prob: c.prob, stake: c.stake, sbSignal: c.sbSignal ?? null,
@@ -7749,7 +7791,7 @@ async function generateSuperPickPlan(force = false) {
           .filter(c => { if (spFix.has(c.fixtureId) || seenFix.has(c.fixtureId)) return false; seenFix.add(c.fixtureId); return true; }) // 1 por partido, sin repetir SuperPick
           .slice(0, EXTRAPICK_MAX)
           .map((c, i) => ({
-            ordinal: i + 1, fixtureId: c.fixtureId, liga: c.liga, local: c.local, visitante: c.visitante,
+            ordinal: i + 1, fixtureId: c.fixtureId, liga: c.liga, pais: c.country || null, local: c.local, visitante: c.visitante,
             kickoff: fechaByE.get(c.fixtureId), mercado: superPickMercado(c.market),
             seleccion: c.marketLabel, esCombinada: !!c.esCombinada, legs: c.legs || null,
             cuota: c.odds, ev: c.ev, prob: c.prob, stake: c.stake, sbSignal: c.sbSignal ?? null,
@@ -7780,7 +7822,7 @@ async function generateSuperPickPlan(force = false) {
       const entran = entries.filter(p => !prev.some(q => mismo(p, q)));
       // Picks que ACABAN de caer de valor (no lo estaban antes) — aviso de honestidad.
       const bajaron = entries.filter(p => p.valorBajo && !prev.some(q => mismo(p, q) && q.valorBajo));
-      const linea = p => `#${p.ordinal} ⏰ ${formatHour(p.kickoff)} — *${p.local} vs ${p.visitante}* (${p.liga})\n${p.seleccion} @ ${p.cuota} | EV +${p.ev}% | stake ${p.stake}/10${p.valorBajo ? ' ⚠️ valor bajó' : ''}`;
+      const linea = p => { const pais = paisDeMatch(p); return `#${p.ordinal} ⏰ ${formatHour(p.kickoff)} — *${p.local} vs ${p.visitante}* (${p.liga}${pais ? ' · ' + pais : ''})\n${p.seleccion} @ ${p.cuota} | EV +${p.ev}% | stake ${p.stake}/10${p.valorBajo ? ' ⚠️ valor bajó' : ''}`; };
       let msg = null;
       if (!day && entries.length) {
         msg = `🎯 *SuperPicks del día* (${entries.length}):\n\n${entries.map(linea).join('\n\n')}`;
@@ -7810,7 +7852,7 @@ function commitSuperPick(fecha, p) {
     id: `sp-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
     emitidoAt: p.servedAt || p.generadoAt || new Date().toISOString(),
     fecha, fixtureId: p.fixtureId, fechaPartido: p.kickoff,
-    liga: p.liga, local: p.local, visitante: p.visitante,
+    liga: p.liga, pais: p.pais || null, local: p.local, visitante: p.visitante,
     mercado: p.mercado, seleccion: p.seleccion, linea: null, handicap: null,
     cuota: p.cuota, stake: p.stake, esCombinada: !!p.esCombinada,
     resultado: null, scoresFinal: null, source: 'superpick', ordinal: p.ordinal,
@@ -12168,12 +12210,14 @@ app.get('/api/superpick/plan', (req, res) => {
   try {
     const today = todayDate();
     const day = loadSuperPicks()[today] || null;
+    // paisDisplay: país en español + bandera, listo para renderizar en la notificación.
+    const conPais = p => ({ ...p, paisDisplay: paisDeMatch(p) });
     res.json({
       fecha: today,
       generadoAt: day?.generadoAt || null,
       refreshedAt: day?.refreshedAt || null,
-      picks: day?.picks || [],
-      extras: day?.extras || [],   // ExtraPicks +10% (segundo nivel)
+      picks: (day?.picks || []).map(conPais),
+      extras: (day?.extras || []).map(conPais),   // ExtraPicks +10% (segundo nivel)
     });
   } catch (e) {
     console.error('/api/superpick/plan:', e.message);
@@ -12193,6 +12237,80 @@ app.get('/api/superpick/evaluados', (req, res) => {
     res.json({ evaluados: superPicksEvaluadosRecientes(horas) });
   } catch (e) {
     console.error('/api/superpick/evaluados:', e.message);
+    res.status(500).json({ error: 'internal' });
+  }
+});
+
+// Brief matutino en un solo shot: resumen de AYER (canal completo + SuperPick/Extras
+// con su resultado) + plan de HOY (SuperPicks + ExtraPicks, con país) + track record.
+// Read-only, NO gasta cuota de API (solo lee picks.json / superpicks.json). Mismo token.
+app.get('/api/brief', (req, res) => {
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  if (!process.env.SUPERPICK_API_TOKEN || token !== process.env.SUPERPICK_API_TOKEN) {
+    return res.status(401).json({ error: 'unauthorized' });
+  }
+  try {
+    const hoy  = todayDate();
+    // 'ayer' = fecha calendario de Bogotá 24h atrás (Colombia no tiene DST).
+    const ayer = new Date(Date.now() - 86400000).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const picks = loadPicks();
+    const sp    = loadSuperPicks();
+    const esW = r => r === 'W', esL = r => r === 'L';
+
+    // ── Resumen de AYER (todos los picks emitidos, canal completo) ──────────────
+    const ay      = picks.filter(p => p.fecha === ayer);
+    const settled = ay.filter(p => esW(p.resultado) || esL(p.resultado));
+    const W = settled.filter(p => esW(p.resultado)).length;
+    const L = settled.length - W;
+    const push = ay.filter(p => ['P', 'push', 'void'].includes(p.resultado)).length;
+    let staked = 0, ret = 0;
+    for (const p of settled) { const s = p.stake || 1; staked += s; if (esW(p.resultado)) ret += s * (p.cuota || 1); }
+    const roi = staked ? +(((ret - staked) / staked) * 100).toFixed(1) : 0;
+    const porMercado = {};
+    for (const p of settled) { const m = p.mercado || '?'; (porMercado[m] = porMercado[m] || { w: 0, l: 0 })[esW(p.resultado) ? 'w' : 'l']++; }
+
+    // Resultado de un SuperPick/Extra buscando su liquidación en picks.json.
+    const resultadoDe = (fid, sel) => {
+      const c = picks.filter(p => p.fixtureId === fid);
+      const m = c.find(p => p.seleccion === sel) || c[0];
+      return m ? { resultado: m.resultado || '?', score: m.scoresFinal || null } : { resultado: '?', score: null };
+    };
+    const conResultado = (arr = []) => arr.map(p => {
+      const r = resultadoDe(p.fixtureId, p.seleccion);
+      return {
+        ordinal: p.ordinal, partido: `${p.local} vs ${p.visitante}`,
+        liga: p.liga, pais: paisDeMatch(p), seleccion: p.seleccion, cuota: p.cuota, ev: p.ev,
+        resultado: r.resultado, score: r.score,
+      };
+    });
+    const dAyer = sp[ayer] || null;
+
+    // ── Plan de HOY ─────────────────────────────────────────────────────────────
+    const dHoy = sp[hoy] || null;
+    const conPais = p => ({ ...p, paisDisplay: paisDeMatch(p) });
+
+    res.json({
+      ayer: {
+        fecha: ayer,
+        emitidos: ay.length, liquidados: settled.length, W, L, push, pendientes: ay.length - settled.length - push,
+        acierto: settled.length ? Math.round((W / settled.length) * 100) : 0,
+        roi, netoU: +(ret - staked).toFixed(1), arriesgadoU: staked,
+        porMercado,
+        superpick: dAyer ? conResultado(dAyer.picks) : [],
+        extras:    dAyer ? conResultado(dAyer.extras) : [],
+      },
+      hoy: {
+        fecha: hoy,
+        generadoAt: dHoy?.generadoAt || null,
+        refreshedAt: dHoy?.refreshedAt || null,
+        motivo: dHoy?.motivo || null,
+        superpicks: (dHoy?.picks || []).map(conPais),
+        extras:     (dHoy?.extras || []).map(conPais),
+      },
+      trackRecord: superPickTrackRecord(),
+    });
+  } catch (e) {
+    console.error('/api/brief:', e.message);
     res.status(500).json({ error: 'internal' });
   }
 });
