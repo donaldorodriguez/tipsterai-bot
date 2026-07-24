@@ -6205,6 +6205,19 @@ async function evaluatePickResult(pick, fixture, stats) {
     const noEvaluable = ['proximo_gol', 'gol_equipo_2T'].includes(pick.tipoAlerta);
     if (noEvaluable) return '?';
 
+    // PRIMER TIEMPO (bug real Stjarnan-Ilves FT 1-0 / HT 0-0): estas alertas se
+    // liquidan con el marcador AL DESCANSO, no con el final — un gol en el 2T
+    // marcaba W una alerta de "Gol 1er tiempo" que perdió.
+    const es1Talert = ['over05_1T', 'over_1T', 'gol_equipo_1T'].includes(pick.tipoAlerta) ||
+                      /1er tiempo|primer tiempo|primera mitad|\b1t\b/i.test(pick.seleccion || '');
+    if (es1Talert) {
+      if (htHome == null || htAway == null) return '?';               // sin marcador de descanso → no adivinar
+      const htTotal = htHome + htAway;
+      if (pick.tipoAlerta === 'gol_equipo_1T') return htTotal === 0 ? 'L' : '?'; // equipo-específico: solo el L claro
+      const line = pick.linea != null ? parseFloat(pick.linea) : 0.5;
+      return htTotal > line ? 'W' : 'L';
+    }
+
     // over_general / gol_urgente: W si cayó al menos 1 gol después de la alerta.
     return total > totalAtAlert ? 'W' : 'L';
   }
@@ -6319,6 +6332,11 @@ async function evaluatePickResult(pick, fixture, stats) {
 
   // 3. Goles — solo si NO es pick de corners ni tarjetas, y no es 1T/2T
   if (es1T || es2T) return '?';
+  // GUARD (bug real Bolívar vs Grêmio): un pick de TARJETAS/CÓRNERS que no se pudo
+  // liquidar arriba (sin stats de Highlightly) NO debe caer al matcher de goles —
+  // "Over 4.5 tarjetas" matcheaba como "Over 4.5 goles" (el sufijo 'goles' es
+  // opcional) y con 5 goles daba W FALSO. Sin stats de tarjetas/córners → '?'.
+  if (esTarjetaPick || esCornerPick || /CARDS|CORNERS/.test(pick.mercado || '')) return '?';
   // Hándicap asiático de goles con línea ENTERA (Over X.0): push si el total queda
   // exacto en la línea. Debe evaluarse ANTES del matcher genérico over, que lo
   // liquidaría binario W/L y convertiría las devoluciones en falsas L.
