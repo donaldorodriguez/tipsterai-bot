@@ -3974,10 +3974,25 @@ function buildPickCandidates(enrichedFixtures) {
             if (m.key === 'btts'     && hs >= 1 && as >= 1) zbBoost += 2;
             if (m.key === 'over25'   && (hs + as) >= 3) zbBoost += 2;
             if (m.key === 'under25'  && (hs + as) <= 2) zbBoost += 2;
+            // CONTRADICCIÓN del score prediction → penaliza (feedback usuario: se
+            // guía por SoccerBuddy). Moderado, no veto: hoy ZCode fue ~50/50.
+            if ((m.key === 'homeWin' || m.key === 'dnb_home' || /dc_1/.test(m.key)) && as > hs) zbBoost -= 4;
+            if ((m.key === 'awayWin' || m.key === 'dnb_away' || /dc_.*2/.test(m.key)) && hs > as) zbBoost -= 4;
           }
         }
+        // Contradicción fuerte de ZCode en el propio mercado (lado opuesto ≥68% /
+        // ≤32%) → penaliza el EV para que el candidato baje o caiga del plan.
+        if ((m.key === 'over25' || m.key === 'over15') && _zb.over25_pct != null && _zb.over25_pct <= 32) zbBoost -= 6;
+        if (m.key === 'under25'  && _zb.over25_pct != null && _zb.over25_pct >= 68) zbBoost -= 6;
+        if (m.key === 'btts'     && _zb.btts_pct   != null && _zb.btts_pct   <= 32) zbBoost -= 6;
+        if (m.key === 'bttsNo'   && _zb.btts_pct   != null && _zb.btts_pct   >= 68) zbBoost -= 6;
+        if ((m.key === 'homeWin' || m.key === 'dnb_home') && _zb.home_win_pct != null && _zb.home_win_pct <= 28) zbBoost -= 5;
+        if ((m.key === 'awayWin' || m.key === 'dnb_away') && _zb.away_win_pct != null && _zb.away_win_pct <= 28) zbBoost -= 5;
         if (zbBoost > 0) {
           evRaw = Math.min(evRaw + zbBoost, Math.max(evRaw * 1.5, evRaw + zbBoost));
+        } else if (zbBoost < 0) {
+          evRaw = evRaw + zbBoost;                 // contradicción de SoccerBuddy → baja el EV
+          if (zbBoost <= -5) console.log(`🔮 ZCode contradice fuerte: ${f.local} vs ${f.visitante} [${m.key}] EV ${(evRaw - zbBoost).toFixed(1)}→${evRaw.toFixed(1)}`);
         }
       }
 
@@ -7894,6 +7909,9 @@ const GOALSCAN = {
   HOUR_FROM: 7, HOUR_TO: 22,          // 7am–10pm Col
   MAX_PER_HOUR: 5,
   STATS_COOLDOWN_MIN: 6,              // no re-pedir stats del mismo fixture antes de esto
+  MIN_LEAGUE_PRIORITY: 35,            // whitelist de calidad: solo ligas serias (no amistosos
+                                      // ni torneos oscuros sin stats). Menos llamadas HL + mejor
+                                      // acierto. effectiveLeaguePriority da 20 a ligas desconocidas.
 };
 const _goalAlertSent     = new Map(); // fixtureId → fecha (dedup: 1 alerta/partido/día)
 const _goalStatsFetchedAt = new Map();// fixtureId → ts (cooldown de stats)
@@ -7948,6 +7966,8 @@ async function scanGoalAlertsProactive() {
       if (el < GOALSCAN.MIN_ELAPSED || el > GOALSCAN.MAX_ELAPSED) continue;
       if (PICKS_EXCLUDE_LEAGUES.has(p.leagueId)) continue;
       if (esFemOJuvenil(p.leagueName, p.homeTeam, p.awayTeam)) continue; // sin femenino/juvenil
+      if (/friendly|amistoso/i.test(p.leagueName || '')) continue;       // sin amistosos (sin stats fiables)
+      if (effectiveLeaguePriority({ leagueId: p.leagueId, round: p.round }) < GOALSCAN.MIN_LEAGUE_PRIORITY) continue; // solo ligas de calidad
       if (_goalAlertSent.has(p.fixtureId)) continue;
       if (now - (_goalStatsFetchedAt.get(p.fixtureId) || 0) < GOALSCAN.STATS_COOLDOWN_MIN * 60e3) continue;
       pre.push({ raw: m, parsed: p });
