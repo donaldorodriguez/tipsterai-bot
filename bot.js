@@ -3640,6 +3640,8 @@ function marketFamily(key) {
   if (/^dc_/.test(key))          return 'DC';
   if (key === 'dnb_home')        return 'DNB_HOME';
   if (key === 'dnb_away')        return 'DNB_AWAY';
+  if (key === 'ah_home_m05')     return 'HOME_WIN';   // AH -0.5 ≡ victoria directa
+  if (key === 'ah_away_m05')     return 'AWAY_WIN';   // AH -0.5 ≡ victoria directa
   if (/^ah_home/.test(key))      return 'AH_HOME';
   if (/^ah_away/.test(key))      return 'AH_AWAY';
   if (/^ht_/.test(key))          return 'HT_OVER';
@@ -3766,8 +3768,11 @@ function buildPickCandidates(enrichedFixtures) {
       { key: 'dnb_home', label: 'Draw No Bet — Local',        prob: probs.dnbHome / 100, oddsVal: odds.dnb_home, cat: 'dnb', minOdds: 1.30, minProb: 0.60 },
       { key: 'dnb_away', label: 'Draw No Bet — Visitante',    prob: probs.dnbAway / 100, oddsVal: odds.dnb_away, cat: 'dnb', minOdds: 1.40, minProb: 0.58 },
       // ── Hándicap asiático
-      { key: 'ah_home_m05', label: 'Hándicap Asiático Local -0.5',       prob: probs.homeWin / 100,              oddsVal: odds.ah_home_m05, cat: 'ah', minOdds: 1.50, minProb: 0.60 },
-      { key: 'ah_away_m05', label: 'Hándicap Asiático Visitante -0.5',   prob: probs.awayWin / 100,              oddsVal: odds.ah_away_m05, cat: 'ah', minOdds: 1.50, minProb: 0.58 },
+      // AH -0.5 ≡ victoria directa (el empate PIERDE, paga igual que el 1X2). Se muestra
+      // como 'Victoria Local/Visitante' (label claro, pedido del usuario) y superPickMercado
+      // lo mapea a HOME_WIN/AWAY_WIN para que se evalúe como victoria (no como AH con hándicap).
+      { key: 'ah_home_m05', label: 'Victoria Local',       prob: probs.homeWin / 100,              oddsVal: odds.ah_home_m05, cat: 'ah', minOdds: 1.50, minProb: 0.60 },
+      { key: 'ah_away_m05', label: 'Victoria Visitante',   prob: probs.awayWin / 100,              oddsVal: odds.ah_away_m05, cat: 'ah', minOdds: 1.50, minProb: 0.58 },
       { key: 'ah_home_m15', label: 'Hándicap Asiático Local -1.5',       prob: (probs.over15 * probs.homeWin / 10000), oddsVal: odds.ah_home_m15, cat: 'ah', minOdds: 1.60, minProb: 0.45 },
       { key: 'ah_away_m15', label: 'Hándicap Asiático Visitante -1.5',   prob: (probs.over15 * probs.awayWin / 10000), oddsVal: odds.ah_away_m15, cat: 'ah', minOdds: 1.65, minProb: 0.42 },
       // ── Portería a cero
