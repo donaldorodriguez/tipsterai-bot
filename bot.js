@@ -7695,6 +7695,37 @@ async function notifySuperPickWhatsApp(message, picksCount = null) {
   }
 }
 
+// Encabezado "resumen de ayer" para la notificación matutina del plan (la de las
+// ~6am que el usuario ya recibe). Canal completo (todo lo liquidado) + marcador de
+// los SuperPicks de ayer. Devuelve '' si aún no hay nada liquidado (→ el mensaje
+// queda solo con el plan, como antes).
+function resumenAyerTexto() {
+  try {
+    const ayer = new Date(Date.now() - 86400000).toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+    const picks = loadPicks();
+    const ay = picks.filter(p => p.fecha === ayer);
+    const settled = ay.filter(p => p.resultado === 'W' || p.resultado === 'L');
+    if (!settled.length) return '';
+    const W = settled.filter(p => p.resultado === 'W').length;
+    const L = settled.length - W;
+    let staked = 0, ret = 0;
+    for (const p of settled) { const s = p.stake || 1; staked += s; if (p.resultado === 'W') ret += s * (p.cuota || 1); }
+    const roi = staked ? ((ret - staked) / staked) * 100 : 0;
+    const acierto = Math.round((W / settled.length) * 100);
+    // SuperPicks de ayer: cuántos ganaron (marcador tipo 3/3).
+    const spAyer = loadSuperPicks()[ayer]?.picks || [];
+    let spLine = '';
+    if (spAyer.length) {
+      const res = spAyer.map(p => picks.find(x => x.fixtureId === p.fixtureId && x.seleccion === p.seleccion)?.resultado);
+      const spW = res.filter(r => r === 'W').length;
+      const spEval = res.filter(r => r === 'W' || r === 'L').length;
+      if (spEval) spLine = `\n⭐ SuperPicks: ${spW}/${spEval}`;
+    }
+    const [, mm, dd] = ayer.split('-');
+    return `📊 *Resumen de ayer* (${dd}/${mm})\n${W >= L ? '✅' : '📉'} ${W}-${L} · ${acierto}% acierto · ROI ${roi >= 0 ? '+' : ''}${roi.toFixed(1)}%${spLine}\n\n━━━━━━━━━━\n\n`;
+  } catch (e) { console.error('resumenAyerTexto:', e.message); return ''; }
+}
+
 let _superPickGenerating = false;
 async function generateSuperPickPlan(force = false) {
   const today = todayDate();
@@ -7830,7 +7861,8 @@ async function generateSuperPickPlan(force = false) {
       const linea = p => { const pais = paisDeMatch(p); return `#${p.ordinal} ⏰ ${formatHour(p.kickoff)} — *${p.local} vs ${p.visitante}* (${p.liga}${pais ? ' · ' + pais : ''})\n${p.seleccion} @ ${p.cuota} | EV +${p.ev}% | stake ${p.stake}/10${p.valorBajo ? ' ⚠️ valor bajó' : ''}`; };
       let msg = null;
       if (!day && entries.length) {
-        msg = `🎯 *SuperPicks del día* (${entries.length}):\n\n${entries.map(linea).join('\n\n')}`;
+        // Primer plan del día (~6am): encabeza con el resumen de ayer → brief completo.
+        msg = `${resumenAyerTexto()}🎯 *SuperPicks del día* (${entries.length}):\n\n${entries.map(linea).join('\n\n')}`;
       } else if (entran.length) {
         msg = `🆕 *SuperPick — pick${entran.length > 1 ? 's' : ''} nuevo${entran.length > 1 ? 's' : ''} del día*\n\n${entran.map(linea).join('\n\n')}`;
       } else if (bajaron.length) {
