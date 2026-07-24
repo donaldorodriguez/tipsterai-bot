@@ -3950,6 +3950,7 @@ function buildPickCandidates(enrichedFixtures) {
       if (hasRealOdds && evRaw > 20) continue;
 
       // ── ZCode Soccer Buddy: boost de EV por confirmación externa ─────────────
+      let _sbSignal = 'nodata';   // registro para calibrar el peso de SoccerBuddy
       if (_zb) {
         let zbBoost = 0;
         if (m.key === 'btts'      && _zb.btts_pct >= 68)  zbBoost += (_zb.btts_pct >= 78 ? 6 : 3);
@@ -3994,6 +3995,7 @@ function buildPickCandidates(enrichedFixtures) {
           evRaw = evRaw + zbBoost;                 // contradicción de SoccerBuddy → baja el EV
           if (zbBoost <= -5) console.log(`🔮 ZCode contradice fuerte: ${f.local} vs ${f.visitante} [${m.key}] EV ${(evRaw - zbBoost).toFixed(1)}→${evRaw.toFixed(1)}`);
         }
+        _sbSignal = zbBoost >= 3 ? 'confirma' : zbBoost <= -5 ? 'contradice' : 'neutral';
       }
 
       // ── Line Reversals + Dropping Odds: dinero sharp → boost de EV ───────────
@@ -4188,6 +4190,7 @@ function buildPickCandidates(enrichedFixtures) {
         _syntheticOdds: !hasRealOdds,         // true = cuota implícita, el LLM busca la real
         ev:           ev,
         stake,
+        sbSignal:     _sbSignal,               // registro SoccerBuddy: confirma|contradice|neutral|nodata
         xGLocal:      probs.homeLambda,
         xGVisitante:  probs.awayLambda,
         cornersLambda: probs.cornersLambda,
@@ -7713,7 +7716,7 @@ async function generateSuperPickPlan(force = false) {
         fixtureId: c.fixtureId, liga: c.liga, local: c.local, visitante: c.visitante,
         kickoff: fechaBy.get(c.fixtureId), mercado: superPickMercado(c.market),
         seleccion: c.marketLabel, esCombinada: !!c.esCombinada, legs: c.legs || null,
-        cuota: c.odds, ev: c.ev, prob: c.prob, stake: c.stake,
+        cuota: c.odds, ev: c.ev, prob: c.prob, stake: c.stake, sbSignal: c.sbSignal ?? null,
         locked: false, servedAt: null,
       }));
       // Bajas confirmadas para los picks nuevos del plan (≤3 llamadas APIF):
@@ -7749,7 +7752,7 @@ async function generateSuperPickPlan(force = false) {
             ordinal: i + 1, fixtureId: c.fixtureId, liga: c.liga, local: c.local, visitante: c.visitante,
             kickoff: fechaByE.get(c.fixtureId), mercado: superPickMercado(c.market),
             seleccion: c.marketLabel, esCombinada: !!c.esCombinada, legs: c.legs || null,
-            cuota: c.odds, ev: c.ev, prob: c.prob, stake: c.stake,
+            cuota: c.odds, ev: c.ev, prob: c.prob, stake: c.stake, sbSignal: c.sbSignal ?? null,
           }));
         extras.sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
         extras.forEach((p, i) => { p.ordinal = i + 1; });
@@ -7811,6 +7814,7 @@ function commitSuperPick(fecha, p) {
     mercado: p.mercado, seleccion: p.seleccion, linea: null, handicap: null,
     cuota: p.cuota, stake: p.stake, esCombinada: !!p.esCombinada,
     resultado: null, scoresFinal: null, source: 'superpick', ordinal: p.ordinal,
+    sbSignal: p.sbSignal ?? null,   // registro SoccerBuddy para calibrar su peso vs W/L
   });
   persistPicks(picks);
   return true;
