@@ -373,28 +373,22 @@ function colHour(iso) {
   return +new Intl.DateTimeFormat('en-US', { timeZone: 'America/Bogota', hour: '2-digit', hourCycle: 'h23' }).format(new Date(iso));
 }
 
-// Reparte una selección top-N por franja horaria de Colombia (mañana <12, tarde
-// 12-17, noche ≥18) para NO dejar fuera la mañana: dentro de cada franja ordena por
-// prioridad de liga y va tomando por turnos (round-robin) hasta llenar N. Así los
-// partidos mañaneros entran al análisis aunque sean de liga de menor prioridad, sin
-// subir el total analizado (misma cuota de API). fxOf extrae el fixture de cada item.
-function pickByTimeBuckets(items, n, fxOf = it => it) {
-  const b = { m: [], t: [], n: [] };
-  for (const it of items) {
-    const f = fxOf(it);
-    const h = colHour(f.date || f.fechaPartido);
-    (h < 12 ? b.m : h < 18 ? b.t : b.n).push(it);
-  }
+// Selección top-N que GARANTIZA un mínimo de partidos mañaneros (Col <12h) y llena
+// el resto por prioridad de liga (favorece tarde/noche, que tienen más y mejores
+// partidos). Antes usaba round-robin 1:1:1 y ahogaba la noche — se caían buenos picks
+// nocturnos (ej. St. Louis DNB) por darle peso igual a la flaca franja de la mañana.
+// fxOf extrae el fixture; minManana = cupos reservados a la mañana. Misma cuota de API.
+function pickByTimeBuckets(items, n, fxOf = it => it, minManana = 8) {
   const prio = it => effectiveLeaguePriority(fxOf(it));
-  for (const k of ['m', 't', 'n']) b[k].sort((a, z) => prio(z) - prio(a));
-  const out = [], order = ['m', 't', 'n'];
-  let i = 0;
-  while (out.length < n && (b.m.length + b.t.length + b.n.length)) {
-    const k = order[i % 3];
-    if (b[k].length) out.push(b[k].shift());
-    i++;
+  const esManana = it => colHour(fxOf(it).date || fxOf(it).fechaPartido) < 12;
+  const sorted = [...items].sort((a, z) => prio(z) - prio(a));
+  const out = sorted.filter(esManana).slice(0, minManana); // piso de mañana (top por prioridad)
+  const seen = new Set(out);
+  for (const it of sorted) {                                // resto por prioridad global (favorece noche)
+    if (out.length >= n) break;
+    if (!seen.has(it)) { out.push(it); seen.add(it); }
   }
-  return out;
+  return out.sort((a, z) => prio(z) - prio(a)).slice(0, n); // por prioridad → stats top-12 a los mejores
 }
 
 // Ligas excluidas de picks automáticos (picks de hoy, picks en vivo)
