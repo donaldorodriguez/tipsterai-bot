@@ -7819,14 +7819,22 @@ async function generateSuperPickPlan(force = false) {
         if (fr && fr.prob != null && p.cuota) {
           p.evOriginal = p.evOriginal ?? p.ev;
           p.prob = fr.prob;
-          p.ev = +((fr.prob / 100 * p.cuota - 1) * 100).toFixed(2);
+          // Preservar el ancla de ROI del candidato fresco (winner's curse): nunca
+          // mostrar más que fr.ev anclado. Recalcular crudo des-anclaba y revivía
+          // picks de mercado roto (tarjetas) con EV inflado, burlando el piso.
+          const rawEv = +((fr.prob / 100 * p.cuota - 1) * 100).toFixed(2);
+          p.ev = (fr.ev != null) ? Math.min(rawEv, fr.ev) : rawEv;
           const antes = p.valorBajo;
           p.valorBajo = p.ev < 3;
           if (p.valorBajo && !antes) console.log(`⚠️ SuperPick valor bajó: ${p.local} vs ${p.visitante} ${p.evOriginal}%→${p.ev}%`);
           if (!p.valorBajo) delete p.valorBajo;
         }
       }
-      const nuevos = buildSuperPickPlan(ranked, fechaBy, base).map(c => ({
+      // Un conservado NO bloqueado y aún lejano (≥FREEZE_H) que tras el re-rateo (ya
+      // con el ancla) cae bajo el piso de EV ya no merece ser SuperPick → se suelta.
+      // La estabilidad solo protege a los ya bloqueados/servidos y a los inminentes.
+      const baseVigente = base.filter(p => p.locked || hAhead(p) < SUPERPICK_FREEZE_H || (p.ev ?? 0) >= SUPERPICK_MIN_EV);
+      const nuevos = buildSuperPickPlan(ranked, fechaBy, baseVigente).map(c => ({
         status: 'ok', fecha: today, generadoAt: now.toISOString(),
         fixtureId: c.fixtureId, liga: c.liga, pais: c.country || null, local: c.local, visitante: c.visitante,
         kickoff: fechaBy.get(c.fixtureId), mercado: superPickMercado(c.market),
@@ -7846,7 +7854,7 @@ async function generateSuperPickPlan(force = false) {
           }
         } catch {}
       }
-      entries = [...base, ...nuevos];   // base (congelados + lejanos válidos) + nuevos en cupos libres
+      entries = [...baseVigente, ...nuevos];   // conservados vigentes + nuevos en cupos libres
     }
     // Registrar al historial los que ya se jugaron (track record sin depender de leads)
     commitFinishedSuperPicks();
