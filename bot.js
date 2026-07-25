@@ -2054,9 +2054,12 @@ function sanitizeLivePicks(text) {
       .join('\n') || s.split('\n').slice(0, 2).join('\n');
     if (/(tarjeta|amarilla|card)/.test(header) && (/\b0[.,]5\b/.test(header) || /al menos 1 (tarjeta|amarilla)/.test(header)))
       return 'Over 0.5 tarjetas (mercado inexistente en casas)';
-    const esMitad = /\b1t\b|\b2t\b|1er|2do|primer tiempo|segundo tiempo|mitad/.test(header);
-    if (/gol/.test(header) && (/(m[áa]s de|over)\s*0[.,]5/.test(header) || /al menos 1 gol/.test(header)) && !esMitad)
-      return 'Over 0.5 goles FT (lock sin valor, cuota real ~1.20)';
+    // Over 0.5 goles: lock SIN valor real. Las casas lo pagan ~1.20-1.40 y a 0-0 en el
+    // HT muchas veces ni lo ofrecen — jamás la cuota estimada del modelo (que subestima
+    // el gol → cuota fantasma tipo 1.86). Se mata SIEMPRE, tenga o no etiqueta "(2T)":
+    // el LLM le ponía "(2T)" para esquivar este filtro. Over 1.5+/2.5 reales se conservan.
+    if (/gol/.test(header) && (/(m[áa]s de|over)\s*0[.,]5/.test(header) || /al menos 1 gol( m[áa]s)?/.test(header)))
+      return 'Over 0.5 goles (lock sin valor real — casas ~1.20-1.40 o ni se ofrece)';
     // Pick contra el propio modelo: cuota ESTIMADA (breakeven, no de bookmaker)
     // > 2.00 ⟺ el modelo le da < 50% al pick. Sin cuota real que pague por encima
     // de la justa, es EV cero/negativo por construcción (caso real 19-jul: Over 5.5
@@ -5559,6 +5562,8 @@ En CUALQUIER marcador, cuando el xG en vivo y el contexto indican que vienen má
 - Si jugada empieza con "Over ... (2 goles más)": solo recomiéndalo si cuotasVivo confirma cuota ≤ ~2.2 (respeta el campo condicion). Si la cuota real es mucho mayor, di que el modelo ve los goles pero el mercado no los paga → preferir el Asiático o no forzar.
 - Si jugada empieza con "Hándicap Asiático de goles — Over X.X": es la jugada PREFERIDA (menor riesgo). La línea X.X es el TOTAL del partido tal como aparece en el bookmaker (marcador actual + 1.0: con 0-0 es Over 1.0, con 1-0 es Over 2.0, con 1-1 es Over 3.0). Gana con 2+ goles más y DEVUELVE el stake con exactamente 1 gol más. Presenta la línea EXACTA de la jugada y explica esa mecánica al usuario — PROHIBIDO reformularla como "+1.0 sobre goles restantes". Cuota real típica 1.7-1.9.
 Si recomendacion2T NO existe, NO inventes esta jugada.
+⛔ NUNCA "Over 0.5 goles" en vivo — ni del partido, ni "2T"/"segundo tiempo", ni "al menos 1 gol": a 0-0 es un LOCK que las casas pagan ~1.20-1.40 o ni ofrecen, jamás la cuota estimada del modelo (que subestima el gol e infla la cuota justa a ~1.8). Un "al menos 1 gol más" NO es pick vendible. Para goles restantes usa SOLO líneas reales (Over 1.5, Over 2.5) o el Asiático de goles.
+⛔ ETIQUETA DE GOLES RESTANTES: nómbralos "en el 2º tiempo" o "goles restantes" y sé consistente entre título y selección. PROHIBIDO mezclar "(2T)" en el título con "en el partido / antes del 90'" en la selección — son mercados distintos y confunde al cliente sobre cuál apostar.
 
 CUOTAS EN VIVO:
 ⛔ PROHIBIDO escribir "cuota real verificada" o "cuota real disponible" basándote en lineasXxxVivo — esas son cuotas matemáticas de breakeven del modelo (campo "cuotaJustaOver"), NO cuotas reales. Solo puedes decir "cuota real" si el dato viene de cuotasVivo.
