@@ -456,6 +456,17 @@ const LEAGUE_BASE_RATES = {
   29718: { over25: 47, btts: 44, cards: 5.0, corners:  8.8, name: 'Clasif. CONMEBOL' },
 };
 
+// Torneos de SELECCIONES (FIFA): sus tarjetas/córners NO representan a las ligas de
+// clubes — la contención arbitral FIFA hunde las tarjetas y distorsiona el ROI. Se
+// identifican por nombre de liga (los picks guardan el nombre, no el leagueId). NO
+// incluye amistosos de CLUBES ("Friendlies Clubs"). Se usan para excluir estos picks
+// del ROI de calibración de tarjetas/córners (que alimenta el ancla del EV).
+function esTorneoSelecciones(liga) {
+  const s = String(liga || '');
+  if (/club/i.test(s)) return false; // amistosos de clubes, no de selecciones
+  return /world cup|mundial|copa am[eé]rica|copa america|nations league|uefa euro|eurocopa|\beuro\b|clasif|friendlies/i.test(s);
+}
+
 // ─── Plans config ─────────────────────────────────────────────────────────────
 
 const PLANES = {
@@ -3690,9 +3701,14 @@ function getMarketCalibration(force = false) {
       // superpick excluido: duplicaría picks del día ya contados en la calibración
       ['W', 'L'].includes(p.resultado) && !p.esCombinada && !['alerta_gol', 'superpick'].includes(p.source)
     );
+    const CARDS_CORNERS = new Set(['OVER_CARDS', 'UNDER_CARDS', 'OVER_CORNERS', 'UNDER_CORNERS']);
     const fam = {};
     for (const p of picks) {
       const fk = p.mercado || 'OTHER';
+      // Tarjetas/córners de torneos de selecciones (Mundial, Euro, Copa América…) NO
+      // representan a las ligas de clubes (contención FIFA hunde las tarjetas) → se
+      // excluyen del ROI que ancla el EV, para no castigar a ligas de clubes cargadas.
+      if (CARDS_CORNERS.has(fk) && esTorneoSelecciones(p.liga)) continue;
       if (!fam[fk]) fam[fk] = { n: 0, w: 0, sumImplied: 0, nImplied: 0, roiUnits: 0, nRoi: 0, clvSum: 0, clvN: 0 };
       const s = fam[fk];
       s.n++;
