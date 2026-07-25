@@ -400,10 +400,12 @@ const PICKS_EXCLUDE_LEAGUES = new Set([
 ]);
 
 // Buffer de cuota que se suma a la cuota real al mostrarla al usuario.
-// Representa el margen de seguridad: si la cuota cayó por debajo de la real
-// cuando el usuario intenta apostar, el pick ya no tiene valor → no entra.
-// Internamente siempre usamos la cuota real para cálculos de EV.
-const ODDS_DISPLAY_BUFFER = 0.15;
+// DESACTIVADO (25-jul-2026, pedido del usuario): las cuotas ya venían del promedio
+// de casas internacionales, que pagan MÁS que las casas colombianas (Betano) sobre
+// todo en goles/córners/DNB. Sumarle +0.15 encima mostraba cuotas imposibles de
+// conseguir acá (ej. DNB Aarhus a 1.90 cuando en Colombia era ~1.55). Con 0, la
+// cuota mostrada = cuota real (la misma que usa el EV). Perilla: subir para reactivar.
+const ODDS_DISPLAY_BUFFER = 0;
 
 // Tasas históricas base de Over 2.5 y BTTS por liga
 // Fuente: estadísticas 2023-2025, usadas para calibrar probabilidades
