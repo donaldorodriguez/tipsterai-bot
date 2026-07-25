@@ -7540,7 +7540,9 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 const SUPERPICK_FILE = fs.existsSync('/data') ? '/data/superpicks.json' : path.join(__dirname, 'superpicks.json');
 const SUPERPICK_MIN_KICKOFF_MIN  = 90;   // para ENTRAR al plan: kickoff ≥90 min futuro
 const SUPERPICK_SERVE_MIN        = 30;   // para SERVIRSE a un lead: kickoff ≥30 min futuro
-const SUPERPICK_SPACING_MIN      = 120;  // separación mínima entre kickoffs del plan
+const SUPERPICK_SPACING_MIN      = 0;    // sin espaciado entre kickoffs (pedido del usuario:
+                                         // ver TODOS los SP del día sin importar la hora; el
+                                         // servicio 1:1 igual sirve "el siguiente por kickoff")
 const SUPERPICK_MAX_PICKS        = 5;
 const SUPERPICK_BUILD_FROM_HOUR  = 6;    // hora Col desde la que se construye el plan
 const SUPERPICK_REFRESH_MIN      = 90;   // re-optimización de picks no bloqueados
@@ -7862,7 +7864,7 @@ async function generateSuperPickPlan(force = false) {
       const entran = entries.filter(p => !prev.some(q => mismo(p, q)));
       // Picks que ACABAN de caer de valor (no lo estaban antes) — aviso de honestidad.
       const bajaron = entries.filter(p => p.valorBajo && !prev.some(q => mismo(p, q) && q.valorBajo));
-      const linea = p => { const pais = paisDeMatch(p); return `#${p.ordinal} ⏰ ${formatHour(p.kickoff)} — *${p.local} vs ${p.visitante}* (${p.liga}${pais ? ' · ' + pais : ''})\n${p.seleccion} @ ${p.cuota} | EV +${p.ev}% | stake ${p.stake}/10${p.valorBajo ? ' ⚠️ valor bajó' : ''}`; };
+      const linea = p => { const pais = paisDeMatch(p); return `#${p.ordinal} ⏰ ${formatHour(p.kickoff)} — *${p.local} vs ${p.visitante}* (${p.liga}${pais ? ' · ' + pais : ''})\n${p.seleccion} @ ${p.cuota} | EV +${p.ev}% | prob ${p.prob}% | stake ${p.stake}/10${p.valorBajo ? ' ⚠️ valor bajó' : ''}`; };
       let msg = null;
       if (!day && entries.length) {
         // Primer plan del día (~6am): encabeza con el resumen de ayer y cierra con los
