@@ -7544,6 +7544,10 @@ const SUPERPICK_SPACING_MIN      = 120;  // separación mínima entre kickoffs d
 const SUPERPICK_MAX_PICKS        = 5;
 const SUPERPICK_BUILD_FROM_HOUR  = 6;    // hora Col desde la que se construye el plan
 const SUPERPICK_REFRESH_MIN      = 90;   // re-optimización de picks no bloqueados
+const SUPERPICK_MIN_EV           = 8;    // piso de EV para ENTRAR como SuperPick — no headline picks
+                                         // marginales (ej. EV 3.6% en tarjetas). Los frozen que
+                                         // caigan por debajo se conservan (estabilidad); los extras
+                                         // tienen su propio piso (EXTRAPICK_MIN_EV = 10).
 const SUPERPICK_MAX_EV           = 25;   // EV mayor contra cuota real = probable error del modelo
 const SUPERPICK_MAX_EV_COMBO     = 45;   // en combinadas de 2 patas el EV se multiplica
                                          // legítimamente (dos legs +18% ≈ +39%); tope más alto,
@@ -7602,7 +7606,7 @@ function rankSuperPickCandidates(candidates, enriched, now = new Date()) {
       // viene anclado al ROI real de ambas patas.
       const maxEV   = c.esCombinada ? SUPERPICK_MAX_EV_COMBO : SUPERPICK_MAX_EV;
       const minProb = c.esCombinada ? SUPERPICK_MIN_PROB_COMBO : SUPERPICK_MIN_PROB;
-      if (!(c.ev >= 3 && c.ev <= maxEV)) return false;
+      if (!(c.ev >= SUPERPICK_MIN_EV && c.ev <= maxEV)) return false;
       if (!(c.prob >= minProb)) return false;                         // favorito con valor, no cuota-lotería
       return true;
     })
@@ -7861,8 +7865,12 @@ async function generateSuperPickPlan(force = false) {
       const linea = p => { const pais = paisDeMatch(p); return `#${p.ordinal} ⏰ ${formatHour(p.kickoff)} — *${p.local} vs ${p.visitante}* (${p.liga}${pais ? ' · ' + pais : ''})\n${p.seleccion} @ ${p.cuota} | EV +${p.ev}% | stake ${p.stake}/10${p.valorBajo ? ' ⚠️ valor bajó' : ''}`; };
       let msg = null;
       if (!day && entries.length) {
-        // Primer plan del día (~6am): encabeza con el resumen de ayer → brief completo.
-        msg = `${resumenAyerTexto()}🎯 *SuperPicks del día* (${entries.length}):\n\n${entries.map(linea).join('\n\n')}`;
+        // Primer plan del día (~6am): encabeza con el resumen de ayer y cierra con los
+        // ExtraPicks (segundo nivel) → brief completo en un solo mensaje al admin.
+        const extrasTxt = extras.length
+          ? `\n\n➕ *ExtraPicks* (${extras.length}):\n\n${extras.map(linea).join('\n\n')}`
+          : '';
+        msg = `${resumenAyerTexto()}🎯 *SuperPicks del día* (${entries.length}):\n\n${entries.map(linea).join('\n\n')}${extrasTxt}`;
       } else if (entran.length) {
         msg = `🆕 *SuperPick — pick${entran.length > 1 ? 's' : ''} nuevo${entran.length > 1 ? 's' : ''} del día*\n\n${entran.map(linea).join('\n\n')}`;
       } else if (bajaron.length) {
