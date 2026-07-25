@@ -368,6 +368,35 @@ function effectiveLeaguePriority(f) {
   return base;
 }
 
+// Hora del kickoff en Colombia (0-23).
+function colHour(iso) {
+  return +new Intl.DateTimeFormat('en-US', { timeZone: 'America/Bogota', hour: '2-digit', hourCycle: 'h23' }).format(new Date(iso));
+}
+
+// Reparte una selección top-N por franja horaria de Colombia (mañana <12, tarde
+// 12-17, noche ≥18) para NO dejar fuera la mañana: dentro de cada franja ordena por
+// prioridad de liga y va tomando por turnos (round-robin) hasta llenar N. Así los
+// partidos mañaneros entran al análisis aunque sean de liga de menor prioridad, sin
+// subir el total analizado (misma cuota de API). fxOf extrae el fixture de cada item.
+function pickByTimeBuckets(items, n, fxOf = it => it) {
+  const b = { m: [], t: [], n: [] };
+  for (const it of items) {
+    const f = fxOf(it);
+    const h = colHour(f.date || f.fechaPartido);
+    (h < 12 ? b.m : h < 18 ? b.t : b.n).push(it);
+  }
+  const prio = it => effectiveLeaguePriority(fxOf(it));
+  for (const k of ['m', 't', 'n']) b[k].sort((a, z) => prio(z) - prio(a));
+  const out = [], order = ['m', 't', 'n'];
+  let i = 0;
+  while (out.length < n && (b.m.length + b.t.length + b.n.length)) {
+    const k = order[i % 3];
+    if (b[k].length) out.push(b[k].shift());
+    i++;
+  }
+  return out;
+}
+
 // Ligas excluidas de picks automáticos (picks de hoy, picks en vivo)
 // El bot sigue respondiendo si el usuario pregunta por estas ligas específicamente.
 const PICKS_EXCLUDE_LEAGUES = new Set([
@@ -6849,9 +6878,9 @@ async function gatherDailyCandidates(progress = async () => {}) {
 
   // ── FASE 1: cuotas — The Odds API (bulk) + API-Football (fallback) ───────────
   // Ordenar todos los partidos disponibles por prioridad de liga
-  const oddsPool = [...fixtures]
-    .sort((a, b) => effectiveLeaguePriority(b) - effectiveLeaguePriority(a))
-    .slice(0, 80); // revisar hasta 80 partidos buscando cuotas
+  // Reparte los 80 a revisar por franja horaria (Col) para que la mañana entre al
+  // análisis y no se la coma el ranking de liga (antes: puro top-80 por prioridad).
+  const oddsPool = pickByTimeBuckets(fixtures, 80, f => f); // revisar hasta 80 buscando cuotas
 
   await progress(`📊 ${fixtures.length} partidos en ligas monitoreadas. Consultando cuotas...`);
 
@@ -6867,8 +6896,9 @@ async function gatherDailyCandidates(progress = async () => {}) {
   // Si hay pocos partidos con cuotas (<3), derivar cuotas implícitas desde predicciones de la API
   let selected, oddsPreFetched;
   if (withOdds.length >= 3) {
-    selected = withOdds.slice(0, 40).map(x => x.fixture);
-    oddsPreFetched = new Map(withOdds.slice(0, 40).map(x => [x.fixture.fixtureId, x.odds]));
+    const sel = pickByTimeBuckets(withOdds, 40, x => x.fixture); // 40 analizados, repartidos por franja
+    selected = sel.map(x => x.fixture);
+    oddsPreFetched = new Map(sel.map(x => [x.fixture.fixtureId, x.odds]));
   } else {
     // Muy pocas cuotas reales → derivar cuotas implícitas desde % de predicción
     console.log(`⚠️ Pocas cuotas reales (${withOdds.length}). Derivando cuotas implícitas desde predicciones API...`);
@@ -6901,8 +6931,9 @@ async function gatherDailyCandidates(progress = async () => {}) {
       oddsPreFetched = new Map();
       console.log(`⚠️ Sin cuotas ni predicciones — modelo matemático puro para ${selected.length} partidos`);
     } else {
-      selected = combined.slice(0, 40).map(x => x.fixture);
-      oddsPreFetched = new Map(combined.slice(0, 40).map(x => [x.fixture.fixtureId, x.odds]));
+      const sel = pickByTimeBuckets(combined, 40, x => x.fixture); // repartido por franja
+      selected = sel.map(x => x.fixture);
+      oddsPreFetched = new Map(sel.map(x => [x.fixture.fixtureId, x.odds]));
       console.log(`📊 ${withOdds.length} reales + ${withImplied.length} implícitas = ${combined.length} total`);
     }
   }
