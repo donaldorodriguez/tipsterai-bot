@@ -7921,6 +7921,10 @@ async function generateSuperPickPlan(force = false) {
       // Picks que ACABAN de caer de valor (no lo estaban antes) — aviso de honestidad.
       const bajaron = entries.filter(p => p.valorBajo && !prev.some(q => mismo(p, q) && q.valorBajo));
       const linea = p => { const pais = paisDeMatch(p); return `#${p.ordinal} ⏰ ${formatHour(p.kickoff)} — *${p.local} vs ${p.visitante}* (${p.liga}${pais ? ' · ' + pais : ''})\n${p.seleccion} @ ${p.cuota} | EV +${p.ev}% | prob ${p.prob}% | stake ${p.stake}/10${p.valorBajo ? ' ⚠️ valor bajó' : ''}`; };
+      // Picks que SALIERON del plan estando aún por jugarse y sin que nadie los
+      // recibiera (no bloqueados) — salida REAL (se soltó por menor valor), no un
+      // partido que ya terminó. Aviso al admin (pedido del usuario 26-jul).
+      const salieron = prev.filter(q => q.status === 'ok' && !q.locked && new Date(q.kickoff) > now && !entries.some(p => mismo(p, q)));
       let msg = null;
       if (!day && entries.length) {
         // Primer plan del día (~6am): encabeza con el resumen de ayer y cierra con los
@@ -7929,11 +7933,16 @@ async function generateSuperPickPlan(force = false) {
           ? `\n\n➕ *ExtraPicks* (${extras.length}):\n\n${extras.map(linea).join('\n\n')}`
           : '';
         msg = `${resumenAyerTexto()}🎯 *SuperPicks del día* (${entries.length}):\n\n${entries.map(linea).join('\n\n')}${extrasTxt}`;
-      } else if (entran.length) {
-        msg = `🆕 *SuperPick — pick${entran.length > 1 ? 's' : ''} nuevo${entran.length > 1 ? 's' : ''} del día*\n\n${entran.map(linea).join('\n\n')}`;
-      } else if (bajaron.length) {
-        // No entró nada nuevo, pero un congelado perdió valor → avisar (sin sacarlo).
-        msg = `⚠️ *SuperPick — ojo, el valor bajó* (el pick sigue en pie, no lo saco):\n\n${bajaron.map(p => `${p.local} vs ${p.visitante} — ${p.seleccion}\nEV ahora +${p.ev}% (entró en +${p.evOriginal}%). Apuesta bajo tu criterio.`).join('\n\n')}`;
+      } else {
+        // Refresh intradía: avisa ENTRADAS y SALIDAS (y, si no hubo ninguna, caída de valor).
+        const parts = [];
+        if (entran.length)
+          parts.push(`🆕 *SuperPick — pick${entran.length > 1 ? 's' : ''} nuevo${entran.length > 1 ? 's' : ''} del día*\n\n${entran.map(linea).join('\n\n')}`);
+        if (salieron.length)
+          parts.push(`➖ *SuperPick — salió del plan* (aún no se jugaba, nadie lo había recibido — lo reemplazó mejor valor):\n\n${salieron.map(p => `*${p.local} vs ${p.visitante}* — ${p.seleccion} @ ${p.cuota} (⏰ ${formatHour(p.kickoff)})`).join('\n\n')}`);
+        if (!parts.length && bajaron.length)
+          parts.push(`⚠️ *SuperPick — ojo, el valor bajó* (el pick sigue en pie, no lo saco):\n\n${bajaron.map(p => `${p.local} vs ${p.visitante} — ${p.seleccion}\nEV ahora +${p.ev}% (entró en +${p.evOriginal}%). Apuesta bajo tu criterio.`).join('\n\n')}`);
+        if (parts.length) msg = parts.join('\n\n━━━━━━━━━━\n\n');
       }
       if (msg) notifySuperPickWhatsApp(msg, entries.length); // fire-and-forget
     } catch (e) { console.error('superpick notify build:', e.message); }
