@@ -7815,7 +7815,12 @@ async function generateSuperPickPlan(force = false) {
   if (day && !force) {
     const hasRefreshable = (day.picks || []).some(p => !p.locked && new Date(p.kickoff) > now);
     const ageMin = (now - new Date(day.refreshedAt || day.generadoAt)) / 60000;
-    if (!hasRefreshable || ageMin < SUPERPICK_REFRESH_MIN) return day;
+    // Un plan CON picks pero ninguno re-optimizable (todos bloqueados/jugados) no se
+    // toca. Pero un plan VACÍO (0 picks, día sin valor a las 6am) SÍ debe seguir
+    // buscando cada REFRESH_MIN — las cuotas maduran y aparecen picks más tarde;
+    // antes se quedaba pegado en vacío todo el día.
+    const hayPicks = (day.picks || []).length > 0;
+    if ((hayPicks && !hasRefreshable) || ageMin < SUPERPICK_REFRESH_MIN) return day;
   }
   _superPickGenerating = true;
   try {
