@@ -4200,6 +4200,15 @@ function buildPickCandidates(enrichedFixtures) {
         ev = Math.min(evModel, +(evModel * (1 - w) + _cal.roi * w).toFixed(2));
         if (ev < evModel - 0.5) console.log(`⚓ EV anclado ${f.local} vs ${f.visitante} [${_fam}] ${evModel}%→${ev}% (ROI ${_cal.roi}%, n${_cal.n}, w${w.toFixed(2)})`);
       }
+      // ── TORNEO/TEMPORADA NUEVA (fix 3): descuento de confianza ────────────────
+      // Los promedios son del torneo anterior (pre-fichajes) → más incertidumbre. Se
+      // encoge el EV positivo un 30% (solo encoge): baja el stake derivado y hace que
+      // menos picks pasen los filtros de SP/EP/PV. No re-entrena la prob (las standings
+      // llegan después del modelo Poisson), pero castiga la confianza del edge estimado.
+      if (f._torneoNuevo && ev > 0) {
+        ev = +(ev * 0.70).toFixed(2);
+        f._torneoNuevoAplicado = true;
+      }
       if (ev < -5) continue;
 
       // ── Umbral de valor profesional: con cuota real, solo publicar EV ≥ +3% ──
@@ -4932,6 +4941,7 @@ const TIPSTER_SYSTEM = `Eres el mejor tipster profesional del mundo especializad
 REGLA ABSOLUTA — DATOS Y ESTADÍSTICAS:
 - SOLO puedes mencionar números que aparezcan literalmente en el JSON que recibes. Cero inventar, cero inferir, cero recordar de tu entrenamiento.
 - Las estadísticas del JSON son promedios de TEMPORADA COMPLETA en TODAS las competiciones. NUNCA las etiquetes como "en Champions", "en FA Cup", "en copa" — son datos globales de temporada.
+- ⚠️ TORNEO/TEMPORADA NUEVA: si el JSON trae el campo "contextoTemporada", OBEDÉCELO al pie de la letra. Significa que el torneo actual apenas arrancó y los promedios de "temporada" son del TORNEO ANTERIOR (antes de fichajes). PROHIBIDO decir "esta temporada", "sólido en casa esta temporada", "esta campaña" sobre esos números — di "en el torneo/temporada anterior". Y PROHIBIDO afirmar a la vez "solo llevan 1 partido" y citar récords de 15+ partidos como actuales (contradicción). Trata esos datos como referencia del pasado, con cautela.
 - Si un dato no está en el JSON (árbitro, clima, alineación, estadística específica), escribe "sin datos disponibles" — nunca lo rellenes con suposiciones.
 - El campo "_aviso" del JSON es una instrucción de sistema: léela y cúmplela.
 - CONTEXTO DEL PARTIDO: usa ÚNICAMENTE los campos contextoPartido, jornada/round, motivacionLocal/Visitante del JSON. NUNCA uses tu conocimiento de entrenamiento para etiquetar un partido como "final de copa", "playoff por Champions" u otro contexto que no esté explícitamente en los datos. Si el campo jornada dice "Relegation Round" → dilo tal cual. Si no hay contexto claro → describe la situación numérica en tabla sin inventar narrativa.
@@ -7175,6 +7185,25 @@ async function gatherDailyCandidates(progress = async () => {}) {
     enriched[i].motivacionVisitante = getTeamMotivation(standingVisit, totalEquiposVisit);
     enriched[i].arbitro = f.referee || null;
 
+    // ── TORNEO/TEMPORADA NUEVA (fix 1) ────────────────────────────────────────
+    // Si la tabla del torneo actual apenas lleva pocas jornadas, los promedios de
+    // "temporada" (getTeamStats elige la temporada con ≥5 partidos → la ANTERIOR) son
+    // de OTRO torneo (Apertura↔Clausura) o de la temporada europea recién terminada —
+    // antes del mercado de fichajes. Aplica a ligas de clubes (no a fases de copa).
+    if (!esFasePreviaCopa(f)) {
+      const jugadosTabla = Math.max(standingLocal?.played || 0, standingVisit?.played || 0);
+      if (jugadosTabla >= 1 && jugadosTabla <= 4) {
+        const nStats = enriched[i].statsLocal?.partidos ?? enriched[i].statsVisitante?.partidos ?? null;
+        enriched[i]._torneoNuevo = true;
+        enriched[i].contextoTemporada =
+          `⚠️ TORNEO/TEMPORADA NUEVA: la tabla actual apenas lleva ${jugadosTabla} jornada(s)` +
+          (nStats ? `, pero los promedios de "temporada" son de ~${nStats} partidos` : '') +
+          ` → son del TORNEO ANTERIOR (antes del mercado de fichajes). NO los etiquetes como "esta temporada": ` +
+          `di "en el torneo/temporada anterior" y trátalos como REFERENCIA con cautela (plantel, forma y motivación ` +
+          `pueden haber cambiado). La tabla de este torneo aún no tiene muestra útil.`;
+      }
+    }
+
     // ── Predicción + venue/árbitro desde /matches/{id} ────────────────────────
     const pred = predResults[i].status === 'fulfilled' ? predResults[i].value : null;
     if (pred) {
@@ -8742,8 +8771,18 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     ? calcLiveCardsLines(totalCards, elapsed, regressionFactor)
     : null;
 
+  // TORNEO/TEMPORADA NUEVA (fix 1, consulta de partido específico): tabla del torneo
+  // con ≤4 jornadas ⇒ los promedios de "temporada" son del torneo anterior (pre-fichajes).
+  const _jugadosTablaP  = Math.max(homeStanding?.played || 0, awayStanding?.played || 0);
+  const _statsPartidosP = homeStatsData?.partidos?.total ?? awayStatsData?.partidos?.total ?? null;
+  const _torneoNuevoP   = !isLive && _jugadosTablaP >= 1 && _jugadosTablaP <= 4;
+
   const analysisData = {
     _aviso: 'TODAS las estadísticas de este JSON son promedios de TEMPORADA COMPLETA en TODAS las competiciones. NUNCA las etiquetes como estadísticas de una copa o competición específica. SOLO puedes citar números que aparezcan literalmente en este JSON — si un dato no está aquí, escribe "sin datos disponibles".',
+    ...(_torneoNuevoP && { contextoTemporada:
+      `⚠️ TORNEO/TEMPORADA NUEVA: la tabla actual apenas lleva ${_jugadosTablaP} jornada(s)` +
+      (_statsPartidosP ? `, pero los promedios de "temporada" son de ~${_statsPartidosP} partidos` : '') +
+      ` → son del TORNEO ANTERIOR (antes del mercado de fichajes). NO digas "esta temporada"/"esta campaña"/"sólido en casa esta temporada" sobre esos números: di "en el torneo/temporada anterior" y trátalos como REFERENCIA con cautela (plantel, forma y motivación pueden haber cambiado). PROHIBIDO afirmar "solo llevan 1 partido" y a la vez citar récords de 15+ partidos como actuales — es contradictorio.` }),
     partido: {
       liga:      nextRaw.league.name,
       ronda:     round || null,
@@ -8920,6 +8959,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     statsLocal:     withHomeContext(_engineHomeStats),
     statsVisitante: withAwayContext(_engineAwayStats),
     _extendedProbs: extProbs,
+    _torneoNuevo:   _torneoNuevoP,   // fix 3: descuento de EV por data del torneo anterior
     cuotasReales:   realOdds || undefined,
   };
 
