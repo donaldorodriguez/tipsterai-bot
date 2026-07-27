@@ -7688,7 +7688,7 @@ function superPickFamily(p) {
 // ExtraPicks +10%: segundo nivel — candidatos con EV ≥10% y cuota REAL que no
 // entraron al SuperPick. Más laxo en prob (55 vs 60), sin diversidad ni espaciado
 // (son oportunidades extra, no el pick curado del día). excludeKeys = SuperPicks.
-const EXTRAPICK_MIN_EV   = 10;
+const EXTRAPICK_MIN_EV   = 8;   // bajado de 10→8 (26-jul): cierra el hueco prob 55-60 con EV 8-10
 const EXTRAPICK_MIN_PROB = 55;
 const EXTRAPICK_MAX      = 8;   // tope de volumen
 function rankExtraPicks(candidates, fechaBy, now, excludeKeys) {
@@ -7697,7 +7697,7 @@ function rankExtraPicks(candidates, fechaBy, now, excludeKeys) {
     if (!fecha) return false;
     if ((new Date(fecha) - now) / 60000 < SUPERPICK_MIN_KICKOFF_MIN) return false;
     if (c.odds == null || c.odds < PUBLISH_MIN_ODDS || c._syntheticOdds) return false; // solo cuota real
-    if (!(c.ev >= EXTRAPICK_MIN_EV)) return false;                    // el corte +10%
+    if (!(c.ev >= EXTRAPICK_MIN_EV)) return false;                    // el corte de EV del EP (8%)
     const maxEV = c.esCombinada ? SUPERPICK_MAX_EV_COMBO : SUPERPICK_MAX_EV;
     if (c.ev > maxEV) return false;                                   // mismo techo anti-error de modelo
     if (!(c.prob >= EXTRAPICK_MIN_PROB)) return false;
@@ -7705,6 +7705,31 @@ function rankExtraPicks(candidates, fechaBy, now, excludeKeys) {
     if (excludeKeys.has(`${c.fixtureId}|${c.marketLabel}`)) return false; // no repetir SuperPicks
     return true;
   }).sort((a, b) => (b.ev - a.ev) || ((b.prob || 0) - (a.prob || 0)));
+}
+
+// ── Picks de Valor: TERCER nivel ────────────────────────────────────────────
+// Favoritos SÓLIDOS (prob alta) con valor modesto que caían entre SP y EP: EV 5-8%
+// (por debajo del piso de 8% de ambos). Respeta el piso de cuota 1.65 (tu regla de "no
+// cuota irrisoria"). OJO: con cuota≥1.65 un favorito de prob 65% ya da EV~7.3%, así que
+// prob≥65 saldría casi vacío → piso de prob 63. Se recalcula en cada refresh (sin
+// estabilidad, como los extras). Solo singles (no combinadas). Rankea por PROB (los más
+// seguros primero), no por EV.
+const PICKVALOR_MIN_PROB = 63;
+const PICKVALOR_MIN_EV   = 5;
+const PICKVALOR_MAX_EV   = 8;   // tope exclusivo = piso de SP/EP
+const PICKVALOR_MAX      = 5;
+function rankPickValor(candidates, fechaBy, now, excludeKeys) {
+  return candidates.filter(c => {
+    const fecha = fechaBy.get(c.fixtureId);
+    if (!fecha) return false;
+    if ((new Date(fecha) - now) / 60000 < SUPERPICK_MIN_KICKOFF_MIN) return false;
+    if (c.odds == null || c.odds < PUBLISH_MIN_ODDS || c._syntheticOdds) return false; // solo cuota real ≥1.65
+    if (c.esCombinada) return false;                                  // solo singles (favoritos)
+    if (!(c.ev >= PICKVALOR_MIN_EV && c.ev < PICKVALOR_MAX_EV)) return false; // EV en [5, 8)
+    if (!(c.prob >= PICKVALOR_MIN_PROB)) return false;                // favorito sólido
+    if (excludeKeys.has(`${c.fixtureId}|${c.marketLabel}`)) return false;    // no repetir SP/EP
+    return true;
+  }).sort((a, b) => (b.prob - a.prob) || (b.ev - a.ev));   // los más seguros primero
 }
 
 function buildSuperPickPlan(ranked, fechaBy, kept = [], maxPicks = SUPERPICK_MAX_PICKS) {
@@ -7898,16 +7923,38 @@ async function generateSuperPickPlan(force = false) {
         extras.forEach((p, i) => { p.ordinal = i + 1; });
       }
     } catch (e) { console.error('extraPicks:', e.message); }
+    // ── Picks de Valor: tercer nivel (favoritos sólidos, EV 5-8%; sin repetir SP ni EP) ──
+    let valor = [];
+    try {
+      if (g.status === 'ok' && g.candidates.length) {
+        const fechaByV = new Map(g.enriched.map(e => [e.fixtureId, e.fechaPartido]));
+        const usadosKey = new Set([...entries, ...extras].map(p => `${p.fixtureId}|${p.seleccion}`));
+        const usadosFix = new Set([...entries, ...extras].map(p => p.fixtureId));
+        const seenFixV = new Set();
+        valor = rankPickValor(g.candidates, fechaByV, now, usadosKey)
+          .filter(c => { if (usadosFix.has(c.fixtureId) || seenFixV.has(c.fixtureId)) return false; seenFixV.add(c.fixtureId); return true; }) // 1/partido, sin repetir SP/EP
+          .slice(0, PICKVALOR_MAX)
+          .map((c, i) => ({
+            ordinal: i + 1, fixtureId: c.fixtureId, liga: c.liga, pais: c.country || null, local: c.local, visitante: c.visitante,
+            kickoff: fechaByV.get(c.fixtureId), mercado: superPickMercado(c.market),
+            seleccion: c.marketLabel, esCombinada: false, legs: null,
+            cuota: c.odds, ev: c.ev, prob: c.prob, stake: c.stake, sbSignal: c.sbSignal ?? null,
+          }));
+        valor.sort((a, b) => new Date(a.kickoff) - new Date(b.kickoff));
+        valor.forEach((p, i) => { p.ordinal = i + 1; });
+      }
+    } catch (e) { console.error('pickValor:', e.message); }
     const fresh = loadSuperPicks();
     fresh[today] = {
       generadoAt: day?.generadoAt || now.toISOString(),
       refreshedAt: now.toISOString(),
       picks: entries,
       extras,
+      valor,
       ...(entries.length === 0 && { motivo: g.status === 'sin_partidos' ? 'sin_partidos_hoy' : 'sin_valor_validado' }),
     };
     persistSuperPicks(fresh);
-    console.log(`🎯 SuperPick plan ${today}: ${entries.length} pick(s) + ${extras.length} ExtraPick(s)` +
+    console.log(`🎯 SuperPick plan ${today}: ${entries.length} pick(s) + ${extras.length} ExtraPick(s) + ${valor.length} PickValor` +
       entries.map(p => `\n   #${p.ordinal} ${p.local} vs ${p.visitante} | ${p.seleccion} @ ${p.cuota} | EV ${p.ev}% | ${p.kickoff}${p.locked ? ' 🔒' : ''}`).join(''));
     // ── Notificación WhatsApp al admin: plan del día y picks NUEVOS ───────────
     // Solo avisa el primer plan del día y cuando ENTRA un pick nuevo. JAMÁS avisa
@@ -7932,7 +7979,10 @@ async function generateSuperPickPlan(force = false) {
         const extrasTxt = extras.length
           ? `\n\n➕ *ExtraPicks* (${extras.length}):\n\n${extras.map(linea).join('\n\n')}`
           : '';
-        msg = `${resumenAyerTexto()}🎯 *SuperPicks del día* (${entries.length}):\n\n${entries.map(linea).join('\n\n')}${extrasTxt}`;
+        const valorTxt = valor.length
+          ? `\n\n🛡️ *Picks de Valor* (${valor.length}) — favoritos sólidos:\n\n${valor.map(linea).join('\n\n')}`
+          : '';
+        msg = `${resumenAyerTexto()}🎯 *SuperPicks del día* (${entries.length}):\n\n${entries.map(linea).join('\n\n')}${extrasTxt}${valorTxt}`;
       } else {
         // Refresh intradía: avisa ENTRADAS y SALIDAS (y, si no hubo ninguna, caída de valor).
         const parts = [];
@@ -12329,7 +12379,8 @@ app.get('/api/superpick/plan', (req, res) => {
       generadoAt: day?.generadoAt || null,
       refreshedAt: day?.refreshedAt || null,
       picks: (day?.picks || []).map(conPais),
-      extras: (day?.extras || []).map(conPais),   // ExtraPicks +10% (segundo nivel)
+      extras: (day?.extras || []).map(conPais),   // ExtraPicks (segundo nivel)
+      valor: (day?.valor || []).map(conPais),     // Picks de Valor (tercer nivel)
     });
   } catch (e) {
     console.error('/api/superpick/plan:', e.message);
@@ -12418,6 +12469,7 @@ app.get('/api/brief', (req, res) => {
         motivo: dHoy?.motivo || null,
         superpicks: (dHoy?.picks || []).map(conPais),
         extras:     (dHoy?.extras || []).map(conPais),
+        valor:      (dHoy?.valor || []).map(conPais),
       },
       trackRecord: superPickTrackRecord(),
     });
