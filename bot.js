@@ -4206,8 +4206,8 @@ function buildPickCandidates(enrichedFixtures) {
       // menos picks pasen los filtros de SP/EP/PV. No re-entrena la prob (las standings
       // llegan después del modelo Poisson), pero castiga la confianza del edge estimado.
       if (f._torneoNuevo && ev > 0) {
-        ev = +(ev * 0.70).toFixed(2);
-        f._torneoNuevoAplicado = true;
+        ev = +(ev * 0.85).toFixed(2);   // suavizado 0.70→0.85 (27-jul): 0.70 ahogaba el volumen
+        f._torneoNuevoAplicado = true;  // en la semana en que casi todo arranca de torneo
       }
       if (ev < -5) continue;
 
