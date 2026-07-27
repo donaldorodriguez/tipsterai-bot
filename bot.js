@@ -7709,21 +7709,24 @@ function rankExtraPicks(candidates, fechaBy, now, excludeKeys) {
 
 // ── Picks de Valor: TERCER nivel ────────────────────────────────────────────
 // Favoritos SÓLIDOS (prob alta) con valor modesto que caían entre SP y EP: EV 5-8%
-// (por debajo del piso de 8% de ambos). Respeta el piso de cuota 1.65 (tu regla de "no
-// cuota irrisoria"). OJO: con cuota≥1.65 un favorito de prob 65% ya da EV~7.3%, así que
-// prob≥65 saldría casi vacío → piso de prob 63. Se recalcula en cada refresh (sin
-// estabilidad, como los extras). Solo singles (no combinadas). Rankea por PROB (los más
-// seguros primero), no por EV.
+// (por debajo del piso de 8% de ambos). Piso de cuota PROPIO 1.60 (< 1.65 general): estos
+// favoritos tienen cuota baja por naturaleza; con 1.60 el tier tiene volumen sin caer en
+// cuota irrisoria. Se recalcula en cada refresh (sin estabilidad, como los extras). Solo
+// singles (no combinadas). Rankea por PROB (los más seguros primero), no por EV.
 const PICKVALOR_MIN_PROB = 63;
 const PICKVALOR_MIN_EV   = 5;
-const PICKVALOR_MAX_EV   = 8;   // tope exclusivo = piso de SP/EP
+const PICKVALOR_MAX_EV   = 8;    // tope exclusivo = piso de SP/EP
+const PICKVALOR_MIN_ODDS = 1.60; // piso de cuota PROPIO del tier (< 1.65 general): los
+                                 // favoritos sólidos con valor modesto tienen cuota baja;
+                                 // bajarlo a 1.60 (pedido del usuario) le da volumen sin
+                                 // caer en cuota irrisoria.
 const PICKVALOR_MAX      = 5;
 function rankPickValor(candidates, fechaBy, now, excludeKeys) {
   return candidates.filter(c => {
     const fecha = fechaBy.get(c.fixtureId);
     if (!fecha) return false;
     if ((new Date(fecha) - now) / 60000 < SUPERPICK_MIN_KICKOFF_MIN) return false;
-    if (c.odds == null || c.odds < PUBLISH_MIN_ODDS || c._syntheticOdds) return false; // solo cuota real ≥1.65
+    if (c.odds == null || c.odds < PICKVALOR_MIN_ODDS || c._syntheticOdds) return false; // cuota real ≥1.60
     if (c.esCombinada) return false;                                  // solo singles (favoritos)
     if (!(c.ev >= PICKVALOR_MIN_EV && c.ev < PICKVALOR_MAX_EV)) return false; // EV en [5, 8)
     if (!(c.prob >= PICKVALOR_MIN_PROB)) return false;                // favorito sólido
