@@ -3684,9 +3684,10 @@ function marketFamily(key) {
   if (/^ah_home/.test(key))      return 'AH_HOME';
   if (/^ah_away/.test(key))      return 'AH_AWAY';
   if (/^ht_/.test(key))          return 'HT_OVER';
+  if (/^homeCorners|^awayCorners/.test(key)) return 'TEAM_CORNERS'; // córners de EQUIPO: bucket PROPIO
   if (/^cornersOver/.test(key))  return 'OVER_CORNERS';
   if (/^cornersUnder/.test(key)) return 'UNDER_CORNERS';
-  if (/Corners_/.test(key))      return 'OVER_CORNERS';   // team corners → misma familia
+  if (/Corners_/.test(key))      return 'TEAM_CORNERS';   // por si acaso: team corners → su bucket
   if (/^cardsOver/.test(key) || /CardsOver/.test(key)) return 'OVER_CARDS';
   if (/^cardsUnder/.test(key))   return 'UNDER_CARDS';
   return 'OTHER';
@@ -3945,6 +3946,19 @@ function buildPickCandidates(enrichedFixtures) {
       // torneo. Veto duro SOLO aquí: en ligas de clubes el mercado sigue activo
       // y lo vigila la autocalibración (auto-off con ROI < -15% en 20+ picks).
       if (_isIntlCards && ['cards', 'team_cards'].includes(m.cat)) continue;
+
+      // ── Córners de EQUIPO: gate por DATO REAL (fix diversidad, 27-jul) ────────
+      // Los córners de equipo (mercado TEAM_CORNERS, bucket propio) solo salen si el
+      // córner REAL del equipo supera holgadamente la línea (margen +1.5): un equipo
+      // cargado (Boca 6-7/p → over 4.5) surge, pero no se emiten a ciegas (el bucket
+      // tiene poca muestra para que el ancla los vigile). Sin dato real → no se emite.
+      if (m.cat === 'team_corners') {
+        const esLocalTC = /^homeCorners/.test(m.key);
+        const realCPG = esLocalTC ? f.statsLocal?.cornersxP : f.statsVisitante?.cornersxP;
+        const lineaTC = m.key === 'homeCorners_over45' ? 4.5
+                      : m.key === 'awayCorners_over25' ? 2.5 : 3.5;
+        if (!Number.isFinite(realCPG) || realCPG < lineaTC + 1.5) continue;
+      }
 
       // ── Inyectar prob real de tarjetas (antes del check de odds) ─────────────
       if (m._cardsBlock) {
@@ -7659,7 +7673,7 @@ const SUPERPICK_MERCADO_MAP = [
   [/^ah_home/, 'AH_HOME'], [/^ah_away/, 'AH_AWAY'],
   [/^ht_over/, 'HT_OVER'], [/^ht_under/, 'HT_UNDER'],
   [/^cleanSheet/, 'CLEAN_SHEET'], [/ToScore$/, 'TEAM_GOAL'],
-  [/cornersUnder/i, 'UNDER_CORNERS'], [/corner/i, 'OVER_CORNERS'],
+  [/homeCorners|awayCorners/i, 'TEAM_CORNERS'], [/cornersUnder/i, 'UNDER_CORNERS'], [/corner/i, 'OVER_CORNERS'],
   [/cardsUnder/i, 'UNDER_CARDS'], [/card/i, 'OVER_CARDS'],
   [/^combinada$/, 'COMBINADA'],
 ];
