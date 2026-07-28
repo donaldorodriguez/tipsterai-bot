@@ -534,7 +534,7 @@ function savePicksCache(cache) {
   catch (e) { console.error('savePicksCache error:', e.message); }
 }
 
-function getPicksCache(scope) {
+function getPicksCache(scope, maxAgeOverrideMs = null) {
   const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
   const cache = loadPicksCache();
   const entry = cache[`${today}_${scope}`];
@@ -543,7 +543,8 @@ function getPicksCache(scope) {
   const ageMs = Date.now() - new Date(entry.generadoAt).getTime();
   // Caché corto (45 min) si no hubo picks del motor — para reintentar cuando lleguen las cuotas
   // Caché normal (3 horas) si hubo picks reales del motor
-  const maxAge = entry.noPicksEngine ? 45 * 60 * 1000 : 3 * 60 * 60 * 1000;
+  // maxAgeOverrideMs: para scopes con su propia ventana de frescura (ej. partido específico)
+  const maxAge = maxAgeOverrideMs ?? (entry.noPicksEngine ? 45 * 60 * 1000 : 3 * 60 * 60 * 1000);
   if (ageMs > maxAge) return null;
   return entry;
 }
@@ -6076,7 +6077,7 @@ function validateStake(pick, probBlock) {
 async function applyStakeGate(picksText, enriched, matchesCtx, opts = {}) {
   try {
     const extracted = await extractPicksFromText(picksText, matchesCtx);
-    if (!extracted.length) return picksText;
+    if (!extracted.length) { opts.extractedPicks = []; return picksText; }
 
     let correctedText = picksText;
     let highStakeCount = 0;
@@ -6250,6 +6251,9 @@ No resumas, no añadas notas ni explicaciones. Si todos los picks son inválidos
       }
     );
 
+    // Reutilizable por recordPicks — evita re-extraer (2ª llamada Haiku) sobre el
+    // mismo texto ya extraído aquí. Solo los picks que sobrevivieron al gate.
+    opts.extractedPicks = extracted.filter(x => !invalid.includes(x));
     return correctedText;
   } catch (e) {
     console.error('applyStakeGate:', e.message);
@@ -6257,11 +6261,15 @@ No resumas, no añadas notas ni explicaciones. Si todos los picks son inválidos
   }
 }
 
-async function recordPicks(analysisText, matchesCtx) {
+// preExtracted: picks ya extraídos por applyStakeGate sobre el mismo análisis —
+// evita una 2ª llamada Haiku idéntica (extractPicksFromText) por cada respuesta
+// que emite picks. null/undefined = sin gate previo, extrae aquí (comportamiento
+// original).
+async function recordPicks(analysisText, matchesCtx, preExtracted = null) {
   if (!analysisText || !matchesCtx.length) return;
   if (analysisText.trimStart().startsWith('⛔')) return;
   try {
-    const extracted = await extractPicksFromText(analysisText, matchesCtx);
+    const extracted = preExtracted || await extractPicksFromText(analysisText, matchesCtx);
     if (!extracted.length) { console.log('📝 No se extrajeron picks estructurados'); return; }
 
     const today = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
@@ -7611,7 +7619,8 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   // Gate pre-publicación: valida y corrige stakes antes de enviar
   const matchesCtxForGate = enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga }));
-  picksText = await applyStakeGate(picksText, enriched, matchesCtxForGate);
+  const gateOpts = {};
+  picksText = await applyStakeGate(picksText, enriched, matchesCtxForGate, gateOpts);
 
   // Guardar en caché
   setPicksCache('all', picksText, enriched.map(f => f.fixtureId));
@@ -7620,7 +7629,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   } catch {
     await sendLong(chatId, `📅 PICKS DEL DÍA — ${today}\n\n${picksText.replace(/[*_`]/g, '')}`);
   }
-  recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
+  recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido })), gateOpts.extractedPicks).catch(e => console.error('recordPicks:', e.message));
 }
 
 // ─── SuperPick del día (producto WhatsApp — plan adaptativo al calendario) ────
@@ -8521,12 +8530,13 @@ async function handlePicksLiga(chatId, leagueName, forceRefresh = false) {
 
   // Gate pre-publicación: valida y corrige stakes antes de enviar
   const matchesCtxLigaGate = enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga }));
-  picksText = await applyStakeGate(picksText, enriched, matchesCtxLigaGate);
+  const gateOptsLiga = {};
+  picksText = await applyStakeGate(picksText, enriched, matchesCtxLigaGate, gateOptsLiga);
 
   // Guardar en caché
   setPicksCache(cacheScope, picksText, enriched.map(f => f.fixtureId));
   await sendLong(chatId, `📅 *${displayName} — ${today}*\n\n${picksText}`, { parse_mode: 'Markdown' });
-  recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido }))).catch(e => console.error('recordPicks:', e.message));
+  recordPicks(picksText, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga, fechaPartido: f.fechaPartido })), gateOptsLiga.extractedPicks).catch(e => console.error('recordPicks:', e.message));
 }
 
 async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverride = null) {
@@ -8554,6 +8564,22 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const homeTeam = nextRaw.teams.home.name;
   const awayTeam = nextRaw.teams.away.name;
   const isLive   = ['1H','HT','2H','ET','P'].includes(nextRaw.fixture?.status?.short);
+
+  // ── Caché corto por partido (solo PRE-partido — en vivo cambia demasiado
+  // rápido para cachear, un gol invalida el análisis) — evita repetir toda la
+  // cadena de datos + Sonnet si preguntan por el mismo partido en pocos minutos.
+  const PARTIDO_CACHE_MS = 18 * 60 * 1000; // ~15-20 min
+  if (!isLive) {
+    const cachedPartido = getPicksCache(`partido_${nextRaw.fixture.id}`, PARTIDO_CACHE_MS);
+    if (cachedPartido) {
+      console.log(`📦 Cache hit — análisis de ${homeTeam} vs ${awayTeam} (fixture ${nextRaw.fixture.id})`);
+      try {
+        return await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${cachedPartido.picksText}`, { parse_mode: 'Markdown' });
+      } catch {
+        return await sendLong(chatId, `🎯 ${homeTeam} vs ${awayTeam}\n\n${cachedPartido.picksText.replace(/[*_`]/g, '')}`);
+      }
+    }
+  }
 
   await bot.sendMessage(
     chatId,
@@ -9001,11 +9027,12 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   // "DNB / AH -0.5", locks 0.5) — mismo sanitizador que las rutas en vivo.
   analysis = sanitizeLivePicks(analysis);
   // Gate duro pre-publicación: valida stakes y elimina picks con cuota < 1.65
+  const gateOptsPartido = { maxPicks: 3 };
   analysis = await applyStakeGate(analysis, [fixtureForEngine], [{
     fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam,
     liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date,
     ...(isLive && { marcadorVivo: { home: liveHomeGoals, away: liveAwayGoals } }),
-  }], { maxPicks: 3 });
+  }], gateOptsPartido);
 
   // ── Props/tendencias GARANTIZADOS por código ─────────────────────────────────
   // El LLM omitía la sección aun con los datos en el JSON (visto 9-jul: los logs
@@ -9024,12 +9051,14 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     console.log(`📈 Tendencias añadidas por código: ${analysisData.tendenciasEquipo.length}`);
   }
 
+  setPicksCache(`partido_${nextRaw.fixture.id}`, analysis, [nextRaw.fixture.id]);
+
   try {
     await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
   } catch {
     await sendLong(chatId, `🎯 ${homeTeam} vs ${awayTeam}\n\n${analysis.replace(/[*_`]/g, '')}`);
   }
-  recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]).catch(e => console.error('recordPicks:', e.message));
+  recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }], gateOptsPartido.extractedPicks).catch(e => console.error('recordPicks:', e.message));
 }
 
 async function handleVivo(chatId, leagueId = null, leagueName = null) {
@@ -11091,16 +11120,17 @@ async function handleImage(msg) {
     // Gates pre-publicación (antes el flujo de imagen enviaba el texto crudo:
     // así salió una combinada con stake 5 y cuotas bajo el piso).
     analysis = sanitizeLivePicks(analysis); // mismo gate anti-lock que las otras rutas en vivo
+    const gateOptsImg = {};
     analysis = await applyStakeGate(analysis, [], [{
       fixtureId: liveFixtureId, local: matchData.home_team, visitante: matchData.away_team,
       liga: 'En vivo (imagen)', fechaPartido: new Date().toISOString(),
       ...(matchData.score_home != null && matchData.score_away != null &&
         { marcadorVivo: { home: +matchData.score_home, away: +matchData.score_away } }),
-    }]);
+    }], gateOptsImg);
     await sendLong(chatId, analysis, { parse_mode: 'Markdown' });
     _imageAnalysisRecent.set(dedupKey, { ts: Date.now(), texto: analysis });
     if (_imageAnalysisRecent.size > 200) _imageAnalysisRecent.clear(); // límite de memoria
-    recordPicks(analysis, [{ fixtureId: liveFixtureId, local: matchData.home_team, visitante: matchData.away_team, liga: 'En vivo (imagen)', fechaPartido: new Date().toISOString() }]).catch(e => console.error('recordPicks:', e.message));
+    recordPicks(analysis, [{ fixtureId: liveFixtureId, local: matchData.home_team, visitante: matchData.away_team, liga: 'En vivo (imagen)', fechaPartido: new Date().toISOString() }], gateOptsImg.extractedPicks).catch(e => console.error('recordPicks:', e.message));
 
   } catch (err) {
     console.error('handleImage error:', err.message);
