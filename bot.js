@@ -6906,11 +6906,14 @@ async function gatherDailyCandidates(progress = async () => {}) {
   const today = todayDate();
   await progress('🔍 Consultando nuestra base de datos estadística...');
   const allFixtures = await getFixturesByDate(today);
-  // Para picks del día: solo partidos NO iniciados (status NS) y no en ligas excluidas
-  const STARTED_STATUSES = new Set(['1H','HT','2H','ET','P','BT','LIVE','INT']);
+  // Para picks del día: solo partidos NO iniciados y JUGABLES. Excluye los ya
+  // empezados/terminados Y los aplazados/cancelados/suspendidos/abandonados
+  // (antes un aplazado 'PST' pasaba el filtro y salía como pick — caso Unión Magdalena).
+  const SKIP_STATUSES = new Set(['1H','HT','2H','ET','P','BT','LIVE','INT','FT','AET','PEN',
+                                 'PST','CANC','SUSP','ABD','AWD','WO','TBD']);
   const fixtures = allFixtures.filter(f =>
     !PICKS_EXCLUDE_LEAGUES.has(f.leagueId) &&
-    !STARTED_STATUSES.has(f.status)
+    !SKIP_STATUSES.has(f.status)
   );
 
   if (fixtures.length === 0) {
