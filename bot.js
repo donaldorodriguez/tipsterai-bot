@@ -4381,7 +4381,9 @@ function buildPickCandidates(enrichedFixtures) {
           // singles), así que una pata sin edge (Under goles) inflaría el EV.
           // Anclamos al ROI compuesto de ambos mercados: (1+roiA)(1+roiB)−1.
           // Solo encoge; exime patas de mercado apagado (rehabilitadas por liga).
-          let comboEV = best.comboEV;
+          let comboEV = +best.comboEV.toFixed(2); // redondeo incondicional — antes solo se
+          // redondeaba dentro del bloque del ancla; sin calibración quedaba un float crudo
+          // (ej. "18.543329333333357%") visible hasta en el plan publicado.
           const cB = calib[marketFamily(base.market)];
           const cP = calib[marketFamily(best.p.market)];
           if (cB && cP && !cB.disabled && !cP.disabled &&
