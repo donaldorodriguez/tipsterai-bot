@@ -4457,7 +4457,10 @@ function buildPickCandidates(enrichedFixtures) {
               cB.roi != null && cP.roi != null && cB.n >= CALIB_MIN_N && cP.n >= CALIB_MIN_N) {
             const roiComp = ((1 + cB.roi / 100) * (1 + cP.roi / 100) - 1) * 100;
             const w = Math.min(0.6, Math.min(cB.n, cP.n) / 60);
-            comboEV = Math.min(best.comboEV, +(best.comboEV * (1 - w) + roiComp * w).toFixed(2));
+            // OJO: comparar contra el YA redondeado y redondear el resultado — usar
+            // best.comboEV crudo dentro del min devolvía el float sin redondear cuando
+            // el ancla no reducía (ej. "15.076667794049303%" publicado el 29-jul).
+            comboEV = +Math.min(comboEV, +(best.comboEV * (1 - w) + roiComp * w).toFixed(2)).toFixed(2);
             if (comboEV < best.comboEV - 0.5) console.log(`⚓ Combo anclado ${f.local} vs ${f.visitante}: ${best.comboEV.toFixed(1)}%→${comboEV.toFixed(1)}% (ROI patas ${cB.roi}%/${cP.roi}%)`);
           }
           if (comboEV >= 3) {
