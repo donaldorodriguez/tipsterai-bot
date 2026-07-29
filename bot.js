@@ -93,6 +93,12 @@ const HL_STATUS = {
 
 const LIVE_DESCS     = new Set(['First half', 'Half time', 'Second half', 'Extra time', 'Penalties', 'Break time']);
 const FINISHED_DESCS = new Set(['Finished', 'Finished (AET)', 'Finished (PEN)']);
+// La lista exacta NO cubre todas las variantes que devuelve Highlightly: se vio en
+// producción "Finished after extra time" (~12% de los partidos terminados), que caía
+// como "aún no terminado" → el pick JAMÁS se liquidaba y quedaba en '?' para siempre
+// (y a los 3 días el evaluador ya no lo reintenta). Cualquier descripción que empiece
+// por "Finished" es final — este predicado las cubre todas, presentes y futuras.
+const esFinalizadoDesc = (desc) => /^finished/i.test(String(desc || '').trim());
 
 function parseHLScore(scoreStr) {
   if (!scoreStr) return { home: null, away: null };
@@ -100,9 +106,60 @@ function parseHLScore(scoreStr) {
   return { home: parseInt(parts[0]) || 0, away: parseInt(parts[1]) || 0 };
 }
 
+// Marcador REGLAMENTARIO (90' + descuento) reconstruido desde los eventos.
+// Los picks se liquidan a los 90 minutos: lo que pasa en la prórroga NO cuenta
+// (regla del usuario, igual que las casas). Highlightly NO expone el marcador al
+// 90' en partidos con prórroga — solo `score.current`, que YA incluye el alargue
+// (caso real Drita 2-1 Floriana AET: al 90' iba 1-1, el 3er gol fue al 91').
+// Formato de minuto de HL: "88", "90+3" (descuento → SÍ cuenta), "91"/"109"/"120+1"
+// (prórroga → NO cuenta). Un "Own Goal" viene acreditado al equipo que se beneficia.
+// AUTOVALIDACIÓN: se reconstruye también el marcador FINAL con todos los eventos; si
+// no coincide con score.current, el parseo no es confiable para este partido y se
+// devuelve null (mejor no liquidar que liquidar mal).
+function score90FromEvents(m, finalScore) {
+  const events = Array.isArray(m?.events) ? m.events : null;
+  if (!events || !events.length) return null;
+  const homeName = m?.homeTeam?.name, awayName = m?.awayTeam?.name;
+  const homeId   = m?.homeTeam?.id,   awayId   = m?.awayTeam?.id;
+  if (!homeName && homeId == null) return null;
+
+  const esGol = (e) => /^(goal|own goal|penalty)$/i.test(String(e?.type || '').trim());
+  // "90+3" → 90 (descuento del tiempo reglamentario) | "91" → 91 (prórroga)
+  const minutoBase = (t) => {
+    const s = String(t ?? '').trim();
+    if (!s) return null;
+    const base = parseInt(s.split('+')[0], 10);
+    return Number.isFinite(base) ? base : null;
+  };
+  const esLocal = (e) => {
+    const tid = e?.team?.id, tn = e?.team?.name;
+    if (tid != null && homeId != null) return tid === homeId;
+    return String(tn || '') === String(homeName || '');
+  };
+
+  let h90 = 0, a90 = 0, hAll = 0, aAll = 0, incompleto = false;
+  for (const e of events) {
+    if (!esGol(e)) continue;
+    const min = minutoBase(e.time);
+    if (min == null) { incompleto = true; continue; }
+    const local = esLocal(e);
+    if (local) hAll++; else aAll++;
+    if (min <= 90) { if (local) h90++; else a90++; }
+  }
+  if (incompleto) return null;
+  // El feed debe reproducir el marcador final exacto — si no, no confiamos en él.
+  if (finalScore == null || hAll !== finalScore.home || aAll !== finalScore.away) return null;
+  return { home: h90, away: a90 };
+}
+
 // Convert Highlightly match → API-Football-compatible shape
 function hlToApif(m) {
   const score = parseHLScore(m.state?.score?.current);
+  // Partido con prórroga: score.current YA incluye el alargue. Los picks se liquidan
+  // al 90' → se reconstruye el marcador reglamentario desde los eventos (null si el
+  // feed no es confiable, y entonces evaluatePendingPicks NO liquida el partido).
+  const conProrroga = (m.state?.clock ?? 0) > 90 || /extra time|aet|penal/i.test(String(m.state?.description || ''));
+  const ft = conProrroga ? score90FromEvents(m, score) : { home: score.home, away: score.away };
   return {
     fixture: {
       id: m.id,
@@ -117,7 +174,10 @@ function hlToApif(m) {
       away: { id: m.awayTeam.id, name: m.awayTeam.name },
     },
     goals: { home: score.home, away: score.away },
-    score: { halftime: { home: null, away: null } },
+    // fulltime = marcador al 90' (lo que liquidan las casas). evaluatePickResult ya lo
+    // prefiere sobre `goals`. _sinMarcador90: prórroga sin eventos confiables.
+    score: { halftime: { home: null, away: null }, ...(ft ? { fulltime: ft } : {}) },
+    ...(conProrroga && !ft && { _sinMarcador90: true }),
   };
 }
 
@@ -745,7 +805,7 @@ async function fetchLiveRaw() {
   // terminado. Si el estado no trae minuto, se estima por el reloj.
   const allToday = await hlTodayPromise;
   const raw = allToday.filter(m => {
-    if (FINISHED_DESCS.has(m.state?.description)) return false;
+    if (esFinalizadoDesc(m.state?.description)) return false;
     const start = m.date ? new Date(m.date).getTime() : 0;
     const mins = (Date.now() - start) / 60000;
     return mins >= 1 && mins <= 150;
@@ -1365,7 +1425,7 @@ async function getTeamPlayingPriority(teamId) {
       const fixtures = await fetchFixturesByDate(ds).catch(() => dateCache.get(ds) || []);
       const cf = (fixtures || []).find(m =>
         (m.homeTeam?.id === teamId || m.awayTeam?.id === teamId) &&
-        !FINISHED_DESCS.has(m.state?.description));
+        !esFinalizadoDesc(m.state?.description));
       if (cf) {
         const liga = cf.league?.name ? ` · ${cf.league.name}` : '';
         // "hoy"/"en N días" según la fecha del KICKOFF en hora Colombia — el día
@@ -1471,7 +1531,7 @@ async function findNextFixtureByDate(teamId, daysAhead = 14, teamName = null) {
       const fixtures = await fetchFixturesByDate(ds).catch(() => []);
       const propios = fixtures.filter(m =>
         (m.homeTeam?.id === teamId || m.awayTeam?.id === teamId) &&
-        !FINISHED_DESCS.has(m.state?.description)
+        !esFinalizadoDesc(m.state?.description)
       );
       if (propios.length) {
         // El caché por fecha guarda ESTADOS VIEJOS: un partido cacheado a las
@@ -1545,13 +1605,13 @@ async function getTeamLastFixtures(teamId, last = 15, venue = null) {
   if (venue !== 'away') {
     try {
       const { data } = await API.get('/matches', { params: { homeTeamId: teamId, limit: 50 } });
-      (data.data || []).filter(m => FINISHED_DESCS.has(m.state?.description)).forEach(m => matches.push(m));
+      (data.data || []).filter(m => esFinalizadoDesc(m.state?.description)).forEach(m => matches.push(m));
     } catch {}
   }
   if (venue !== 'home') {
     try {
       const { data } = await API.get('/matches', { params: { awayTeamId: teamId, limit: 50 } });
-      (data.data || []).filter(m => FINISHED_DESCS.has(m.state?.description)).forEach(m => matches.push(m));
+      (data.data || []).filter(m => esFinalizadoDesc(m.state?.description)).forEach(m => matches.push(m));
     } catch {}
   }
   const seen = new Set();
@@ -1685,7 +1745,7 @@ async function getH2H(id1, id2) {
   const { data } = await API.get('/head-2-head', { params: { teamIdOne: id1, teamIdTwo: id2, limit: 10 } });
   const matches = Array.isArray(data) ? data : (data.data || []);
   return matches
-    .filter(m => FINISHED_DESCS.has(m.state?.description))
+    .filter(m => esFinalizadoDesc(m.state?.description))
     .map(m => {
       const scoreStr = m.state?.score?.current ?? m.state?.score?.fulltime ?? null;
       const score = parseHLScore(scoreStr);
@@ -6644,11 +6704,19 @@ async function evaluatePendingPicks() {
       const esApifId = String(fid).length < 9;
       if (!esApifId) {
         const m = await fetchMatchById(fid);
-        if (m && FINISHED_DESCS.has(m.state?.description)) {
+        if (m && esFinalizadoDesc(m.state?.description)) {
           const f = hlToApif(m);
+          // Prórroga sin marcador de 90' confiable: NO liquidar (los picks se
+          // liquidan al 90' — liquidar con el marcador del alargue sería un error).
+          if (f._sinMarcador90) {
+            console.log(`⚠️ Fixture ${fid} con prórroga sin marcador 90' confiable — no se liquida`);
+            return;
+          }
           const stats = await getFixtureStatistics(fid).catch(() => null);
           fixtureMap[fid] = { fixture: f, stats };
-          console.log(`✅ Fixture ${fid} terminado: ${f.goals?.home}-${f.goals?.away}`);
+          const ft = f.score?.fulltime;
+          console.log(`✅ Fixture ${fid} terminado: ${f.goals?.home}-${f.goals?.away}` +
+            (ft && (ft.home !== f.goals?.home || ft.away !== f.goals?.away) ? ` (90': ${ft.home}-${ft.away} — se liquida con este)` : ''));
         } else if (m) {
           console.log(`⏳ Fixture ${fid} aún no terminado: state="${m.state?.description}"`);
         }
@@ -11572,7 +11640,7 @@ bot.onText(/\/debugevaluar/, async (msg) => {
         const info = m
           ? `state="${m.state?.description}" | score="${m.state?.score?.current}" | ${m.homeTeam?.name} vs ${m.awayTeam?.name}`
           : `respuesta vacía`;
-        const esTerminado = m && FINISHED_DESCS.has(m.state?.description);
+        const esTerminado = m && esFinalizadoDesc(m.state?.description);
         await bot.sendMessage(chatId, `${esTerminado ? '✅' : '⏳'} Fixture ${fid}:\n${info}`);
       } catch (e) {
         await bot.sendMessage(chatId, `❌ Fixture ${fid}: ${e.message}`);
