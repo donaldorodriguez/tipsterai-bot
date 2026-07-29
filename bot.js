@@ -4346,7 +4346,14 @@ function buildPickCandidates(enrichedFixtures) {
         ? +Math.round((o + ODDS_DISPLAY_BUFFER) * 20) / 20
         : impliedFair; // cuota justa implícita — el LLM la muestra como "est. ~X.XX"
       if (hasRealOdds && oddsDisplayed != null && oddsDisplayed > 2.65) continue; // Cuota máxima real
-      if (stake < 5) continue;            // Stake mínimo publicable: 5/10
+      // Stake mínimo publicable: 6/10. ANTES era 5 y creaba una ZONA MUERTA: el motor
+      // producía candidatos con stake 5 que applyStakeGate SIEMPRE eliminaba después
+      // (su regla es "stake ≤ 5 no se publica") → selectDiversePicks gastaba sus 3
+      // cupos en picks condenados y el canal salía con análisis pero CERO picks
+      // ("⛔ Sin picks de valor", caso real 29-jul con Bragantino/Cienciano, que en
+      // el mismo momento SÍ eran ExtraPicks de EV +16%/+21%). Alineando el piso del
+      // motor con el del gate, esos cupos van a candidatos que sí pueden publicarse.
+      if (stake < 6) continue;
 
       const _cand = {
         fixtureId:    f.fixtureId,
