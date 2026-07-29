@@ -7971,14 +7971,16 @@ async function generateSuperPickPlan(force = false) {
   const now = new Date();
   const day = loadSuperPicks()[today];
   if (day && !force) {
-    const hasRefreshable = (day.picks || []).some(p => !p.locked && new Date(p.kickoff) > now);
     const ageMin = (now - new Date(day.refreshedAt || day.generadoAt)) / 60000;
-    // Un plan CON picks pero ninguno re-optimizable (todos bloqueados/jugados) no se
-    // toca. Pero un plan VACÍO (0 picks, día sin valor a las 6am) SÍ debe seguir
-    // buscando cada REFRESH_MIN — las cuotas maduran y aparecen picks más tarde;
-    // antes se quedaba pegado en vacío todo el día.
-    const hayPicks = (day.picks || []).length > 0;
-    if ((hayPicks && !hasRefreshable) || ageMin < SUPERPICK_REFRESH_MIN) return day;
+    // Único freno: la edad del plan (cada SUPERPICK_REFRESH_MIN). Antes también se
+    // cortaba cuando ningún SuperPick era re-optimizable (todos jugados/bloqueados),
+    // pero esa pasada NO solo re-optimiza SuperPicks: también recalcula ExtraPicks y
+    // Picks de Valor. Con los SuperPicks del día ya jugados al mediodía, el plan
+    // quedaba CONGELADO el resto de la jornada y los partidos de la noche (Argentina,
+    // Copa Colombia…) nunca se evaluaban (caso real 29-jul: plan sin refrescar de
+    // 12:08 a 17:07). Los picks ya servidos siguen protegidos por el freeze/lock más
+    // abajo, así que refrescar no los altera. Coste: ~3-4 gathers extra al día.
+    if (ageMin < SUPERPICK_REFRESH_MIN) return day;
   }
   _superPickGenerating = true;
   try {
