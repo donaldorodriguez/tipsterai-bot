@@ -4573,6 +4573,7 @@ function selectGoalMarket(homeTeam, awayTeam, homeGoals, awayGoals, pGoal, elaps
   const attackingTeam = homeDominates ? homeTeam : awayDominates ? awayTeam : null;
 
   let market, impliedOdds, tipo;
+  let lockSinValor = false;   // mercado sin cuota real que lo respalde (Over 0.5 genérico)
 
   if (period === '1T' && elapsed <= 40) {
     // Primera mitad con tiempo suficiente
@@ -4599,10 +4600,18 @@ function selectGoalMarket(homeTeam, awayTeam, homeGoals, awayGoals, pGoal, elaps
   } else if (period === 'HT') {
     // Medio tiempo — pick para el 2do tiempo
     if (total === 0) {
-      market = attackingTeam
-        ? `${attackingTeam} marca en el 2do tiempo`
-        : `Gol en el 2do tiempo (Over 0.5 2T)`;
-      tipo = 'gol_2T';
+      // Sin equipo dominante el único mercado sería "Over 0.5 2T": LOCK sin valor
+      // real (las casas lo pagan ~1.20-1.40 o ni lo ofrecen, nunca la cuota que
+      // estima el modelo). Se marca para descartar la alerta — queja repetida del
+      // usuario. Con equipo dominante SÍ hay mercado real ("X marca en el 2T").
+      if (attackingTeam) {
+        market = `${attackingTeam} marca en el 2do tiempo`;
+        tipo   = 'gol_equipo_2T';
+      } else {
+        market = `Gol en el 2do tiempo (Over 0.5 2T)`;
+        tipo   = 'gol_2T';
+        lockSinValor = true;
+      }
     } else if (Math.abs(diff) >= 1) {
       const trailing = diff > 0 ? awayTeam : homeTeam;
       market = `${trailing} marca en el 2do tiempo`;
@@ -4616,10 +4625,16 @@ function selectGoalMarket(homeTeam, awayTeam, homeGoals, awayGoals, pGoal, elaps
   } else {
     // 2do tiempo en curso
     if (total === 0 && elapsed >= 60) {
-      market = attackingTeam
-        ? `${attackingTeam} marca antes del final`
-        : `Al menos 1 gol antes del 90' (Over 0.5)`;
-      tipo = 'gol_urgente';
+      // Mismo caso que el 2T: sin equipo dominante queda un "Over 0.5" genérico
+      // sobre lo que resta — lock sin cuota real que lo respalde.
+      if (attackingTeam) {
+        market = `${attackingTeam} marca antes del final`;
+        tipo   = 'gol_urgente';
+      } else {
+        market = `Al menos 1 gol antes del 90' (Over 0.5)`;
+        tipo   = 'gol_urgente';
+        lockSinValor = true;
+      }
     } else if (Math.abs(diff) === 1 && elapsed >= 55) {
       const trailing = diff > 0 ? awayTeam : homeTeam;
       market = `${trailing} empata — presión alta`;
@@ -4634,7 +4649,7 @@ function selectGoalMarket(homeTeam, awayTeam, homeGoals, awayGoals, pGoal, elaps
     impliedOdds = +(1 / pGoal).toFixed(2);
   }
 
-  return { market, impliedOdds, overLine, tipo };
+  return { market, impliedOdds, overLine, tipo, lockSinValor };
 }
 
 /**
@@ -4745,11 +4760,16 @@ function calcGoalAlert(fixture, liveStats, homeTeamStats, awayTeamStats, opts = 
   // mucho tiempo por delante), la cuota no paga — sin valor apostable.
   if (impliedOdds <= 1.50) return reject('cuota_baja', { pGoal: +(pGoal * 100).toFixed(0), cuota: impliedOdds, minuto: elapsed });
 
-  const { market, impliedOdds: mktOdds, overLine, tipo } = selectGoalMarket(
+  const { market, impliedOdds: mktOdds, overLine, tipo, lockSinValor } = selectGoalMarket(
     fixture.homeTeam, fixture.awayTeam,
     homeGoals, awayGoals, pGoal, elapsed, period,
     shotsOnH, shotsOnA
   );
+
+  // El mercado resultante es un "Over 0.5" genérico (0-0 sin equipo dominante):
+  // las casas lo pagan ~1.20-1.40 o ni lo ofrecen — la cuota que estima el modelo
+  // (1/pGoal) es fantasma. No es un pick vendible: se descarta la alerta.
+  if (lockSinValor) return reject('lock_over05_sin_cuota_real', { market, cuotaEstimada: mktOdds, minuto: elapsed });
 
   const oddsBonus  = (mktOdds >= 1.50 && mktOdds <= 2.50) ? 15 : (mktOdds > 2.50 ? 5 : -10);
   const alertScore = Math.min(pGoal * 70 + (remaining / 45) * 15 + oddsBonus, 100);
@@ -7648,7 +7668,9 @@ const SUPERPICK_SERVE_MIN        = 30;   // para SERVIRSE a un lead: kickoff ≥
 const SUPERPICK_SPACING_MIN      = 0;    // sin espaciado entre kickoffs (pedido del usuario:
                                          // ver TODOS los SP del día sin importar la hora; el
                                          // servicio 1:1 igual sirve "el siguiente por kickoff")
-const SUPERPICK_MAX_PICKS        = 5;
+const SUPERPICK_MAX_PICKS        = 99;   // SIN tope de cupos (pedido del usuario 29-jul: "si
+                                         // salen 10 salen 10"). La calidad la imponen los filtros
+                                         // (EV≥8, prob≥60, cuota real), no un cupo arbitrario.
 const SUPERPICK_BUILD_FROM_HOUR  = 6;    // hora Col desde la que se construye el plan
 const SUPERPICK_REFRESH_MIN      = 90;   // re-optimización de picks no bloqueados
 const SUPERPICK_MIN_EV           = 8;    // piso de EV para ENTRAR como SuperPick — no headline picks
@@ -7720,13 +7742,14 @@ function rankSuperPickCandidates(candidates, enriched, now = new Date()) {
     .sort((a, b) => (b.ev - a.ev) || ((b.stake || 0) - (a.stake || 0)));
 }
 
-// Selección con espaciado: mejor EV primero, respetando ≥2h entre kickoffs y
-// sin repetir fixture (incluye los picks ya bloqueados que se conservan).
-const SUPERPICK_MAX_COMBOS     = 2;   // tope de combinadas por plan — balance, no todo combos.
-const SUPERPICK_MAX_PER_FAMILY = 2;   // tope por familia GRUESA de mercado (diversidad): sin
-                                      // esto el ranking por EV llenaba el plan de puro
-                                      // DNB/Doble Op (los de mayor ROI) y desaparecían
-                                      // goles/BTTS. DNB y DC son la MISMA familia "resultado".
+// Selección: mejor EV primero, sin espaciado ni cupos, sin repetir fixture
+// (incluye los picks ya bloqueados que se conservan).
+const SUPERPICK_MAX_COMBOS     = 99;  // sin tope de combinadas (29-jul)
+const SUPERPICK_MAX_PER_FAMILY = 99;  // sin tope por familia (29-jul). El tope de 2 existía SOLO
+                                      // porque con 5 cupos el ranking por EV los llenaba de puro
+                                      // DNB/Doble Op y desaparecían goles/BTTS; sin cupo total
+                                      // esa razón desaparece — ahora entran TODOS los que pasan
+                                      // los filtros de calidad, de cualquier familia.
 
 // Familia gruesa para el tope de diversidad. Se apoya en el texto de la selección
 // (presente tanto en candidatos [marketLabel] como en picks guardados [seleccion]).
@@ -7747,7 +7770,7 @@ function superPickFamily(p) {
 // (son oportunidades extra, no el pick curado del día). excludeKeys = SuperPicks.
 const EXTRAPICK_MIN_EV   = 8;   // bajado de 10→8 (26-jul): cierra el hueco prob 55-60 con EV 8-10
 const EXTRAPICK_MIN_PROB = 55;
-const EXTRAPICK_MAX      = 8;   // tope de volumen
+const EXTRAPICK_MAX      = 99;  // sin tope de volumen (29-jul) — mandan los filtros de calidad
 function rankExtraPicks(candidates, fechaBy, now, excludeKeys) {
   return candidates.filter(c => {
     const fecha = fechaBy.get(c.fixtureId);
@@ -7777,7 +7800,7 @@ const PICKVALOR_MIN_ODDS = 1.60; // piso de cuota PROPIO del tier (< 1.65 genera
                                  // favoritos sólidos con valor modesto tienen cuota baja;
                                  // bajarlo a 1.60 (pedido del usuario) le da volumen sin
                                  // caer en cuota irrisoria.
-const PICKVALOR_MAX      = 5;
+const PICKVALOR_MAX      = 99;  // sin tope de volumen (29-jul)
 function rankPickValor(candidates, fechaBy, now, excludeKeys) {
   return candidates.filter(c => {
     const fecha = fechaBy.get(c.fixtureId);
