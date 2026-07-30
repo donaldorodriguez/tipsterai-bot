@@ -2098,7 +2098,10 @@ function validateLiveOdds(odds, elapsed = 0, hg = 0, ag = 0) {
 // ~1.20 y "Over 0.5 tarjetas" que ni existe en las casas). Elimina esos bloques
 // y renumera. Los mercados de mitad (Over 0.5 2T) y líneas reales (Over 1.5+,
 // Over 2.5 tarjetas) se conservan.
-function sanitizeLivePicks(text) {
+// opts.mismoPartido: todos los picks del texto son del MISMO partido (handlePartido
+// en vivo, handleImage) → se activa el guard de coherencia entre picks. En handleVivo
+// (varios partidos) queda desactivado.
+function sanitizeLivePicks(text, opts = {}) {
   if (!text) return text;
   // Tolerante a markdown del LLM: "🎯 *PICK 1*", "🎯 PICK 1 —", "*🎯 PICK 1:*"…
   // (caso real 19-jul: variantes con asteriscos esquivaban el regex estricto y
@@ -2134,17 +2137,67 @@ function sanitizeLivePicks(text) {
     // y la cuota mínima no corresponde a ninguno. Una selección = UN mercado.
     if (/\bdnb\b|empate devuelve|draw no bet/.test(header) && /h[áa]ndicap|asi[áa]tico|\bah\b/.test(header))
       return 'mercados mezclados en una selección (DNB + Hándicap Asiático)';
+    // Over y Under de goles MEZCLADOS en el mismo pick (caso real 30-jul: título
+    // "Más de 1.5 goles — 2T/Partido" con selección "Under 1.5 goles totales").
+    // El cliente no sabe qué apostar y el pick es inevaluable. Una selección = UN
+    // sentido. Solo aplica a goles (en córners/tarjetas no se ha visto la mezcla).
+    if (/gol/.test(header) && /(m[áa]s de|over)\s*\d/.test(header) && /(menos de|under)\s*\d/.test(header))
+      return 'Over y Under de goles mezclados en la misma selección (inevaluable)';
     return null;
   };
+
+  // ── Coherencia entre picks del MISMO partido ────────────────────────────────
+  // Un análisis no puede pedir a la vez "vienen goles" y "no vienen" (caso real
+  // 30-jul, Vasco vs Medellín: PICK 1 Asiático Over 1.0 = quiere 2+ goles más y
+  // PICK 2 Under 1.5 FT = quiere máximo 1 más). Over A gana con total ≥ floor(A)+1;
+  // Under B gana con total ≤ ceil(B)-1 → son compatibles solo si floor(A)+1 ≤ ceil(B)-1.
+  // Solo se aplica con opts.mismoPartido (en handleVivo los picks son de partidos
+  // distintos y un Over aquí con un Under allá es perfectamente válido).
+  const lineaGoles = (b, re) => {
+    const s = b.toLowerCase();
+    const head = s.split('\n').filter(l => /pick[*_ ]*\d|selecci[óo]n/.test(l)).join('\n') || s;
+    if (!/gol/.test(head)) return null;
+    const m = head.match(re);
+    return m ? parseFloat(m[1].replace(',', '.')) : null;
+  };
+  const lineaOver  = (b) => lineaGoles(b, /(?:m[áa]s de|over)\s*(\d+[.,]?\d*)/);
+  const lineaUnder = (b) => lineaGoles(b, /(?:menos de|under)\s*(\d+[.,]?\d*)/);
+  const stakeDe    = (b) => { const m = b.match(/stake[:\s*]*(\d{1,2})\s*\/\s*10/i); return m ? parseInt(m[1], 10) : 0; };
   let footer = '', body = text;
   const fMatch = text.match(/\n*(?:━+\n)?📈[\s\S]*$/);
   if (fMatch) { footer = fMatch[0]; body = text.slice(0, fMatch.index); }
-  const kept = body.split(PICK_SPLIT).filter(part => {
+  let kept = body.split(PICK_SPLIT).filter(part => {
     if (!PICK_HEAD.test(part)) return true;
     const r = forbidden(part);
     if (r) { console.log(`🚫 Live gate: pick eliminado (${r})`); return false; }
     return true;
   });
+
+  // Guard de coherencia: elimina el Under contradictorio con un Over del mismo
+  // partido (se conserva el de MAYOR stake; a igualdad, el primero).
+  if (opts.mismoPartido) {
+    const idx = kept.map((p, i) => ({ p, i })).filter(x => PICK_HEAD.test(x.p));
+    const fuera = new Set();
+    for (const a of idx) {
+      for (const b of idx) {
+        if (a.i >= b.i || fuera.has(a.i) || fuera.has(b.i)) continue;
+        const oA = lineaOver(a.p),  uA = lineaUnder(a.p);
+        const oB = lineaOver(b.p),  uB = lineaUnder(b.p);
+        // un pick es Over y el otro Under (y ninguno mezcla ambos — eso ya se filtró)
+        const over  = oA != null && uA == null ? a : (oB != null && uB == null ? b : null);
+        const under = uA != null && oA == null ? a : (uB != null && oB == null ? b : null);
+        if (!over || !under || over.i === under.i) continue;
+        const A = lineaOver(over.p), B = lineaUnder(under.p);
+        if (A == null || B == null) continue;
+        if (Math.floor(A) + 1 <= Math.ceil(B) - 1) continue; // compatibles
+        const perdedor = stakeDe(over.p) >= stakeDe(under.p) ? under : over;
+        fuera.add(perdedor.i);
+        console.log(`🚫 Live gate: pick eliminado (contradice a otro del mismo partido — Over ${A} vs Under ${B})`);
+      }
+    }
+    if (fuera.size) kept = kept.filter((_, i) => !fuera.has(i));
+  }
+
   let n = 0;
   return (kept.join('') + footer)
     // "Actúa antes del min X" está prohibido en el prompt (dato inventado) pero el
@@ -9019,13 +9072,22 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       INPLAY_SYSTEM,
       `Analiza este partido EN VIVO:\n\n${JSON.stringify(analysisData, null, 2)}`
     );
-    const analysis = sanitizeLivePicks(analysisRaw); // gate: quita locks/mercados inexistentes
+    let analysis = sanitizeLivePicks(analysisRaw, { mismoPartido: true }); // locks, mezclas y coherencia
+    // GATE DURO también en vivo (antes esta rama hacía return sin pasar por él, y
+    // se colaban picks con cuota < 1.65 y stake ≤ 5 — caso real 30-jul: Under 1.5
+    // publicado a cuota 1.50 con stake 5/10).
+    const gateOptsLive = { maxPicks: 3 };
+    analysis = await applyStakeGate(analysis, [], [{
+      fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam,
+      liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date,
+      marcadorVivo: { home: liveHomeGoals, away: liveAwayGoals },
+    }], gateOptsLive);
     try {
       await sendLong(chatId, `🎯 *${homeTeam} vs ${awayTeam}*\n\n${analysis}`, { parse_mode: 'Markdown' });
     } catch {
       await sendLong(chatId, `🎯 ${homeTeam} vs ${awayTeam}\n\n${analysis.replace(/[*_`]/g, '')}`);
     }
-    recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }]).catch(e => console.error('recordPicks:', e.message));
+    recordPicks(analysis, [{ fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam, liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date }], gateOptsLive.extractedPicks).catch(e => console.error('recordPicks:', e.message));
     return;
   }
 
@@ -9130,7 +9192,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
 
   // Gate determinista de selecciones incoherentes (mercados mezclados tipo
   // "DNB / AH -0.5", locks 0.5) — mismo sanitizador que las rutas en vivo.
-  analysis = sanitizeLivePicks(analysis);
+  analysis = sanitizeLivePicks(analysis, { mismoPartido: true });
   // Gate duro pre-publicación: valida stakes y elimina picks con cuota < 1.65
   const gateOptsPartido = { maxPicks: 3 };
   analysis = await applyStakeGate(analysis, [fixtureForEngine], [{
@@ -9315,13 +9377,24 @@ async function handleVivo(chatId, leagueId = null, leagueName = null) {
     INPLAY_SYSTEM,
     `DATOS REALES EN VIVO:\n\n${JSON.stringify(enriched, null, 2)}\n\nMáximo 3 picks en total. REGLA IRROMPIBLE DE CUOTA: cuota mínima 1.50 para cualquier pick. Si cuotasVivo es null → solo recomienda mercados cuya cuota estimada (lineasConValor) sea > 1.50 Y cuyo lado tenga probabilidad ≥ 50% del modelo (recomendar el lado < 50% sin cuota real es apostar contra el propio modelo); si no hay ninguno → escribe ⛔ Sin picks de valor en este momento. PROHIBIDO dar picks con cuota obvia (< 1.50) aunque el análisis lo favorezca.`
   );
-  const analysis = sanitizeLivePicks(analysisRaw); // mismo gate que el análisis de partido específico
+  // Sin mismoPartido: aquí los picks son de partidos DISTINTOS, un Over en uno y un
+  // Under en otro es perfectamente válido.
+  let analysis = sanitizeLivePicks(analysisRaw);
+  // Gate duro (antes esta ruta también lo saltaba): cuota < 1.65 y stake ≤ 5 fuera.
+  const gateOptsVivo = { maxPicks: 3 };
+  const matchesCtxVivo = enriched.map(f => ({
+    fixtureId: f.fixtureId, local: f.homeTeam, visitante: f.awayTeam,
+    liga: f.leagueName, fechaPartido: f.date,
+    ...(f.homeGoals != null && f.awayGoals != null &&
+      { marcadorVivo: { home: f.homeGoals, away: f.awayGoals } }),
+  }));
+  analysis = await applyStakeGate(analysis, [], matchesCtxVivo, gateOptsVivo);
   try {
     await sendLong(chatId, `🔴 *PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}*\n\n${analysis}`, { parse_mode: 'Markdown' });
   } catch {
     await sendLong(chatId, `🔴 PICKS EN VIVO${leagueName ? ' — ' + leagueName : ''}\n\n${analysis.replace(/[*_`]/g, '')}`);
   }
-  recordPicks(analysis, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.homeTeam, visitante: f.awayTeam, liga: f.leagueName, fechaPartido: f.date }))).catch(e => console.error('recordPicks:', e.message));
+  recordPicks(analysis, enriched.map(f => ({ fixtureId: f.fixtureId, local: f.homeTeam, visitante: f.awayTeam, liga: f.leagueName, fechaPartido: f.date })), gateOptsVivo.extractedPicks).catch(e => console.error('recordPicks:', e.message));
 }
 
 // ─── Alerta de Gol ────────────────────────────────────────────────────────────
@@ -11224,7 +11297,7 @@ async function handleImage(msg) {
     );
     // Gates pre-publicación (antes el flujo de imagen enviaba el texto crudo:
     // así salió una combinada con stake 5 y cuotas bajo el piso).
-    analysis = sanitizeLivePicks(analysis); // mismo gate anti-lock que las otras rutas en vivo
+    analysis = sanitizeLivePicks(analysis, { mismoPartido: true }); // mismo gate anti-lock que las otras rutas en vivo
     const gateOptsImg = {};
     analysis = await applyStakeGate(analysis, [], [{
       fixtureId: liveFixtureId, local: matchData.home_team, visitante: matchData.away_team,
