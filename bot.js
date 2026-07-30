@@ -7794,6 +7794,9 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 // vio jamás cambia) y los futuros no bloqueados se re-optimizan con cuotas
 // frescas. Ranking por EV validado contra cuota real — stake solo desempata.
 const SUPERPICK_FILE = fs.existsSync('/data') ? '/data/superpicks.json' : path.join(__dirname, 'superpicks.json');
+const SUPERPICK_TR_VENTANA       = 40;   // ventana comercial: últimos N análisis liquidados
+                                         // (muestra suficiente para ser defendible sin
+                                         // arrastrar los primeros días sin calibrar)
 const SUPERPICK_MIN_KICKOFF_MIN  = 90;   // para ENTRAR al plan: kickoff ≥90 min futuro
 const SUPERPICK_SERVE_MIN        = 30;   // para SERVIRSE a un lead: kickoff ≥30 min futuro
 const SUPERPICK_SPACING_MIN      = 0;    // sin espaciado entre kickoffs (pedido del usuario:
@@ -8293,6 +8296,31 @@ function superPickTrackRecord(days = 30) {
   const glob = loadPicks().filter(p => ['W', 'L'].includes(p.resultado) && !p.esCombinada && p.emitidoAt && new Date(p.emitidoAt) >= cutoff);
   const gw = glob.filter(p => p.resultado === 'W').length;
   tr.fallbackGlobal = glob.length ? { evaluados: glob.length, winRate: +((gw / glob.length) * 100).toFixed(1) } : null;
+
+  // ── Ventana COMERCIAL: últimos N análisis liquidados (por defecto 40) ────────
+  // La ventana de 30 días arrastra los primeros días del motor (12-13 jul: 0W-5L),
+  // cuando aún no estaba corregido el winner's curse — hunde el número y no
+  // representa cómo rinde hoy. Esta ventana es MÓVIL: se recalcula sola en cada
+  // consulta, así que el dato publicado nunca queda obsoleto (el problema del
+  // "71% en 280+ picks" hardcodeado que estuvo meses en el guion de venta).
+  // Es honesta: no elige fechas a conveniencia, simplemente mide los últimos N.
+  const ultimos = loadPicks()
+    .filter(p => p.source === 'superpick' && ['W', 'L'].includes(p.resultado))
+    .sort((a, b) => new Date(a.fechaPartido || a.emitidoAt) - new Date(b.fechaPartido || b.emitidoAt))
+    .slice(-SUPERPICK_TR_VENTANA);
+  if (ultimos.length) {
+    const uw = ultimos.filter(p => p.resultado === 'W').length;
+    let stk = 0, ret = 0;
+    for (const p of ultimos) { const s = p.stake || 1; stk += s; if (p.resultado === 'W') ret += s * (parseFloat(p.cuota) || 2); }
+    tr.ultimos = {
+      n: ultimos.length,
+      ganados: uw,
+      perdidos: ultimos.length - uw,
+      winRate: +((uw / ultimos.length) * 100).toFixed(1),
+      roiPct: stk ? +(((ret - stk) / stk) * 100).toFixed(1) : null,
+      desde: ultimos[0].fecha || null,
+    };
+  }
   return tr;
 }
 
