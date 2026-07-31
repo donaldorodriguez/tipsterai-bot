@@ -2143,6 +2143,14 @@ function sanitizeLivePicks(text, opts = {}) {
     // sentido. Solo aplica a goles (en córners/tarjetas no se ha visto la mezcla).
     if (/gol/.test(header) && /(m[áa]s de|over)\s*\d/.test(header) && /(menos de|under)\s*\d/.test(header))
       return 'Over y Under de goles mezclados en la misma selección (inevaluable)';
+    // Córners/tarjetas de MITAD con línea mínima (caso real 31-jul: "Córners en
+    // el 2º tiempo — Más de 1.5" mientras el propio texto proyectaba ~1.9
+    // córners restantes). Las casas rara vez ofrecen líneas de mitad tan bajas y
+    // a esa altura el pick es una moneda al aire vestida de análisis.
+    if (/(c[óo]rner|tarjeta|amarilla)/.test(header) &&
+        /(2[ºo]?\s*tiempo|segunda?\s*(?:mitad|parte)|\b2t\b|1[ºer]*\s*tiempo|\b1t\b)/.test(header) &&
+        /(m[áa]s de|over)\s*[01][.,]5\b/.test(header))
+      return 'línea de mitad demasiado baja en córners/tarjetas (mercado que las casas rara vez ofrecen)';
     return null;
   };
 
@@ -2162,6 +2170,27 @@ function sanitizeLivePicks(text, opts = {}) {
   };
   const lineaOver  = (b) => lineaGoles(b, /(?:m[áa]s de|over)\s*(\d+[.,]?\d*)/);
   const lineaUnder = (b) => lineaGoles(b, /(?:menos de|under)\s*(\d+[.,]?\d*)/);
+  // Familia (goles/tarjetas/córners) + sentido + línea + si es de mitad, leídos
+  // del encabezado del bloque. Null si el bloque no es una línea Over/Under
+  // limpia (las mezclas Over+Under ya las mató forbidden()).
+  const familiaLinea = (b) => {
+    const s = b.toLowerCase();
+    const head = s.split('\n').filter(l => /pick[*_ ]*\d|selecci[óo]n/.test(l)).join('\n') || s;
+    const fam = /tarjeta|amarilla|card/.test(head) ? 'tarjetas'
+              : /c[óo]rner/.test(head)             ? 'corners'
+              : /gol/.test(head)                   ? 'goles'
+              : null;
+    if (!fam) return null;
+    const mOver  = head.match(/(?:m[áa]s de|over)\s*(\d+[.,]?\d*)/);
+    const mUnder = head.match(/(?:menos de|under)\s*(\d+[.,]?\d*)/);
+    if (!!mOver === !!mUnder) return null; // ninguna, o mezcla de ambas
+    return {
+      fam,
+      lado:  mOver ? 'over' : 'under',
+      linea: parseFloat((mOver || mUnder)[1].replace(',', '.')),
+      mitad: /2[ºo]?\s*tiempo|segunda?\s*(?:mitad|parte)|\b2t\b|1[ºer]*\s*tiempo|\b1t\b/.test(head),
+    };
+  };
   const stakeDe    = (b) => { const m = b.match(/stake[:\s*]*(\d{1,2})\s*\/\s*10/i); return m ? parseInt(m[1], 10) : 0; };
   let footer = '', body = text;
   const fMatch = text.match(/\n*(?:━+\n)?📈[\s\S]*$/);
@@ -2195,8 +2224,41 @@ function sanitizeLivePicks(text, opts = {}) {
         console.log(`🚫 Live gate: pick eliminado (contradice a otro del mismo partido — Over ${A} vs Under ${B})`);
       }
     }
+
+    // ── Dos líneas del MISMO mercado y el MISMO sentido ───────────────────────
+    // Caso real 31-jul (Coritiba vs Cruzeiro): PICK 1 "Over 3.5 tarjetas" y
+    // PICK 2 "Over 4.5 tarjetas" en el mismo análisis. No se contradicen — por
+    // eso el guard de arriba no los veía — pero son el mismo mercado dos veces y
+    // el cliente no sabe cuál apostar. Se conserva el de mayor stake; a igualdad,
+    // la línea más baja (la más probable de acertar).
+    for (const a of idx) {
+      for (const b of idx) {
+        if (a.i >= b.i || fuera.has(a.i) || fuera.has(b.i)) continue;
+        const fa = familiaLinea(a.p), fb = familiaLinea(b.p);
+        if (!fa || !fb) continue;
+        if (fa.fam !== fb.fam || fa.lado !== fb.lado || fa.mitad !== fb.mitad) continue;
+        const sa = stakeDe(a.p), sb = stakeDe(b.p);
+        const perdedor = sa !== sb ? (sa > sb ? b : a) : (fa.linea <= fb.linea ? b : a);
+        fuera.add(perdedor.i);
+        console.log(`🚫 Live gate: pick eliminado (dos líneas del mismo mercado — ${fa.fam} ${fa.lado} ${fa.linea} vs ${fb.linea})`);
+      }
+    }
+
     if (fuera.size) kept = kept.filter((_, i) => !fuera.has(i));
   }
+
+  // ── Reparación de plantilla ─────────────────────────────────────────────────
+  // Caso real 31-jul (O'Higgins vs Boca): el bloque salió con DOS líneas
+  // "Selección:" y ninguna de "Razonamiento:" — el LLM se comió el campo. La
+  // segunda es, de hecho, el razonamiento.
+  kept = kept.map(part => {
+    if (!PICK_HEAD.test(part) || /Razonamiento:/i.test(part)) return part;
+    const sel = part.match(/^[├└┌|]\s*Selecci[óo]n:/gmi) || [];
+    if (sel.length < 2) return part;
+    let visto = 0;
+    console.log('🩹 Plantilla reparada: segunda "Selección" → "Razonamiento"');
+    return part.replace(/^([├└┌|]\s*)Selecci[óo]n:/gmi, (m, pre) => (++visto === 1 ? m : `${pre}Razonamiento:`));
+  });
 
   let n = 0;
   return (kept.join('') + footer)
@@ -5940,6 +6002,7 @@ FORMATO OBLIGATORIO — SIEMPRE usa este estructura:
 ━━━━━━━━━━━━━━━━━━━
 
 REGLAS IRROMPIBLES:
+- ⛔ LOS MERCADOS LOS ELIGE EL MOTOR, NO TÚ (manda sobre todas las demás reglas). Si el JSON trae "picksMotorJS", esa lista ES el análisis: escribe UN bloque de pick por cada elemento, en el mismo orden, con el MISMO mercado y la MISMA línea. PROHIBIDO añadir mercados que no estén en la lista, cambiar una línea por otra, fusionar dos picks o publicar menos de los que hay. Si la lista trae 3, salen 3. Tu trabajo es redactar el razonamiento y el riesgo con los datos del JSON — la selección ya está hecha.
 - Cuota mínima 1.65 para cualquier pick. Cuota máxima 2.30.
 - Stakes SOLO del 5 al 10 — si un pick no llega a 5, DESCÁRTALO.
 - COHERENCIA TÍTULO=SELECCIÓN=CUOTA (obligatoria): el título del pick, la línea "Selección" y la "Cuota mínima" deben referirse al MISMO mercado con la MISMA línea. Si tu razonamiento concluye que la línea con valor es el Hándicap -1.5 (y no el -0.5), entonces el título dice -1.5, la Selección dice -1.5 y la cuota mínima es la del -1.5. PROHIBIDO titular un pick con una línea y recomendar otra distinta en el razonamiento — decide UNA línea antes de escribir el pick y sé consistente en las tres partes.
@@ -9266,14 +9329,29 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const season = LEAGUE_SEASONS[leagueId] || 2025;
   let analysis;
   // Para partido individual siempre análisis profundo con todos los datos.
-  // El motor JS pre-calcula candidatos que se incluyen en analysisData como
-  // referencia matemática, pero el LLM elige los 3 mejores con datos reales.
+  // El motor JS SELECCIONA los mercados; el LLM solo los redacta.
+  // Antes esto decía "referencia, el LLM puede usarlos o enriquecerlos" y el LLM
+  // se saltaba la lista: publicaba 1 pick teniendo 3 del motor, e inventaba
+  // mercados que el motor ni calcula (visto 31-jul: "córners en el 2º tiempo
+  // Más de 1.5", con el propio texto proyectando ~1.9 córners restantes).
+  let mandatoMotor = '';
   if (partidoPicks.length >= 1) {
-    analysisData.picksMotorJS = partidoPicks; // referencia, el LLM puede usarlos o enriquecerlos
+    analysisData.picksMotorJS = partidoPicks;
+    const lista = partidoPicks
+      .map((p, i) => `${i + 1}. ${p.marketLabel || p.market} — stake ${p.stake}${p.odds ? ` — cuota ${p.odds}` : ''}`)
+      .join('\n');
+    mandatoMotor =
+      `\n\n⛔ LISTA CERRADA DE PICKS — el motor ya seleccionó los mercados. Escribe EXACTAMENTE ` +
+      `${partidoPicks.length} pick(s), uno por cada línea de esta lista, en este orden, con el MISMO ` +
+      `mercado y la MISMA línea:\n${lista}\n` +
+      `PROHIBIDO añadir un pick que no esté en la lista, cambiar la línea de alguno, fusionar dos en uno ` +
+      `o publicar menos de los que hay. Tu trabajo es redactar razonamiento y riesgo con los datos del ` +
+      `JSON, no elegir el mercado.`;
+    console.log(`🔒 Lista cerrada al LLM (${partidoPicks.length}): ${partidoPicks.map(p => p.marketLabel || p.market).join(' | ')}`);
   }
   analysis = await sonnet(
     PARTIDO_DEEP_SYSTEM,
-    `Analiza este partido en profundidad (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}`
+    `Analiza este partido en profundidad (temporada ${season}):\n\n${JSON.stringify(analysisData, null, 2)}${mandatoMotor}`
   );
 
   // Gate determinista de selecciones incoherentes (mercados mezclados tipo
