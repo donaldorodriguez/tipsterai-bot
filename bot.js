@@ -6470,7 +6470,63 @@ async function recordPicks(analysisText, matchesCtx, preExtracted = null) {
   }
 }
 
+// Deduce { mercado, linea } desde la ETIQUETA de una pata de combinada
+// ("Más de 2.5 Goles", "Draw No Bet — Local", "Doble Oportunidad 1X"...). Las patas
+// se guardan con su label de producto, no con la key interna del mercado.
+// Devuelve null si no se reconoce → la combinada queda sin liquidar (mejor '?' que mal).
+function inferirMercadoDeLeg(label) {
+  const s = String(label || '').toLowerCase().trim();
+  if (!s) return null;
+  const num = (re) => { const m = s.match(re); return m ? parseFloat(m[1].replace(',', '.')) : null; };
+
+  if (/c[óo]rner|esquina/.test(s))            return { mercado: 'OTHER', linea: null };  // lo resuelve el texto
+  if (/tarjeta|amarilla|card/.test(s))        return { mercado: 'OTHER', linea: null };  // ídem
+  if (/ambos marcan|btts/.test(s))            return /\bno\b/.test(s) ? { mercado: 'BTTS_NO', linea: null } : { mercado: 'BTTS_YES', linea: null };
+  if (/1er tiempo|primer tiempo|\b1t\b/.test(s)) return { mercado: 'HT_OVER', linea: num(/(\d+[.,]\d+)/) ?? 0.5 };
+  if (/(m[áa]s de|over)\s*(\d+[.,]\d+)/.test(s) && /gol/.test(s)) return { mercado: 'OVER_GOALS',  linea: num(/(?:m[áa]s de|over)\s*(\d+[.,]\d+)/) };
+  if (/(menos de|under)\s*(\d+[.,]\d+)/.test(s) && /gol/.test(s)) return { mercado: 'UNDER_GOALS', linea: num(/(?:menos de|under)\s*(\d+[.,]\d+)/) };
+  if (/doble oportunidad/.test(s))            return { mercado: 'DOUBLE_CHANCE', linea: null }; // evaluatePickResult lo resuelve por texto (1X/X2/12)
+  if (/draw no bet|dnb/.test(s))              return /visitante|away/.test(s) ? { mercado: 'DNB_AWAY', linea: null } : { mercado: 'DNB_HOME', linea: null };
+  if (/victoria local/.test(s))               return { mercado: 'HOME_WIN', linea: null };
+  if (/victoria visitante/.test(s))           return { mercado: 'AWAY_WIN', linea: null };
+  return null;
+}
+
+// Patas de una combinada: preferir el array `legs` (estructurado); si no está
+// (picks viejos), partir el texto "Combinada: A + B".
+function patasDeCombinada(pick) {
+  if (Array.isArray(pick.legs) && pick.legs.length) return pick.legs.map(l => l.mercado || l.seleccion || '');
+  const txt = String(pick.seleccion || '').replace(/^\s*combinada\s*:\s*/i, '');
+  const partes = txt.split(/\s+\+\s+/).map(t => t.trim()).filter(Boolean);
+  return partes.length >= 2 ? partes : [];
+}
+
 async function evaluatePickResult(pick, fixture, stats) {
+  // ── COMBINADAS: se liquidan evaluando CADA pata ──────────────────────────
+  // Antes se excluían del evaluador ("requieren evaluar ambas patas") y quedaban
+  // en '?' para siempre → no contaban en el track record pese a ser picks reales
+  // enviados al cliente (y suelen ser los de mayor EV). Reglas de casa de apuestas:
+  // cualquier pata perdida → combinada perdida; pata anulada (push) → se cae y la
+  // combinada se resuelve con las restantes; si alguna pata no es evaluable → '?'.
+  if (pick.esCombinada) {
+    const patas = patasDeCombinada(pick);
+    if (patas.length < 2) return '?';
+    const resultados = [];
+    for (const label of patas) {
+      const inf = inferirMercadoDeLeg(label);
+      if (!inf) return '?';                       // pata no reconocida → no adivinar
+      const r = await evaluatePickResult(
+        { mercado: inf.mercado, linea: inf.linea, seleccion: label, esCombinada: false },
+        fixture, stats
+      );
+      if (r === 'L') return 'L';                  // una pata perdida basta
+      if (r !== 'W' && r !== 'V') return '?';     // pata sin resolver
+      resultados.push(r);
+    }
+    if (resultados.every(r => r === 'V')) return 'V';   // todas anuladas
+    return 'W';                                        // resto ganadas (las V se caen)
+  }
+
   // Los mercados se liquidan al minuto 90: en eliminatorias con prórroga,
   // fixture.goals trae el marcador FINAL (Argentina 3-1 aet cuando el 90' fue
   // 1-1) — score.fulltime es el resultado reglamentario cuando la API lo trae.
@@ -6733,7 +6789,7 @@ async function evaluatePendingPicks() {
   const pending = picks.filter(p => {
     if (!p.fixtureId) return false;
     if (p.mercado === 'PLAYER_PROP') return false; // stats de jugador no evaluables con marcador
-    if (p.esCombinada) return false; // combinadas: requieren evaluar ambas patas — no auto-evaluables
+    // combinadas SÍ se evalúan (evaluatePickResult liquida pata por pata)
     const fecha = fechaOf(p);
     if ((!p.resultado || p.resultado === '?') && fecha >= cutoffPend) return true;
     if (['W', 'L', 'V'].includes(p.resultado) && fecha >= cutoffRecheck) return true;
@@ -8241,6 +8297,7 @@ function commitSuperPick(fecha, p) {
     liga: p.liga, pais: p.pais || null, local: p.local, visitante: p.visitante,
     mercado: p.mercado, seleccion: p.seleccion, linea: null, handicap: null,
     cuota: p.cuota, stake: p.stake, esCombinada: !!p.esCombinada,
+    legs: p.legs || null,   // patas: necesarias para liquidar la combinada
     resultado: null, scoresFinal: null, source: 'superpick', ordinal: p.ordinal,
     sbSignal: p.sbSignal ?? null,   // registro SoccerBuddy para calibrar su peso vs W/L
   });
