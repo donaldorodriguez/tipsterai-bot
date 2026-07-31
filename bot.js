@@ -6153,7 +6153,8 @@ const EXTRACT_PICKS_SYSTEM = `Eres un extractor de picks de apuestas deportivas.
 Para cada pick devuelve un objeto JSON con estos campos:
 - local: nombre del equipo local (string)
 - visitante: nombre del equipo visitante (string)
-- mercado: tipo de mercado. Usa UNO de: BTTS_YES, BTTS_NO, OVER_GOALS, UNDER_GOALS, OVER_CORNERS, UNDER_CORNERS, OVER_CARDS, UNDER_CARDS, HOME_WIN, AWAY_WIN, DRAW, AH_HOME, AH_AWAY, HT_OVER, HT_RESULT, DNB_HOME, DNB_AWAY, PLAYER_PROP, OTHER
+- mercado: tipo de mercado. Usa UNO de: BTTS_YES, BTTS_NO, OVER_GOALS, UNDER_GOALS, OVER_CORNERS, UNDER_CORNERS, TEAM_CORNERS, OVER_CARDS, UNDER_CARDS, HOME_WIN, AWAY_WIN, DRAW, AH_HOME, AH_AWAY, HT_OVER, HT_RESULT, DNB_HOME, DNB_AWAY, PLAYER_PROP, OTHER
+  ⚠️ TEAM_CORNERS = córners de UN SOLO equipo ("Córners Visitante Over 3.5", "Corners Local Over 4.5"). NO uses OVER_CORNERS/UNDER_CORNERS para esos — esos son SOLO para el total del partido. Son mercados distintos y se calibran por separado.
   (PLAYER_PROP = mercados de jugador individual: remates, goleador, asistencias)
 - seleccion: descripción exacta del pick tal como aparece en el texto (ej: "Over 2.5 goles FT", "BTTS Yes", "Atlético Madrid -1 AH")
 - linea: número de la línea si aplica (ej: 2.5 para Over 2.5, 7.5 para corners Over 7.5, null si no aplica)
@@ -6187,7 +6188,7 @@ function validateStake(pick, probBlock) {
   if (!claimed) return claimed;
 
   // Corners no tienen probabilidad calculada pre-partido — cap fijo a 7
-  if (['CORNERS_OVER', 'CORNERS_UNDER', 'OVER_CORNERS', 'UNDER_CORNERS'].includes(pick.mercado)) {
+  if (['CORNERS_OVER', 'CORNERS_UNDER', 'OVER_CORNERS', 'UNDER_CORNERS', 'TEAM_CORNERS'].includes(pick.mercado)) {
     return Math.min(claimed, 7);
   }
 
@@ -6248,7 +6249,7 @@ async function applyStakeGate(picksText, enriched, matchesCtx, opts = {}) {
       }
 
       // Máximo 2 picks de corners por sesión
-      if (['OVER_CORNERS', 'UNDER_CORNERS'].includes(p.mercado)) {
+      if (['OVER_CORNERS', 'UNDER_CORNERS', 'TEAM_CORNERS'].includes(p.mercado)) {
         cornerPickCount++;
         if (cornerPickCount > 2) {
           console.log(`⚠️ Corner cap: ${p.local} vs ${p.visitante} reducido ${stakeValidado}→5 (máx 2 corners/sesión)`);
