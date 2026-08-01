@@ -1155,7 +1155,44 @@ const TEAM_ALIASES = {
   'cruz azul':       'Cruz Azul',
   'pumas':           'Pumas UNAM',
   'tigres':          'Tigres UANL',
-  'nacional':        'Club Nacional',
+  'nacional':        'Nacional',
+
+  // ── Liga BetPlay Colombia (nombres verificados contra /teams de Highlightly
+  //    el 31-jul: el mapa no tenía NI UN equipo colombiano y es el mercado del
+  //    bot). Sin alias, "Junior de Barranquilla" devolvía 0 resultados de la API
+  //    y el fallback por caché de fixtures resolvía a "Barranquilla FC" (B).
+  'junior':                 'Junior',
+  'junior fc':              'Junior',
+  'junior de barranquilla': 'Junior',
+  'atletico junior':        'Junior',
+  'tiburones':              'Junior',
+  'atletico nacional':      'Nacional',
+  'nacional de medellin':   'Nacional',
+  'verdolaga':              'Nacional',
+  'millonarios':            'Millonarios',
+  'millos':                 'Millonarios',
+  'america de cali':        'America de Cali',
+  'america cali':           'America de Cali',
+  'santa fe':               'Santa Fe',
+  'independiente santa fe': 'Santa Fe',
+  'deportivo cali':         'Deportivo Cali',
+  'cali':                   'Deportivo Cali',
+  'medellin':               'Independiente Medellin',
+  'independiente medellin': 'Independiente Medellin',
+  'dim':                    'Independiente Medellin',
+  'once caldas':            'Once Caldas',
+  'tolima':                 'Deportes Tolima',
+  'deportes tolima':        'Deportes Tolima',
+  'bucaramanga':            'Bucaramanga',
+  'atletico bucaramanga':   'Bucaramanga',
+  'pereira':                'Deportivo Pereira',
+  'deportivo pereira':      'Deportivo Pereira',
+  'envigado':               'Envigado',
+  'pasto':                  'Deportivo Pasto',
+  'deportivo pasto':        'Deportivo Pasto',
+  'union magdalena':        'Union Magdalena',
+  'alianza petrolera':      'Alianza',
+  'llaneros':               'Llaneros',
 
   // ── Saudi Pro League (nombres exactos verificados con API-Football) ──────
   'al ahli':         'Al-Ahli Jeddah',
@@ -2259,6 +2296,18 @@ function sanitizeLivePicks(text, opts = {}) {
     console.log('🩹 Plantilla reparada: segunda "Selección" → "Razonamiento"');
     return part.replace(/^([├└┌|]\s*)Selecci[óo]n:/gmi, (m, pre) => (++visto === 1 ? m : `${pre}Razonamiento:`));
   });
+
+  // ── Si los guardas se llevaron TODOS los picks, decirlo ─────────────────────
+  // Bug propio (31-jul, Palestino vs Coquimbo): el bloque se eliminaba y quedaba
+  // el análisis, un "---" y nada más. El cliente veía un mensaje truncado sin
+  // saber si el bot se colgó. Si había picks y no quedó ninguno, se anuncia.
+  const habia  = body.split(PICK_SPLIT).filter(p => PICK_HEAD.test(p)).length;
+  const quedan = kept.filter(p => PICK_HEAD.test(p)).length;
+  if (habia > 0 && quedan === 0) {
+    console.log(`🚫 Live gate: se eliminaron los ${habia} pick(s) del análisis — se anuncia "sin picks de valor"`);
+    const cuerpo = kept.join('').replace(/\n*-{3,}\s*$/g, '').replace(/\s+$/, '');
+    return `${cuerpo}\n\n⛔ Sin picks de valor en este partido.${footer}`;
+  }
 
   let n = 0;
   return (kept.join('') + footer)
