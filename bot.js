@@ -7748,7 +7748,40 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     return bot.sendMessage(chatId, `😔 No hay partidos no iniciados en las ligas monitoreadas hoy (${today}).`);
   }
   const { enriched, candidates, conOdds } = g;
-  const topPicks = selectDiversePicks(candidates, 3);
+
+  // ── Picks del día = los 3 mejores del ranking SuperPick ─────────────────────
+  // Antes usaba selectDiversePicks(), que optimiza DIVERSIDAD (máx 1 por
+  // categoría, máx 1 por fixture) sobre el mismo pool de candidatos. Por eso los
+  // picks del día NO coincidían con los SuperPicks: dos criterios distintos
+  // eligiendo del mismo bolsa. Pedido del usuario (1-ago): que sean los mismos,
+  // los de mayor EV y probabilidad. Ahora comparten filtro y orden:
+  // EV ≥ 8, prob ≥ 60, cuota real ≥ 1.65, sin cuotas sintéticas, orden por EV.
+  const rankedHoy = rankSuperPickCandidates(candidates, enriched);
+  const vistosFx  = new Set();
+  const topPicks  = [];
+  for (const c of rankedHoy) {
+    if (c.esCombinada) continue;               // la combinada la arma el prompt con los 3 elegidos
+    if (vistosFx.has(c.fixtureId)) continue;   // un solo pick por partido
+    vistosFx.add(c.fixtureId);
+    topPicks.push(c);
+    if (topPicks.length === 3) break;
+  }
+  console.log(`📅 Picks del día — candidatos: ${candidates.length} | pasan filtro SuperPick: ${rankedHoy.length} | elegidos: ${topPicks.length}`);
+  if (topPicks.length) {
+    topPicks.forEach((p, i) => console.log(`   ${i + 1}. ${p.marketLabel} | EV ${p.ev}% | prob ${p.prob}% | cuota ${p.odds} — ${p.local} vs ${p.visitante}`));
+  }
+
+  // Sin candidatos que pasen el filtro → se dice, no se rellena con lo que sea.
+  if (!topPicks.length) {
+    console.log('📅 Picks del día: ningún candidato pasa el filtro de calidad — no se publica nada');
+    return bot.sendMessage(
+      chatId,
+      `📅 *PICKS DEL DÍA — ${today}*\n\n⛔ Hoy ningún partido pasa el filtro del modelo.\n\n` +
+      `Se revisó la jornada completa: ${candidates.length} candidatos analizados, ninguno alcanza el mínimo de valor (EV y probabilidad).\n\n` +
+      `_Preferimos un día en blanco antes que inventar un pick._`,
+      { parse_mode: 'Markdown' }
+    );
+  }
 
   // ── Lesionados/sancionados para los picks seleccionados ────────────────────
   // Solo consultamos los 3 fixtures finales → máximo 3 llamadas API extra.
