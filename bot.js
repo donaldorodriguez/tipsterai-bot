@@ -2188,6 +2188,12 @@ function sanitizeLivePicks(text, opts = {}) {
         /(2[ºo]?\s*tiempo|segunda?\s*(?:mitad|parte)|\b2t\b|1[ºer]*\s*tiempo|\b1t\b)/.test(header) &&
         /(m[áa]s de|over)\s*[01][.,]5\b/.test(header))
       return 'línea de mitad demasiado baja en córners/tarjetas (mercado que las casas rara vez ofrecen)';
+    // Córners POR EQUIPO: apagados en el motor el 1-ago (20% de acierto medido).
+    // El LLM los seguía escribiendo por su cuenta en partido específico y en
+    // vivo, así que el veto también tiene que ser determinista aquí.
+    if (/c[óo]rner/.test(header) && /(local|visitante|de local|del visitante|casa|fuera)/.test(header) &&
+        !/total|partido completo/.test(header))
+      return 'córners por equipo (mercado vetado: 20% de acierto medido, reparto ciego al contexto)';
     return null;
   };
 
@@ -3978,6 +3984,12 @@ function getMarketCalibration(force = false) {
 // Los favoritos sólidos por debajo del piso se rescatan como base de COMBINADA.
 const PUBLISH_MIN_ODDS = 1.65;
 
+// Córners POR EQUIPO (local/visitante). Apagados el 1-ago-2026 tras medir
+// 1W-4L (20%) en 72h siendo el 42% de los SuperPicks emitidos. El reparto
+// local/visitante no tiene contexto de partido — ver el comentario del bloque
+// de mercados. Poner en true solo cuando ese reparto sepa quién va a atacar.
+const TEAM_CORNERS_ON = false;
+
 function buildPickCandidates(enrichedFixtures) {
   const candidates = [];
   const calib = getMarketCalibration();
@@ -4069,11 +4081,21 @@ function buildPickCandidates(enrichedFixtures) {
       { key: 'cornersUnder75', label: 'Corners Under 7.5',  prob: 1 - probs.cornersOver65 / 100, oddsVal: odds.cornersUnder75, cat: 'corners', minOdds: 1.45, minProb: 0.50 },
       { key: 'cornersUnder85', label: 'Corners Under 8.5',  prob: 1 - probs.cornersOver75 / 100, oddsVal: odds.cornersUnder85, cat: 'corners', minOdds: 1.40, minProb: 0.52 },
       { key: 'cornersUnder95', label: 'Corners Under 9.5',  prob: 1 - probs.cornersOver85 / 100, oddsVal: odds.cornersUnder95, cat: 'corners', minOdds: 1.40, minProb: 0.55 },
-      // ── Corners por equipo
-      { key: 'homeCorners_over35', label: 'Corners Local Over 3.5',     prob: probs.homeCorners35 / 100, oddsVal: odds.homeCorners_over35, cat: 'team_corners', minOdds: 1.50, minProb: 0.52 },
-      { key: 'homeCorners_over45', label: 'Corners Local Over 4.5',     prob: probs.homeCorners45 / 100, oddsVal: odds.homeCorners_over45, cat: 'team_corners', minOdds: 1.55, minProb: 0.45 },
-      { key: 'awayCorners_over25', label: 'Corners Visitante Over 2.5', prob: probs.awayCorners25 / 100, oddsVal: odds.awayCorners_over25, cat: 'team_corners', minOdds: 1.50, minProb: 0.52 },
-      { key: 'awayCorners_over35', label: 'Corners Visitante Over 3.5', prob: probs.awayCorners35 / 100, oddsVal: odds.awayCorners_over35, cat: 'team_corners', minOdds: 1.55, minProb: 0.45 },
+      // ── Corners por equipo — APAGADOS el 1-ago-2026 ─────────────────────────
+      // Medición real de 72h (jue 30 → sáb 1): 1W-4L = 20% de acierto, siendo el
+      // 42% de todos los SuperPicks emitidos. Solos hundieron el track record.
+      // Causa: el reparto local/visitante es CIEGO AL CONTEXTO. awayCornersLambda
+      // = cornersLambda × (1 - _homeShare), y _homeShare sale solo del promedio de
+      // temporada (o de un 0.55 fijo si no hay datos). El modelo no sabe si el
+      // visitante ganó la ida, si va a defenderse, ni si enfrenta a un rival muy
+      // superior — justo los partidos donde estos picks fallan.
+      // Reactivar solo cuando el reparto tenga contexto de partido.
+      ...(TEAM_CORNERS_ON ? [
+        { key: 'homeCorners_over35', label: 'Corners Local Over 3.5',     prob: probs.homeCorners35 / 100, oddsVal: odds.homeCorners_over35, cat: 'team_corners', minOdds: 1.50, minProb: 0.52 },
+        { key: 'homeCorners_over45', label: 'Corners Local Over 4.5',     prob: probs.homeCorners45 / 100, oddsVal: odds.homeCorners_over45, cat: 'team_corners', minOdds: 1.55, minProb: 0.45 },
+        { key: 'awayCorners_over25', label: 'Corners Visitante Over 2.5', prob: probs.awayCorners25 / 100, oddsVal: odds.awayCorners_over25, cat: 'team_corners', minOdds: 1.50, minProb: 0.52 },
+        { key: 'awayCorners_over35', label: 'Corners Visitante Over 3.5', prob: probs.awayCorners35 / 100, oddsVal: odds.awayCorners_over35, cat: 'team_corners', minOdds: 1.55, minProb: 0.45 },
+      ] : []),
       // ── Tarjetas FT — Poisson real basado en datos de equipo + árbitro + liga
       { _cardsBlock: true, key: 'cardsOver25', label: 'Tarjetas Over 2.5', oddsVal: odds.cardsOver25, cat: 'cards', minOdds: 1.40, minProb: 0.55 },
       { _cardsBlock: true, key: 'cardsOver35', label: 'Tarjetas Over 3.5', oddsVal: odds.cardsOver35, cat: 'cards', minOdds: 1.45, minProb: 0.42 },
