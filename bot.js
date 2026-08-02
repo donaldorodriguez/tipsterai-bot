@@ -1397,9 +1397,14 @@ const TEAM_SEARCH_ALTERNATES = {
 // "Operário" → ok) y devuelve homónimos sin país ("Athletic Club" Bilbao vs
 // Athletic-MG de Brasil). El equipo por el que pregunta el usuario casi siempre
 // juega pronto — su nombre real (con tildes) y su ID correcto están en el caché.
-async function findTeamInFixtureCache(query) {
+// Devuelve TODOS los equipos distintos que casan con la consulta, deduplicados
+// por id y con el contexto de su partido (liga + fecha). Existe porque
+// findTeamWithButtons necesita saber si hay homónimos ANTES de resolver solo:
+// "Universidad Católica" son dos clubes (Chile y Ecuador) y el caché devolvía
+// el primero que encontraba sin preguntar (caso real 2-ago).
+async function findTeamMatchesInFixtureCache(query) {
   const q = normalizeTeamName(translateTeamName(query));
-  if (!q) return null;
+  if (!q) return [];
   const qCore = teamCore(query);
   // Un query masculino de clubes no debe resolver a un fixture FEMENINO o JUVENIL
   // (bug real "Norrköping Women vs Hammarby"). No usar el token 'b'/'ii' (matchea
@@ -1421,12 +1426,13 @@ async function findTeamInFixtureCache(query) {
     ]);
     pools.push(hl || [], apif || []);
   }
-  let best = null, bestScore = 0;
+  const porId = new Map();  // id → { id, name, score, liga, fecha, rival }
   for (const pool of pools) {
     for (const m of pool) {
       const h = m.homeTeam || m.teams?.home;   // HL o APIF
       const a = m.awayTeam || m.teams?.away;
       const lg = m.league?.name;
+      const fechaFx = m.date || m.fixture?.date || null;
       const femYouth = !wantsFemYouth &&
         [h?.name, a?.name, lg].some(n => n && (FEM.test(n) || YOUTH.test(n)));
       for (const t of [h, a]) {
@@ -1458,11 +1464,25 @@ async function findTeamInFixtureCache(query) {
         else if (q.length >= 5 && tn.includes(q)) s = 60;
         else if (coreMatch(tCore, qCore)) s = 70;   // afijos: Benfica SL ↔ Benfica, Pafos FC ↔ Pafos
         if (femYouth && s > 0) s -= 45;
-        if (s > bestScore) { bestScore = s; best = { id: t.id, name: t.name }; }
+        if (s < 60) continue;
+        const prev = porId.get(t.id);
+        if (!prev || s > prev.score) {
+          porId.set(t.id, {
+            id: t.id, name: t.name, score: s,
+            liga: lg || '', fecha: fechaFx,
+            rival: (t === h ? a?.name : h?.name) || '',
+          });
+        }
       }
     }
   }
-  return bestScore >= 60 ? best : null;
+  return [...porId.values()].sort((x, y) => y.score - x.score);
+}
+
+// Mejor coincidencia única (el resto del código sigue usando esto).
+async function findTeamInFixtureCache(query) {
+  const all = await findTeamMatchesInFixtureCache(query);
+  return all.length ? { id: all[0].id, name: all[0].name } : null;
 }
 
 async function searchTeam(name, countryHint = '') {
@@ -1542,10 +1562,43 @@ async function findTeamWithButtons(chatId, name, countryHint = '', intent = null
   //    tiene (clasificatorias europeas, amistosos: Pafos, Benfica, Ilves) y es
   //    context-aware (elige el equipo que realmente juega). Antes esta función iba
   //    directo a HL /teams y se saltaba todo el fix de APIF.
-  const cached = await findTeamInFixtureCache(name).catch(() => null);
-  if (cached) {
-    console.log(`🔎 findTeamWithButtons("${name}") resuelto vía caché de fixtures (HL+APIF) → ${cached.name} (${cached.id})`);
-    return { team: { id: cached.id, name: cached.name, country: '', national: false } };
+  // Se piden TODAS las coincidencias, no la mejor: si hay homónimos hay que
+  // preguntar, no adivinar. "Universidad Católica" son dos clubes distintos
+  // (Chile y Ecuador) y esta función devolvía el primero en silencio — el
+  // usuario pedía el chileno y recibía análisis del ecuatoriano (2-ago-2026).
+  const cachedAll = await findTeamMatchesInFixtureCache(name).catch(() => []);
+  const topScore  = cachedAll[0]?.score ?? 0;
+  const empatados = cachedAll.filter(c => c.score === topScore);
+
+  if (cachedAll.length === 1 || (empatados.length === 1 && topScore - (cachedAll[1]?.score ?? 0) >= 20)) {
+    const c = cachedAll[0];
+    console.log(`🔎 findTeamWithButtons("${name}") resuelto vía caché de fixtures (HL+APIF) → ${c.name} (${c.id})`);
+    return { team: { id: c.id, name: c.name, country: '', national: false } };
+  }
+
+  if (empatados.length > 1) {
+    console.log(`🔀 findTeamWithButtons("${name}"): ${empatados.length} homónimos en el caché → botones`);
+    const fmtFecha = (iso) => {
+      if (!iso) return 'sin partido próximo';
+      const d = new Date(iso);
+      if (isNaN(d)) return 'sin partido próximo';
+      const hoyBog = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+      const pBog   = d.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+      const hora   = d.toLocaleTimeString('es-CO', { timeZone: 'America/Bogota', hour: '2-digit', minute: '2-digit', hour12: true });
+      if (pBog === hoyBog) return `HOY ${hora}`;
+      return d.toLocaleDateString('es-CO', { timeZone: 'America/Bogota', day: '2-digit', month: 'short' }) + ` ${hora}`;
+    };
+    const intentCodeC = (intent?.intencion === 'rachas') ? 'r' : 'p';
+    const botones = empatados.slice(0, 5).map(c => [{
+      text: `${c.name}${c.liga ? ` · ${c.liga}` : ''} · ${fmtFecha(c.fecha)}`,
+      callback_data: `tm_${c.id}_${intentCodeC}`,
+    }]);
+    botones.push([{ text: '❌ Cancelar', callback_data: 'tm_cancel' }]);
+    await bot.sendMessage(chatId,
+      `🔍 Encontré *${empatados.length}* equipos con ese nombre. ¿A cuál te refieres?`,
+      { parse_mode: 'Markdown', reply_markup: { inline_keyboard: botones } }
+    );
+    return 'PENDING';
   }
 
   // 2. Fallback: /teams de Highlightly (equipos fuera de la ventana de fixtures).
