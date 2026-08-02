@@ -1415,7 +1415,12 @@ async function findTeamMatchesInFixtureCache(query) {
   // Pools: en vivo + Highlightly (ids nativos) + API-Football (mejor cobertura de
   // clasificatorias/amistosos: Pafos, Ilves, Benfica en copas). Se prefiere HL en
   // empates porque sus ids funcionan con getTeamStats.
-  const pools = [liveCache.raw || []];
+  // Cada pool va etiquetado con su origen: HL y APIF usan ESPACIOS DE IDS
+  // DISTINTOS, así que el mismo club aparece con dos ids y deduplicar por id
+  // dejaba dos botones idénticos ("Independiente del Valle · Liga Pro · HOY
+  // 01:00 p. m." dos veces, caso real 2-ago). Se deduplica por nombre+liga+día
+  // y se prefiere HL, cuyos ids sí funcionan con getTeamStats.
+  const pools = [{ list: liveCache.raw || [], src: 'hl' }];
   for (let d = -1; d <= 2; d++) {
     const dObj = new Date(Date.now() + d * 86400000);
     const dsCol = dObj.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
@@ -1424,10 +1429,10 @@ async function findTeamMatchesInFixtureCache(query) {
       fetchFixturesByDate(dsCol).catch(() => []),
       fetchApifFixturesByDate(dsUtc).catch(() => []),
     ]);
-    pools.push(hl || [], apif || []);
+    pools.push({ list: hl || [], src: 'hl' }, { list: apif || [], src: 'apif' });
   }
-  const porId = new Map();  // id → { id, name, score, liga, fecha, rival }
-  for (const pool of pools) {
+  const porId = new Map();  // clave nombre|liga|día → { id, name, score, liga, fecha, rival, src }
+  for (const { list: pool, src } of pools) {
     for (const m of pool) {
       const h = m.homeTeam || m.teams?.home;   // HL o APIF
       const a = m.awayTeam || m.teams?.away;
@@ -1465,14 +1470,19 @@ async function findTeamMatchesInFixtureCache(query) {
         else if (coreMatch(tCore, qCore)) s = 70;   // afijos: Benfica SL ↔ Benfica, Pafos FC ↔ Pafos
         if (femYouth && s > 0) s -= 45;
         if (s < 60) continue;
-        const prev = porId.get(t.id);
-        if (!prev || s > prev.score) {
-          porId.set(t.id, {
-            id: t.id, name: t.name, score: s,
-            liga: lg || '', fecha: fechaFx,
-            rival: (t === h ? a?.name : h?.name) || '',
-          });
-        }
+        // Clave por identidad REAL del equipo+partido, no por id: el mismo club
+        // llega con id de HL y con id de APIF y se duplicaba en los botones.
+        const diaFx = fechaFx ? String(fechaFx).slice(0, 10) : '';
+        const clave = `${tn}|${normalizeTeamName(lg || '')}|${diaFx}`;
+        const prev = porId.get(clave);
+        const cand = {
+          id: t.id, name: t.name, score: s, src,
+          liga: lg || '', fecha: fechaFx,
+          rival: (t === h ? a?.name : h?.name) || '',
+        };
+        // Gana el de mayor score; a igualdad, el de HL (sus ids sirven para stats).
+        const mejor = !prev || s > prev.score || (s === prev.score && prev.src !== 'hl' && src === 'hl');
+        if (mejor) porId.set(clave, cand);
       }
     }
   }
@@ -2207,6 +2217,18 @@ async function getLiveOdds(hlFixtureId) {
       } else if (/both teams to score/.test(name)) {
         out.bttsYes = out.bttsYes ?? get(/^yes$/i);
         out.bttsNo  = out.bttsNo  ?? get(/^no$/i);
+      } else if (/corner/.test(name) && !/asian|half|team|home|away/.test(name)) {
+        // Córners totales del partido. Sin esto el motor en vivo tenía 6
+        // mercados de córners que NO PODÍAN dispararse nunca: calculaba la
+        // probabilidad pero jamás encontraba la cuota (2-ago: λ córners
+        // restantes 9.27 y aun así 0 candidatos).
+        for (const v of vals) {
+          const line = parseFloat(v.handicap ?? String(v.value).match(/([\d.]+)\s*$/)?.[1]);
+          if (!line || Math.abs((line % 1) - 0.5) > 0.01) continue; // solo líneas .5
+          const key = String(line).replace('.', '');
+          if (/^over/i.test(String(v.value)))  out['cornersOver'  + key] = out['cornersOver'  + key] ?? parseFloat(v.odd);
+          if (/^under/i.test(String(v.value))) out['cornersUnder' + key] = out['cornersUnder' + key] ?? parseFloat(v.odd);
+        }
       }
     }
     const numeric = Object.keys(out).filter(k => typeof out[k] === 'number');
@@ -4248,8 +4270,10 @@ const LIVE_MARKETS = [
   { key: 'over35',         label: 'Más de 3.5 Goles',    cat: 'goals',   minProb: 0.45 },
   { key: 'under25',        label: 'Menos de 2.5 Goles',  cat: 'goals',   minProb: 0.55 },
   { key: 'under35',        label: 'Menos de 3.5 Goles',  cat: 'goals',   minProb: 0.60 },
-  { key: 'btts',           label: 'Ambos Marcan (Sí)',   cat: 'btts',    minProb: 0.55 },
-  { key: 'bttsNo',         label: 'Ambos Marcan (No)',   cat: 'btts',    minProb: 0.55 },
+  // oddsKey: el feed en vivo llama "bttsYes" a lo que el modelo llama "btts".
+  // Sin este mapeo el mercado nunca encontraba cuota y no podía emitirse.
+  { key: 'btts',   oddsKey: 'bttsYes', label: 'Ambos Marcan (Sí)', cat: 'btts', minProb: 0.55 },
+  { key: 'bttsNo',                     label: 'Ambos Marcan (No)', cat: 'btts', minProb: 0.55 },
   { key: 'cornersOver75',  label: 'Corners Over 7.5',    cat: 'corners', minProb: 0.56 },
   { key: 'cornersOver85',  label: 'Corners Over 8.5',    cat: 'corners', minProb: 0.52 },
   { key: 'cornersOver95',  label: 'Corners Over 9.5',    cat: 'corners', minProb: 0.48 },
@@ -4270,11 +4294,13 @@ const LIVE_FLOOR_ODDS = 1.50; // mismo piso que ya usaba la rama en vivo
 function buildLiveCandidates(probsLive, cuotasVivo = {}) {
   if (!probsLive) return [];
   const out = [];
+  const faltanCuota = [];
   for (const m of LIVE_MARKETS) {
     const prob = (probsLive[m.key] ?? null) / 100;
-    const odds = parseFloat(cuotasVivo[m.key]);
+    const odds = parseFloat(cuotasVivo[m.oddsKey || m.key]);
     if (!prob || isNaN(prob) || prob < m.minProb) continue;
-    if (!odds || isNaN(odds) || odds < LIVE_FLOOR_ODDS) continue;
+    if (!odds || isNaN(odds)) { faltanCuota.push(m.key); continue; }
+    if (odds < LIVE_FLOOR_ODDS) continue;
     const ev = calcEV(prob, odds);
     if (ev === null || ev < LIVE_MIN_EV || ev > LIVE_MAX_EV) continue;
     const kelly = ((prob * odds - 1) / (odds - 1)) * 100;
@@ -4285,6 +4311,12 @@ function buildLiveCandidates(probsLive, cuotasVivo = {}) {
       stake: Math.max(5, Math.min(7, 5 + Math.round(Math.max(0, kelly / 4)))),
     });
   }
+  // Diagnóstico: un mercado que pasa el filtro de probabilidad pero no tiene
+  // cuota en el feed es un mercado MUERTO, no un mercado sin valor. Sin este
+  // log los dos casos se veían idénticos ("0 candidatos") y por eso el bug de
+  // las cuotas de córners pasó desapercibido.
+  if (faltanCuota.length) console.log(`⚡ Sin cuota en vivo para: ${faltanCuota.join(', ')}`);
+
   // Un solo pick por familia: evita el Over 8.5 + Over 9.5 juntos.
   const porFamilia = new Set();
   return out
