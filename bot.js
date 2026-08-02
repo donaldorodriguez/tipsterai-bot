@@ -4361,6 +4361,11 @@ function buildPickCandidates(enrichedFixtures) {
     const partialStats = f._statsSource !== 'real'; // true si solo uno de los dos tiene stats
     const probs = f._extendedProbs;
     const odds  = f.cuotasReales || {};
+    // Contador de descartes por motivo. Existe porque "candidatos JS: 0" no
+    // distingue "ningún mercado tiene valor" de "el motor está roto" — y esa
+    // ambigüedad costó varias rondas de diagnóstico a ciegas (1 y 2-ago).
+    const _rej = { prob: 0, sinCuota: 0, sintMuyAlta: 0, pisoCuota: 0, evBajo: 0, evAlto: 0, otros: 0 };
+    const _antes = candidates.length;
     if (!probs) continue;
 
     // ── Definición de mercados a evaluar ──────────────────────────────────────
@@ -4582,7 +4587,7 @@ function buildPickCandidates(enrichedFixtures) {
       }
       if (_cal && _cal.factor !== 1 && m.prob) m.prob = Math.min(0.97, m.prob * _cal.factor);
 
-      if (!m.prob || m.prob < (m.minProb || 0.48)) continue; // prob insuficiente
+      if (!m.prob || m.prob < (m.minProb || 0.48)) { _rej.prob++; continue; } // prob insuficiente
 
       // ── Cuota real o cuota justa implícita (abre DC, DNB, HT, team corners) ──
       // Sin cuota real, usamos 1/(prob × 0.93) que refleja breakeven con margen 7%.
@@ -4619,27 +4624,27 @@ function buildPickCandidates(enrichedFixtures) {
         const pMarket = Math.min(0.97, (1 / m.oddsVal) * 0.95);
         const wModel  = ['cards', 'team_cards', 'corners', 'team_corners'].includes(m.cat) ? 0.35 : 0.50;
         m.prob = wModel * m.prob + (1 - wModel) * pMarket;
-        if (m.prob < (m.minProb || 0.48) * 0.92) continue; // re-check con 8% de tolerancia
+        if (m.prob < (m.minProb || 0.48) * 0.92) { _rej.prob++; continue; } // re-check con 8% de tolerancia
       }
 
       let o = hasRealOdds ? m.oddsVal : impliedFair;
-      if (!o || o <= 1) continue;
+      if (!o || o <= 1) { _rej.sinCuota++; continue; }
       // Cuota SINTÉTICA > 5.0 = probabilidad del modelo < ~20% sin que ningún
       // bookmaker la valide — pura especulación invendible (visto en producción:
       // "DNB Visitante est. ~17.74"). Con cuota real no aplica el tope.
-      if (!hasRealOdds && o > 5) continue;
+      if (!hasRealOdds && o > 5) { _rej.sintMuyAlta++; continue; }
 
       // Piso mínimo por mercado — aplica a cuotas reales Y sintéticas.
       // Antes solo aplicaba con hasRealOdds: los picks sintéticos (ej. DNB derivado
       // a ~1.10 cuando el favorito paga 1.14) se saltaban el piso y salían publicados.
       const catFloor = m.minOdds || (['dc', 'dnb'].includes(m.cat) ? 1.30 : 1.50);
-      if (o < catFloor) continue;
+      if (o < catFloor) { _rej.pisoCuota++; continue; }
 
       let evRaw = calcEV(m.prob, o);
-      if (evRaw === null || evRaw < -5) continue;
+      if (evRaw === null || evRaw < -5) { _rej.evBajo++; continue; }
       // Edge real en fútbol raramente supera 10-15%. Un EV enorme contra cuota real
       // significa modelo mal calibrado en ese mercado, no valor genuino.
-      if (hasRealOdds && evRaw > 20) continue;
+      if (hasRealOdds && evRaw > 20) { _rej.evAlto++; continue; }
 
       // ── ZCode Soccer Buddy: boost de EV por confirmación externa ─────────────
       let _sbSignal = 'nodata';   // registro para calibrar el peso de SoccerBuddy
@@ -4815,7 +4820,7 @@ function buildPickCandidates(enrichedFixtures) {
       // ── Umbral de valor profesional: con cuota real, solo publicar EV ≥ +3% ──
       // Un pick sin edge medible no es un pick — es relleno. Días sin valor
       // significan "sin picks hoy", no picks forzados.
-      if (hasRealOdds && ev < 3) continue;
+      if (hasRealOdds && ev < 3) { _rej.evBajo++; continue; }
 
       // ── Stake por Kelly fraccionado (¼ Kelly) ─────────────────────────────────
       // kelly% = edge / (cuota - 1). Stake = 5 + ¼Kelly redondeado, cap 10.
@@ -5019,6 +5024,13 @@ function buildPickCandidates(enrichedFixtures) {
           }
         }
       }
+    }
+
+    // Si este fixture no aportó ni un candidato, decir POR QUÉ. Un partido sin
+    // valor y un motor roto se veían igual ("candidatos JS: 0").
+    if (candidates.length === _antes) {
+      const detalle = Object.entries(_rej).filter(([, v]) => v > 0).map(([k, v]) => `${k}:${v}`).join(' ');
+      console.log(`📐 ${f.local} vs ${f.visitante}: 0 candidatos | cuotasReales: ${f.cuotasReales ? 'sí' : 'NO'} | descartes → ${detalle || '(ningún mercado llegó a evaluarse)'}`);
     }
   }
 
