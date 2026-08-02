@@ -4791,7 +4791,14 @@ function buildPickCandidates(enrichedFixtures) {
       // Los stakes 9-10 quedan reservados a edges excepcionales (como debe ser).
       let stake;
       if (hasRealOdds) {
-        const kellyPct    = ((m.prob * o - 1) / (o - 1)) * 100;
+        // El edge que manda es el EV CORREGIDO, no el crudo del modelo.
+        // Antes: kellyPct = ((m.prob * o - 1) / (o - 1)) * 100 — es decir, el
+        // edge crudo, ignorando las tres correcciones que el propio motor acaba
+        // de aplicar (multiplicador de tier, ancla al ROI real, descuento de
+        // torneo nuevo). Un pick cuyo EV se anclaba de 13.6% a 8% seguía
+        // recibiendo el stake del 13.6%: se publicaba "EV 8%" con stake 10/10.
+        // El ancla existe precisamente para desconfiar de ese número crudo.
+        const kellyPct    = ev / (o - 1);
         const quarterK    = Math.max(0, kellyPct / 4);
         stake = Math.min(10, 5 + Math.round(quarterK));
       } else {
