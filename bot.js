@@ -3984,6 +3984,203 @@ function getMarketCalibration(force = false) {
 // Los favoritos sólidos por debajo del piso se rescatan como base de COMBINADA.
 const PUBLISH_MIN_ODDS = 1.65;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MOTOR EN VIVO — goles y córners (1-ago-2026)
+// ═══════════════════════════════════════════════════════════════════════════
+// Hasta hoy la rama en vivo no llamaba al motor: el LLM elegía los mercados a
+// ojo desde el prompt, y de ahí salían los "córners 2T Más de 1.5" y las líneas
+// duplicadas. El motor pre-partido no servía porque sus lambdas asumen el estado
+// inicial (0-0, minuto 0, once contra once).
+//
+// Esto recalcula las lambdas con el estado real del partido y devuelve
+// probabilidades de mercados FT (el total del partido, contando lo ya ocurrido),
+// que es lo que las casas ofrecen en vivo.
+//
+// Limitaciones asumidas, escritas para que nadie las olvide:
+//  · Los repartos por minuto son curvas empíricas gruesas (45/55 en goles,
+//    48/52 en córners), no un modelo entrenado con datos propios.
+//  · Los ajustes por marcador y por expulsado son multiplicadores fijos y
+//    conservadores. Direccionalmente correctos, no calibrados.
+//  · Tarjetas quedan fuera a propósito: dependen del árbitro y del contexto
+//    disciplinario, y merecen su propio modelo.
+// Por eso todo pasa después por el mismo gate de EV y por analiza_mercados.js.
+
+const LIVE_SHARE_2T_GOLES   = 0.55; // ~55% de los goles caen en la 2ª mitad
+const LIVE_SHARE_2T_CORNERS = 0.52; // los córners se reparten algo más parejo
+
+// ── Sobredispersión ─────────────────────────────────────────────────────────
+// Los córners (y en menor medida los goles) NO son Poisson puros: la varianza
+// real supera a la media, porque la propia lambda es incierta (ritmo del
+// partido, arbitraje, táctica). Un Poisson con lambda puntual produce
+// probabilidades exageradas — "Over 9.5 al 98%" — y de ahí salían picks que
+// parecían seguros y se perdían.
+// Binomial negativa = Poisson mezclada con Gamma: misma media, más varianza.
+// k = dispersión (menor k, más incertidumbre). k→∞ recupera el Poisson.
+const LIVE_K_CORNERS = 8;   // córners: bastante ruido partido a partido
+const LIVE_K_GOLES   = 12;  // goles: más cerca de Poisson
+
+// P(X >= threshold) con binomial negativa de media `lambda`.
+function negBinCDF_above(lambda, threshold, k) {
+  if (lambda <= 0) return threshold <= 0 ? 1 : 0;
+  if (threshold <= 0) return 1;
+  const p = k / (k + lambda);         // prob de "éxito"
+  let pmf = Math.pow(p, k);           // P(X = 0)
+  let acum = pmf;
+  for (let x = 1; x < threshold; x++) {
+    pmf *= ((k + x - 1) / x) * (1 - p);
+    acum += pmf;
+  }
+  return Math.max(0, Math.min(1, 1 - acum));
+}
+
+// Fracción del partido ya "consumida" para un tipo de evento, según el minuto.
+function liveShareConsumida(minuto, share2T) {
+  const m = Math.max(0, Math.min(90, minuto || 0));
+  return m <= 45
+    ? (1 - share2T) * (m / 45)
+    : (1 - share2T) + share2T * ((m - 45) / 45);
+}
+
+/**
+ * Probabilidades de mercados FT recalculadas con el estado en vivo.
+ * @param base { homeLambda, awayLambda, cornersLambda }  — del motor pre-partido
+ * @param live { minuto, golesLocal, golesVisitante, cornersLocal, cornersVisitante,
+ *               rojasLocal, rojasVisitante }
+ */
+function calcLiveProbs(base, live) {
+  const minuto = Math.max(0, Math.min(90, live.minuto || 0));
+  const restan = Math.max(0, 90 - minuto);
+  if (restan < 8) return null; // menos de 8 min: nada que proyectar con sentido
+
+  const gl = live.golesLocal ?? 0, gv = live.golesVisitante ?? 0;
+  const rojasL = live.rojasLocal ?? 0, rojasV = live.rojasVisitante ?? 0;
+
+  // ── Goles ────────────────────────────────────────────────────────────────
+  const restGoles = 1 - liveShareConsumida(minuto, LIVE_SHARE_2T_GOLES);
+  let lH = (base.homeLambda || 0) * restGoles;
+  let lA = (base.awayLambda || 0) * restGoles;
+
+  // Estado del marcador: el que va perdiendo se abre, el que gana se repliega.
+  const diff = gl - gv;
+  if (diff !== 0) {
+    const d = Math.min(Math.abs(diff), 2);
+    const empuje = 1 + 0.10 * d;   // el que va abajo ataca más
+    const freno  = 1 - 0.05 * d;   // el que va arriba especula
+    if (diff > 0) { lH *= freno;  lA *= empuje; }
+    else          { lH *= empuje; lA *= freno;  }
+  }
+
+  // Expulsados: el equipo con uno menos produce menos y concede más.
+  if (rojasL) { lH *= Math.pow(0.75, rojasL); lA *= 1 + 0.15 * Math.min(rojasL, 2); }
+  if (rojasV) { lA *= Math.pow(0.75, rojasV); lH *= 1 + 0.15 * Math.min(rojasV, 2); }
+
+  const lTot = lH + lA;
+  const golesYa = gl + gv;
+  // P(total FT > linea) = P(faltan al menos `necesita` goles más)
+  const overFT = (linea) => {
+    const necesita = Math.floor(linea) + 1 - golesYa;
+    if (necesita <= 0) return 1;
+    return negBinCDF_above(lTot, necesita, LIVE_K_GOLES);
+  };
+
+  // BTTS con lo ya marcado
+  let btts;
+  if (gl > 0 && gv > 0)      btts = 1;
+  else if (gl > 0)           btts = 1 - Math.exp(-lA);
+  else if (gv > 0)           btts = 1 - Math.exp(-lH);
+  else                       btts = (1 - Math.exp(-lH)) * (1 - Math.exp(-lA));
+
+  // ── Córners ──────────────────────────────────────────────────────────────
+  const cYa = (live.cornersLocal ?? 0) + (live.cornersVisitante ?? 0);
+  // Ritmo esperado (pre-partido) vs ritmo observado. El observado pesa más
+  // cuanto más partido lleva jugado, con tope 0.6: 20 minutos no derriban un
+  // promedio de temporada, pero 70 sí dicen algo.
+  const ritmoPrev = (base.cornersLambda || 0) / 90;
+  const ritmoObs  = minuto > 0 ? cYa / minuto : ritmoPrev;
+  const wObs      = Math.min(minuto / 70, 0.6);
+  const ritmo     = wObs * ritmoObs + (1 - wObs) * ritmoPrev;
+  // El ritmo mezclado da la expectativa de 90'; la curva reparte cuánto de eso
+  // queda por delante (los córners cargan algo más hacia la 2ª mitad).
+  let lCornersRem = (ritmo * 90) * (1 - liveShareConsumida(minuto, LIVE_SHARE_2T_CORNERS));
+  if (rojasL || rojasV) lCornersRem *= Math.pow(0.92, rojasL + rojasV);
+
+  const cornersOverFT = (linea) => {
+    const necesita = Math.floor(linea) + 1 - cYa;
+    if (necesita <= 0) return 1;
+    return negBinCDF_above(lCornersRem, necesita, LIVE_K_CORNERS);
+  };
+
+  const pc = (x) => +(x * 100).toFixed(1);
+  return {
+    _live: {
+      minuto, restan,
+      lambdaGolesRestantes:   +lTot.toFixed(2),
+      lambdaCornersRestantes: +lCornersRem.toFixed(2),
+      ritmoCornersObservado:  +(ritmoObs * 90).toFixed(1),
+      ritmoCornersPrevio:     +(ritmoPrev * 90).toFixed(1),
+      golesYa, cornersYa: cYa, rojasL, rojasV,
+    },
+    over15:  pc(overFT(1.5)),  over25: pc(overFT(2.5)),  over35: pc(overFT(3.5)),
+    under25: pc(1 - overFT(2.5)), under35: pc(1 - overFT(3.5)),
+    btts:    pc(btts),         bttsNo:  pc(1 - btts),
+    cornersOver75:  pc(cornersOverFT(7.5)),  cornersOver85:  pc(cornersOverFT(8.5)),
+    cornersOver95:  pc(cornersOverFT(9.5)),  cornersOver105: pc(cornersOverFT(10.5)),
+    cornersUnder85: pc(1 - cornersOverFT(8.5)), cornersUnder95: pc(1 - cornersOverFT(9.5)),
+  };
+}
+
+// Mercados en vivo que el motor sí sabe evaluar. Exige cuota REAL en vivo:
+// sin cuota no hay EV, y sin EV no hay pick (nada de cuotas estimadas).
+const LIVE_MARKETS = [
+  { key: 'over15',         label: 'Más de 1.5 Goles',    cat: 'goals',   minProb: 0.62 },
+  { key: 'over25',         label: 'Más de 2.5 Goles',    cat: 'goals',   minProb: 0.52 },
+  { key: 'over35',         label: 'Más de 3.5 Goles',    cat: 'goals',   minProb: 0.45 },
+  { key: 'under25',        label: 'Menos de 2.5 Goles',  cat: 'goals',   minProb: 0.55 },
+  { key: 'under35',        label: 'Menos de 3.5 Goles',  cat: 'goals',   minProb: 0.60 },
+  { key: 'btts',           label: 'Ambos Marcan (Sí)',   cat: 'btts',    minProb: 0.55 },
+  { key: 'bttsNo',         label: 'Ambos Marcan (No)',   cat: 'btts',    minProb: 0.55 },
+  { key: 'cornersOver75',  label: 'Corners Over 7.5',    cat: 'corners', minProb: 0.56 },
+  { key: 'cornersOver85',  label: 'Corners Over 8.5',    cat: 'corners', minProb: 0.52 },
+  { key: 'cornersOver95',  label: 'Corners Over 9.5',    cat: 'corners', minProb: 0.48 },
+  { key: 'cornersOver105', label: 'Corners Over 10.5',   cat: 'corners', minProb: 0.42 },
+  { key: 'cornersUnder85', label: 'Corners Under 8.5',   cat: 'corners', minProb: 0.55 },
+  { key: 'cornersUnder95', label: 'Corners Under 9.5',   cat: 'corners', minProb: 0.55 },
+];
+
+const LIVE_MIN_EV     = 5;    // piso de EV en vivo
+const LIVE_MAX_EV     = 20;   // EV mayor contra cuota real = modelo mal calibrado
+const LIVE_FLOOR_ODDS = 1.50; // mismo piso que ya usaba la rama en vivo
+
+/**
+ * Candidatos del motor para un partido en vivo, ordenados por EV.
+ * Devuelve [] si no hay probabilidades, no hay cuotas en vivo, o nada supera
+ * los pisos. Un array vacío es una respuesta válida: significa "no hay valor".
+ */
+function buildLiveCandidates(probsLive, cuotasVivo = {}) {
+  if (!probsLive) return [];
+  const out = [];
+  for (const m of LIVE_MARKETS) {
+    const prob = (probsLive[m.key] ?? null) / 100;
+    const odds = parseFloat(cuotasVivo[m.key]);
+    if (!prob || isNaN(prob) || prob < m.minProb) continue;
+    if (!odds || isNaN(odds) || odds < LIVE_FLOOR_ODDS) continue;
+    const ev = calcEV(prob, odds);
+    if (ev === null || ev < LIVE_MIN_EV || ev > LIVE_MAX_EV) continue;
+    const kelly = ((prob * odds - 1) / (odds - 1)) * 100;
+    out.push({
+      key: m.key, market: m.key, marketLabel: m.label, cat: m.cat,
+      prob: +(prob * 100).toFixed(1), odds: +odds.toFixed(2), ev: +ev.toFixed(1),
+      // Tope 7: modelo nuevo y sin track record propio. Se sube cuando analiza_mercados.js lo respalde.
+      stake: Math.max(5, Math.min(7, 5 + Math.round(Math.max(0, kelly / 4)))),
+    });
+  }
+  // Un solo pick por familia: evita el Over 8.5 + Over 9.5 juntos.
+  const porFamilia = new Set();
+  return out
+    .sort((a, b) => b.ev - a.ev)
+    .filter(c => !porFamilia.has(c.cat) && porFamilia.add(c.cat));
+}
+
 // Córners POR EQUIPO (local/visitante). Apagados el 1-ago-2026 tras medir
 // 1W-4L (20%) en 72h siendo el 42% de los SuperPicks emitidos. El reparto
 // local/visitante no tiene contexto de partido — ver el comentario del bloque
@@ -9321,9 +9518,60 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       // Sin cuotas en vivo: el bot igual da picks con cuota sugerida mínima.
       // El usuario verifica en su casa si hay valor — necesita la DIRECCIÓN, no el número exacto.
     }
+    // ── Motor en vivo: recalcula lambdas con minuto, marcador y expulsados ────
+    // Antes esta rama no llamaba al motor y el LLM elegía los mercados a ojo.
+    let mandatoVivo = '';
+    try {
+      // Se reutilizan las variables ya calculadas arriba para el mensaje
+      // (homeCorners/awayCorners salen de liveStatsData['Corner Kicks']).
+      const basePrev  = analysisData.probabilidadesCalculadas || null;
+      const rojasHome = liveStatsData ? (homeStats(liveStatsData)?.['Red Cards'] ?? 0) : 0;
+      const rojasAway = liveStatsData ? (awayStats(liveStatsData)?.['Red Cards'] ?? 0) : 0;
+      const probsLive = basePrev ? calcLiveProbs({
+        homeLambda:    basePrev.homeLambda,
+        awayLambda:    basePrev.awayLambda,
+        cornersLambda: basePrev.cornersLambda,
+      }, {
+        minuto:           elapsed,
+        golesLocal:       liveHomeGoals,
+        golesVisitante:   liveAwayGoals,
+        cornersLocal:     homeCorners,
+        cornersVisitante: awayCorners,
+        rojasLocal:       rojasHome,
+        rojasVisitante:   rojasAway,
+      }) : null;
+
+      if (probsLive) {
+        analysisData.probabilidadesEnVivo = probsLive;
+        const cands = buildLiveCandidates(probsLive, liveOdds || {});
+        console.log(`⚡ Motor en vivo — min ${elapsed} | λ goles rest. ${probsLive._live.lambdaGolesRestantes} | λ córners rest. ${probsLive._live.lambdaCornersRestantes} | candidatos: ${cands.length}`);
+        if (cands.length) {
+          analysisData.picksMotorVivo = cands;
+          const lista = cands.map((c, i) => `${i + 1}. ${c.marketLabel} — cuota ${c.odds} — stake ${c.stake} (EV ${c.ev}%, prob ${c.prob}%)`).join('\n');
+          mandatoVivo =
+            `\n\n⛔ LISTA CERRADA DE PICKS — el motor recalculó las probabilidades con el minuto, el ` +
+            `marcador y los expulsados. Escribe EXACTAMENTE ${cands.length} pick(s), uno por línea de esta ` +
+            `lista, con el MISMO mercado y la MISMA línea:\n${lista}\n` +
+            `PROHIBIDO añadir mercados fuera de la lista (nada de córners por equipo, de mitades ni de ` +
+            `tarjetas), cambiar líneas o publicar menos. Redacta razonamiento y riesgo con los datos del JSON.`;
+          console.log(`🔒 Lista cerrada en vivo (${cands.length}): ${cands.map(c => c.marketLabel).join(' | ')}`);
+        } else {
+          mandatoVivo =
+            `\n\n⛔ El motor NO encontró ningún mercado con valor en este momento (ver ` +
+            `probabilidadesEnVivo). Escribe el análisis del partido y termina con la línea exacta ` +
+            `"⛔ Sin picks de valor en este momento." SIN proponer ningún pick.`;
+          console.log('⚡ Motor en vivo: 0 candidatos con valor — se instruye no publicar picks');
+        }
+      } else {
+        console.log('⚡ Motor en vivo: sin lambdas pre-partido o partido muy avanzado — el LLM analiza sin lista cerrada');
+      }
+    } catch (e) {
+      console.warn('⚠️ Motor en vivo falló, se sigue sin lista cerrada:', e.message);
+    }
+
     const analysisRaw = await sonnet(
       INPLAY_SYSTEM,
-      `Analiza este partido EN VIVO:\n\n${JSON.stringify(analysisData, null, 2)}`
+      `Analiza este partido EN VIVO:\n\n${JSON.stringify(analysisData, null, 2)}${mandatoVivo}`
     );
     let analysis = sanitizeLivePicks(analysisRaw, { mismoPartido: true }); // locks, mezclas y coherencia
     // GATE DURO también en vivo (antes esta rama hacía return sin pasar por él, y
