@@ -939,9 +939,35 @@ function teamCore(name) {
 // ciudad y otro equipo. Si no hay coincidencia exacta se cae a searchTeam(),
 // que puntúa con país, filiales y equipos femeninos. Fallar la búsqueda es
 // recuperable; analizar otro partido no.
+// Un candidato es MENOS ESPECÍFICO que la consulta si le faltan tokens que la
+// consulta sí trae (y esos tokens no son afijos de club). "Independiente" es
+// menos específico que "Independiente Medellín", y "Depor" que "Deportivo Cali":
+// son clubes DISTINTOS, no el mismo con adorno. Ese es el único caso que hay que
+// bloquear; todo lo demás (abreviaturas, afijos, tildes) debe seguir matcheando
+// como antes, porque de ahí salen los IDs que sí funcionan con el feed.
+function menosEspecifico(candCore, queryCore) {
+  if (!candCore || !queryCore || candCore === queryCore) return false;
+  const tc = new Set(candCore.split(' ').filter(Boolean));
+  const tq = queryCore.split(' ').filter(Boolean);
+  if (tq.length <= tc.size) return false;
+  // ¿La consulta tiene algún token propio que el candidato no cubre ni por
+  // prefijo? ("medellin" no está en {"independiente"} → menos específico.
+  //  "ind" vs "independiente": el candidato abrevia, no le falta información.)
+  return tq.some(t => t.length >= 4 && ![...tc].some(c => c.startsWith(t) || t.startsWith(c)));
+}
+
 function coreMatch(a, b) {
   if (!a || !b) return false;
-  return a === b;
+  if (a === b) return true;
+  // Guardia añadido el 1-ago-2026 — ver menosEspecifico(). SOLO en un sentido:
+  // a = nombre del candidato del feed, b = lo que pidió el usuario.
+  // Bloquear también el sentido inverso rompía la consulta corta legítima
+  // ("medellin" debe encontrar "Independiente Medellín").
+  if (menosEspecifico(a, b)) return false;
+  if (a.endsWith(' ' + b) || b.endsWith(' ' + a) || a.startsWith(b + ' ') || b.startsWith(a + ' ')) return true;
+  if (b.length >= 4 && a.includes(b)) return true;
+  if (a.length >= 4 && b.includes(a)) return true;
+  return false;
 }
 // Fixtures de API-Football por fecha (mejor cobertura que Highlightly en
 // clasificatorias/amistosos; APIF Pro). Cacheado 10 min. Ya vienen en formato APIF.
@@ -1419,16 +1445,24 @@ async function findTeamInFixtureCache(query) {
         // filiales y femeninos. Fallar la búsqueda es recuperable; analizar otro
         // partido no.
         const tCore = teamCore(t.name);
+        // Restaurados los tiers originales: de este caché salen los IDs que
+        // funcionan con el feed de partidos, y volverlo estricto hizo que se
+        // perdiera el partido EN VIVO (1-ago: pidió Medellín estando en juego
+        // Medellín vs Cali y devolvió un Tolima vs Medellín posterior).
+        // El único caso bloqueado es el candidato MENOS ESPECÍFICO que la
+        // consulta — "Independiente" para "Independiente Medellín".
         let s = 0;
-        if (tn === q) s = 100;                                     // nombre exacto
-        else if (qCore && tCore === qCore && qCore.length >= 4) s = 100; // mismo core: Benfica SL ↔ Benfica
+        if (menosEspecifico(tCore, qCore)) s = 0;
+        else if (tn === q) s = 100;
+        else if (tn.startsWith(q + ' ') || tn.endsWith(' ' + q)) s = 80;
+        else if (q.length >= 5 && tn.includes(q)) s = 60;
+        else if (coreMatch(tCore, qCore)) s = 70;   // afijos: Benfica SL ↔ Benfica, Pafos FC ↔ Pafos
         if (femYouth && s > 0) s -= 45;
         if (s > bestScore) { bestScore = s; best = { id: t.id, name: t.name }; }
       }
     }
   }
-  if (bestScore < 100) return null;
-  return best;
+  return bestScore >= 60 ? best : null;
 }
 
 async function searchTeam(name, countryHint = '') {
