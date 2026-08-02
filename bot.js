@@ -91,6 +91,15 @@ const HL_STATUS = {
   'Abandoned':       'ABD',
 };
 
+// Códigos de estado que significan PARTIDO EN JUEGO. Única fuente de verdad.
+// handlePartido tenía su propia lista ['1H','HT','2H','ET','P'] a la que le
+// faltaban BT (descanso), LIVE e INT — los tres los devuelve API-Football y los
+// dos primeros también Highlightly. Consecuencia (2-ago, Palmeiras vs
+// Fortaleza): el usuario pedía un partido EN JUEGO, el selector de fixtures sí
+// lo reconocía como activo, pero handlePartido lo mandaba por la rama de
+// PREPARTIDO — sin marcador, sin minuto y sin motor en vivo.
+const LIVE_SHORT = new Set(['1H', 'HT', '2H', 'ET', 'P', 'BT', 'LIVE', 'INT']);
+
 const LIVE_DESCS     = new Set(['First half', 'Half time', 'Second half', 'Extra time', 'Penalties', 'Break time']);
 const FINISHED_DESCS = new Set(['Finished', 'Finished (AET)', 'Finished (PEN)']);
 // La lista exacta NO cubre todas las variantes que devuelve Highlightly: se vio en
@@ -9339,7 +9348,15 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const leagueId = nextRaw.league.id;
   const homeTeam = nextRaw.teams.home.name;
   const awayTeam = nextRaw.teams.away.name;
-  const isLive   = ['1H','HT','2H','ET','P'].includes(nextRaw.fixture?.status?.short);
+  // Red de seguridad además de la lista: si el feed reporta minuto transcurrido
+  // y el partido no está terminado ni aplazado, está en juego aunque el código
+  // de estado sea uno que no conocemos.
+  const _st      = nextRaw.fixture?.status?.short;
+  const _elapsed = Number(nextRaw.fixture?.status?.elapsed) || 0;
+  const _muerto  = ['FT','AET','PEN','PST','CANC','ABD','AWD','WO','SUSP'].includes(_st);
+  const isLive   = LIVE_SHORT.has(_st) || (_elapsed > 0 && !_muerto && _st !== 'NS');
+  if (isLive) console.log(`⏱️  Partido EN VIVO detectado: estado="${_st}" min=${_elapsed}`);
+  else if (_elapsed > 0) console.log(`⏱️  Estado "${_st}" con min=${_elapsed} tratado como PREPARTIDO — revisar si es correcto`);
 
   // ── Caché corto por partido (solo PRE-partido — en vivo cambia demasiado
   // rápido para cachear, un gol invalida el análisis) — evita repetir toda la
