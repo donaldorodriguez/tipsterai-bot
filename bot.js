@@ -923,13 +923,25 @@ function teamCore(name) {
   const toks = _eloKey(String(name || '')).split(' ').filter(t => t && !_CLUB_AFFIX.has(t));
   return (toks.length ? toks.join(' ') : _eloKey(String(name || ''))).trim();
 }
+// Dos nombres son el MISMO equipo solo si sus cores coinciden exactamente.
+// teamCore ya quita los afijos de club (FC, SL, CF…), así que "Benfica SL" y
+// "Benfica" llegan aquí como "benfica" y coinciden.
+//
+// Lo que ya NO se acepta, y por qué (casos reales del 1-ago-2026):
+//   "Independiente"  vs "Independiente Medellín"  → clubes DISTINTOS
+//   "Depor FC"       vs "Deportivo Cali"          → clubes DISTINTOS
+//   "Nacional"       vs "Atlético Nacional"       → clubes DISTINTOS
+// Antes bastaba con que un nombre fuera prefijo, sufijo o subcadena del otro, y
+// el bot terminaba analizando el partido equivocado: le pedían Independiente
+// Medellín y respondía con Vélez vs Independiente de Argentina.
+//
+// Una palabra extra en el nombre de un club casi nunca es decoración: es otra
+// ciudad y otro equipo. Si no hay coincidencia exacta se cae a searchTeam(),
+// que puntúa con país, filiales y equipos femeninos. Fallar la búsqueda es
+// recuperable; analizar otro partido no.
 function coreMatch(a, b) {
   if (!a || !b) return false;
-  if (a === b) return true;
-  if (a.endsWith(' ' + b) || b.endsWith(' ' + a) || a.startsWith(b + ' ') || b.startsWith(a + ' ')) return true;
-  if (b.length >= 4 && a.includes(b)) return true;
-  if (a.length >= 4 && b.includes(a)) return true;
-  return false;
+  return a === b;
 }
 // Fixtures de API-Football por fecha (mejor cobertura que Highlightly en
 // clasificatorias/amistosos; APIF Pro). Cacheado 10 min. Ya vienen en formato APIF.
@@ -1394,17 +1406,29 @@ async function findTeamInFixtureCache(query) {
       for (const t of [h, a]) {
         if (!t?.name || t?.id == null) continue;
         const tn = normalizeTeamName(t.name);
+        // ── Solo coincidencia EXACTA ──────────────────────────────────────────
+        // Este caché se consulta ANTES que la API, así que un match flojo aquí
+        // secuestra la búsqueda entera. Los tiers laxos (prefijo/sufijo/subcadena)
+        // hacían que el bot analizara el partido equivocado:
+        //   "Independiente Medellín" → Independiente (Argentina)   [1-ago-2026]
+        //   "Deportivo Cali"         → Depor FC (Primera B)        [1-ago-2026]
+        // "Independiente" es prefijo de "Independiente Medellín" y son clubes
+        // DISTINTOS; lo mismo "Depor" dentro de "Deportivo". Un nombre contenido
+        // en otro no significa que sean el mismo equipo.
+        // Si no hay match exacto se cae a searchTeam(), que sí puntúa con país,
+        // filiales y femeninos. Fallar la búsqueda es recuperable; analizar otro
+        // partido no.
+        const tCore = teamCore(t.name);
         let s = 0;
-        if (tn === q) s = 100;
-        else if (tn.startsWith(q + ' ') || tn.endsWith(' ' + q)) s = 80;
-        else if (q.length >= 5 && tn.includes(q)) s = 60;
-        else if (coreMatch(teamCore(t.name), qCore)) s = 70;   // afijos: Benfica SL ↔ Benfica, Pafos FC ↔ Pafos
+        if (tn === q) s = 100;                                     // nombre exacto
+        else if (qCore && tCore === qCore && qCore.length >= 4) s = 100; // mismo core: Benfica SL ↔ Benfica
         if (femYouth && s > 0) s -= 45;
         if (s > bestScore) { bestScore = s; best = { id: t.id, name: t.name }; }
       }
     }
   }
-  return bestScore >= 60 ? best : null;
+  if (bestScore < 100) return null;
+  return best;
 }
 
 async function searchTeam(name, countryHint = '') {
