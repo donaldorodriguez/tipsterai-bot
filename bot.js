@@ -6381,6 +6381,8 @@ Ejemplos:
 - "analiza el Real Madrid" → {"intencion":"partido_especifico","equipo":"Real Madrid","liga":null,"pregunta_especifica":"analiza el Real Madrid","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
 - "analiza Francia" → {"intencion":"partido_especifico","equipo":"Francia","liga":null,"pregunta_especifica":"analiza Francia","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
 - "analiza Brasil" → {"intencion":"partido_especifico","equipo":"Brasil","liga":null,"pregunta_especifica":"analiza Brasil","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
+- "junior" → {"intencion":"partido_especifico","equipo":"Junior","liga":null,"pregunta_especifica":"junior","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
+- REGLA: un nombre de club solo, sin más texto, ES una petición de análisis de ese equipo — nunca el nombre de la persona. Aplica a clubes colombianos ("junior", "medellin", "nacional", "millonarios", "cali", "tolima", "junior de barranquilla") y a cualquier club conocido.
 - "picks Francia" → {"intencion":"partido_especifico","equipo":"Francia","liga":null,"pregunta_especifica":"picks Francia","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
 - "picks Brasil" → {"intencion":"partido_especifico","equipo":"Brasil","liga":null,"pregunta_especifica":"picks Brasil","mercado":null,"tiempo":null,"contexto":"proximo_partido","period":null}
 - "Colombia hoy" → {"intencion":"partido_especifico","equipo":"Colombia","liga":null,"pregunta_especifica":"Colombia hoy","mercado":null,"tiempo":null,"contexto":"hoy","period":null}
@@ -6612,7 +6614,12 @@ function validateStake(pick, probBlock) {
 async function applyStakeGate(picksText, enriched, matchesCtx, opts = {}) {
   try {
     const extracted = await extractPicksFromText(picksText, matchesCtx);
-    if (!extracted.length) { opts.extractedPicks = []; return picksText; }
+    // Sin picks extraídos NO se retorna temprano: el sanitizador de lenguaje
+    // interno de más abajo tiene que correr igual. El retorno temprano fue la
+    // causa de que el 1-ago un análisis sin picks llegara al cliente listando
+    // "statsLocal = null" y "probabilidadesCalculadas = ausente" — los patrones
+    // estaban en LEAK_PATTERNS pero nunca se evaluaron.
+    if (!extracted.length) opts.extractedPicks = [];
 
     let correctedText = picksText;
     let highStakeCount = 0;
@@ -8011,7 +8018,7 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   // eligiendo del mismo bolsa. Pedido del usuario (1-ago): que sean los mismos,
   // los de mayor EV y probabilidad. Ahora comparten filtro y orden:
   // EV ≥ 8, prob ≥ 60, cuota real ≥ 1.65, sin cuotas sintéticas, orden por EV.
-  const rankedHoy = rankSuperPickCandidates(candidates, enriched);
+  const rankedHoy = rankSuperPickCandidates(candidates, enriched, new Date(), { minKickoffMin: 5 });
   const vistosFx  = new Set();
   const topPicks  = [];
   for (const c of rankedHoy) {
@@ -8026,17 +8033,11 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
     topPicks.forEach((p, i) => console.log(`   ${i + 1}. ${p.marketLabel} | EV ${p.ev}% | prob ${p.prob}% | cuota ${p.odds} — ${p.local} vs ${p.visitante}`));
   }
 
-  // Sin candidatos que pasen el filtro → se dice, no se rellena con lo que sea.
-  if (!topPicks.length) {
-    console.log('📅 Picks del día: ningún candidato pasa el filtro de calidad — no se publica nada');
-    return bot.sendMessage(
-      chatId,
-      `📅 *PICKS DEL DÍA — ${today}*\n\n⛔ Hoy ningún partido pasa el filtro del modelo.\n\n` +
-      `Se revisó la jornada completa: ${candidates.length} candidatos analizados, ninguno alcanza el mínimo de valor (EV y probabilidad).\n\n` +
-      `_Preferimos un día en blanco antes que inventar un pick._`,
-      { parse_mode: 'Markdown' }
-    );
-  }
+  // Sin candidatos NO se retorna aquí: el else de topPicksFinal (más abajo) ya
+  // maneja el día en blanco con mensaje honesto Y caché de 30 min. El retorno
+  // temprano que hubo aquí el 1-ago se saltaba ese caché: cada "picks de hoy"
+  // repetía el pipeline completo de APIs — la misma clase de fuga de cuota que
+  // ya costó un mes de plan de Highlightly en julio.
 
   // ── Lesionados/sancionados para los picks seleccionados ────────────────────
   // Solo consultamos los 3 fixtures finales → máximo 3 llamadas API extra.
@@ -8331,14 +8332,19 @@ function superPickMercado(marketKey) {
   return String(marketKey || 'OTHER').toUpperCase();
 }
 
-function rankSuperPickCandidates(candidates, enriched, now = new Date()) {
+function rankSuperPickCandidates(candidates, enriched, now = new Date(), opts = {}) {
   const fechaByFixture = new Map(enriched.map(e => [e.fixtureId, e.fechaPartido]));
+  // El piso de 90 min existe para el PLAN del SuperPick (congelar/servir con
+  // margen). Para los picks del día ese piso escondía partidos que arrancan en
+  // menos de 90 min — un pick perfectamente jugable a las 2pm para el partido de
+  // las 3pm desaparecía. El caller elige su piso; el default sigue siendo 90.
+  const minKick = opts.minKickoffMin ?? SUPERPICK_MIN_KICKOFF_MIN;
   return candidates
     .filter(c => {
       const fecha = fechaByFixture.get(c.fixtureId);
       if (!fecha) return false;
       const minAhead = (new Date(fecha) - now) / 60000;
-      if (minAhead < SUPERPICK_MIN_KICKOFF_MIN) return false;        // ya jugado o demasiado próximo
+      if (minAhead < minKick) return false;                          // ya jugado o demasiado próximo
       if (c.odds == null || c.odds < PUBLISH_MIN_ODDS) return false;  // piso de producto
       if (c._syntheticOdds) return false;                             // solo EV validado contra cuota REAL
       if (c.esCombinada && (c.legs || []).length !== 2) return false; // mini combinada: 2 patas, mismo partido
@@ -9582,13 +9588,23 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     try {
       // Se reutilizan las variables ya calculadas arriba para el mensaje
       // (homeCorners/awayCorners salen de liveStatsData['Corner Kicks']).
+      // ⚠️ Las lambdas de goles viven en probBlock.modeloPoisson.xGLocal/xGVisitante
+      // — probBlock NO tiene homeLambda/cornersLambda al tope. La versión inicial
+      // leía basePrev.homeLambda (inexistente) → lambdas 0 → 0 candidatos SIEMPRE:
+      // el motor en vivo nació muerto y ningún log lo delataba (detectado en la
+      // auditoría del 2-ago). Córners: probBlock no los modela — se arma la lambda
+      // desde los promedios reales por partido de cada equipo (~4.8 de default).
       const basePrev  = analysisData.probabilidadesCalculadas || null;
       const rojasHome = liveStatsData ? (homeStats(liveStatsData)?.['Red Cards'] ?? 0) : 0;
       const rojasAway = liveStatsData ? (awayStats(liveStatsData)?.['Red Cards'] ?? 0) : 0;
-      const probsLive = basePrev ? calcLiveProbs({
-        homeLambda:    basePrev.homeLambda,
-        awayLambda:    basePrev.awayLambda,
-        cornersLambda: basePrev.cornersLambda,
+      const lamHome   = parseFloat(basePrev?.modeloPoisson?.xGLocal);
+      const lamAway   = parseFloat(basePrev?.modeloPoisson?.xGVisitante);
+      const lamCorners = (parseFloat(homeRealStats?.cornersPerGame) || 4.8)
+                       + (parseFloat(awayRealStats?.cornersPerGame) || 4.8);
+      const probsLive = (lamHome > 0 && lamAway > 0) ? calcLiveProbs({
+        homeLambda:    lamHome,
+        awayLambda:    lamAway,
+        cornersLambda: lamCorners,
       }, {
         minuto:           elapsed,
         golesLocal:       liveHomeGoals,
