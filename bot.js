@@ -9758,6 +9758,20 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
       `o publicar menos de los que hay. Tu trabajo es redactar razonamiento y riesgo con los datos del ` +
       `JSON, no elegir el mercado.`;
     console.log(`🔒 Lista cerrada al LLM (${partidoPicks.length}): ${partidoPicks.map(p => p.marketLabel || p.market).join(' | ')}`);
+  } else {
+    // Sin candidatos del motor el LLM se inventaba el análisis entero: mercados
+    // que el motor no calcula, y hasta el nombre de la temporada (1-ago-2026,
+    // Tolima vs DIM: "Clausura 2025, Jornada 3" con el JSON vacío). Aquí se
+    // corta. Es la misma regla del canal: si no hay datos, no hay pick.
+    mandatoMotor =
+      `\n\n⛔ EL MOTOR NO ENCONTRÓ NINGÚN MERCADO CON VALOR en este partido (sin estadísticas ` +
+      `suficientes o sin cuota real). PROHIBIDO emitir picks. Escribe solo el contexto del partido con ` +
+      `los datos que SÍ existan en el JSON y termina con la línea exacta:\n` +
+      `"⛔ Sin picks de valor en este partido."\n` +
+      `PROHIBIDO inventar temporada, jornada, estadísticas, rachas o historial que no estén en el JSON. ` +
+      `Si un dato no está, no se menciona. PROHIBIDO nombrar campos internos (statsLocal, JSON, ` +
+      `probabilidadesCalculadas): al cliente se le habla en su idioma, no en el del código.`;
+    console.log('🔒 Sin candidatos del motor — se instruye NO publicar picks ni inventar contexto');
   }
   analysis = await sonnet(
     PARTIDO_DEEP_SYSTEM,
