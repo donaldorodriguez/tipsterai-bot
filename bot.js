@@ -4471,6 +4471,11 @@ const LIVE_MARKETS = [
 const LIVE_MIN_EV     = 5;    // piso de EV en vivo
 const LIVE_MAX_EV     = 20;   // EV mayor contra cuota real = modelo mal calibrado
 const LIVE_FLOOR_ODDS = 1.50; // mismo piso que ya usaba la rama en vivo
+// Respaldo con cuota estimada (opción acordada con el usuario el 3-ago): sin
+// mercado real contra el cual medir no hay EV, así que el listón sube por el
+// lado de la probabilidad y el stake se capa.
+const LIVE_EST_MARGEN_PROB = 0.06;  // +6 puntos sobre el mínimo normal del mercado
+const LIVE_EST_MAX_STAKE   = 6;     // nunca más de 6 sin cuota real
 
 /**
  * Candidatos del motor para un partido en vivo, ordenados por EV.
@@ -4538,6 +4543,40 @@ function buildLiveCandidates(probsLive, cuotasVivo = {}) {
   // log los dos casos se veían idénticos ("0 candidatos") y por eso el bug de
   // las cuotas de córners pasó desapercibido.
   if (faltanCuota.length) console.log(`⚡ Sin cuota en vivo para: ${faltanCuota.join(', ')}`);
+
+  // ── Respaldo con CUOTA ESTIMADA ────────────────────────────────────────────
+  // Solo si no hubo NI UN candidato con cuota real. Muchas ligas no tienen
+  // mercado en vivo del bookmaker (Armenia, Irlanda, ligas menores) y exigir
+  // cuota real dejaba esos partidos en "sin picks de valor" siempre.
+  // Diferencia clave con lo que había antes del 1-ago: la probabilidad la
+  // calcula el MOTOR, no se la inventa el LLM. Lo estimado es solo el precio.
+  // Sin mercado contra el cual medir no hay EV real, así que el criterio pasa a
+  // ser probabilidad alta + precio vendible, con stake tope 6 y etiqueta visible.
+  if (!out.length) {
+    const est = [];
+    for (const m of LIVE_MARKETS) {
+      const prob = (probsLive[m.key] ?? null) / 100;
+      if (!prob || isNaN(prob)) continue;
+      if (prob < m.minProb + LIVE_EST_MARGEN_PROB) continue;   // listón más alto sin mercado
+      const justa = (1 / prob) * 1.05;                          // 5% de margen de casa
+      if (justa < LIVE_FLOOR_ODDS) continue;                    // precio invendible
+      est.push({
+        key: m.key, market: m.key, cat: m.cat,
+        marketLabel: m.label, estimada: true,
+        prob: +(prob * 100).toFixed(1), odds: +justa.toFixed(2), ev: null,
+        stake: Math.min(LIVE_EST_MAX_STAKE, prob >= 0.70 ? 6 : 5),
+      });
+    }
+    const famEst = new Set();
+    const elegidos = est
+      .sort((a, b) => b.prob - a.prob)
+      .filter(c => !famEst.has(c.cat) && famEst.add(c.cat))
+      .slice(0, 2);
+    if (elegidos.length) {
+      console.log(`🟡 Sin cuota real en vivo — ${elegidos.length} pick(s) con CUOTA ESTIMADA: ${elegidos.map(c => `${c.marketLabel} ~${c.odds} (prob ${c.prob}%)`).join(' | ')}`);
+      return elegidos;
+    }
+  }
 
   // Un solo pick por familia: evita el Over 8.5 + Over 9.5 juntos.
   const porFamilia = new Set();
@@ -10042,13 +10081,20 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
         console.log(`⚡ Motor en vivo — min ${elapsed} | λ goles ${probsLive._live.lambdaGolesRestantes} | λ córners ${probsLive._live.lambdaCornersRestantes} | λ tarjetas ${probsLive._live.lambdaCardsRestantes} (cautela ${probsLive._live.factorCautelaTarjetas}) | candidatos: ${cands.length}`);
         if (cands.length) {
           analysisData.picksMotorVivo = cands;
-          const lista = cands.map((c, i) => `${i + 1}. ${c.marketLabel} — cuota ${c.odds} — stake ${c.stake} (EV ${c.ev}%, prob ${c.prob}%)`).join('\n');
+          const hayEstimadas = cands.some(c => c.estimada);
+          const lista = cands.map((c, i) => c.estimada
+            ? `${i + 1}. ${c.marketLabel} — CUOTA ESTIMADA ~${c.odds} (el bookmaker no ofrece este mercado en vivo) — stake ${c.stake} — prob del modelo ${c.prob}%`
+            : `${i + 1}. ${c.marketLabel} — cuota ${c.odds} — stake ${c.stake} (EV ${c.ev}%, prob ${c.prob}%)`
+          ).join('\n');
           mandatoVivo =
             `\n\n⛔ LISTA CERRADA DE PICKS — el motor recalculó las probabilidades con el minuto, el ` +
             `marcador y los expulsados. Escribe EXACTAMENTE ${cands.length} pick(s), uno por línea de esta ` +
             `lista, con el MISMO mercado y la MISMA línea:\n${lista}\n` +
             `PROHIBIDO añadir mercados fuera de la lista (nada de córners por equipo, de mitades ni de ` +
-            `tarjetas), cambiar líneas o publicar menos. Redacta razonamiento y riesgo con los datos del JSON.`;
+            `tarjetas), cambiar líneas o publicar menos. Redacta razonamiento y riesgo con los datos del JSON.` +
+            (hayEstimadas
+              ? `\n⚠️ Los picks marcados como CUOTA ESTIMADA no tienen precio del bookmaker en vivo: escribe la cuota como "est. ~X.XX" y añade en el bloque la línea "⚠️ Cuota estimada por el modelo — verifica el precio real en tu casa antes de jugarla". No la presentes como cuota confirmada.`
+              : '');
           console.log(`🔒 Lista cerrada en vivo (${cands.length}): ${cands.map(c => c.marketLabel).join(' | ')}`);
         } else {
           mandatoVivo =
