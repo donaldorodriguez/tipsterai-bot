@@ -2612,9 +2612,6 @@ function sanitizeLivePicks(text, opts = {}) {
     // Córners POR EQUIPO: apagados en el motor el 1-ago (20% de acierto medido).
     // El LLM los seguía escribiendo por su cuenta en partido específico y en
     // vivo, así que el veto también tiene que ser determinista aquí.
-    if (/c[óo]rner/.test(header) && /(local|visitante|de local|del visitante|casa|fuera)/.test(header) &&
-        !/total|partido completo/.test(header))
-      return 'córners por equipo (mercado vetado: 20% de acierto medido, reparto ciego al contexto)';
     return null;
   };
 
@@ -4366,15 +4363,34 @@ const CALIB_DISABLE_ROI = -15;  // ROI % por debajo del cual se desactiva
 const CALIB_REC_N       = 10;   // tamaño de la ventana reciente por familia
 const CALIB_REC_MIN_N   = 6;    // mínimo para tomarla en serio
 const CALIB_REC_HIT     = 35;   // % de acierto por debajo del cual se penaliza
+// Desactivación por racha: más exigente que la penalización, porque apaga el
+// mercado entero. 8 picks y ≤30% = 2 o menos aciertos de 8. Es la regla que
+// hacía falta para que la calibración actúe sola, sin apagados manuales.
+const CALIB_REC_DISABLE_N   = 8;
+const CALIB_REC_DISABLE_HIT = 30;
 
 function getMarketCalibration(force = false) {
   if (!force && _calibCache.data && Date.now() - _calibCache.ts < CALIB_TTL) return _calibCache.data;
   const out = {};
   try {
-    const picks = loadPicks().filter(p =>
-      // superpick excluido: duplicaría picks del día ya contados en la calibración
-      ['W', 'L'].includes(p.resultado) && !p.esCombinada && !['alerta_gol', 'superpick'].includes(p.source)
-    );
+    // ⚠️ LOS SUPERPICKS SÍ CUENTAN. Estaban excluidos con el argumento de que
+    // "duplicarían picks del día", pero no son los mismos picks: el plan del
+    // SuperPick y los picks del día se elegían con criterios distintos. El
+    // resultado era que el producto estrella del motor NO alimentaba su propio
+    // aprendizaje: cada córner de visitante y cada tarjeta que se perdía como
+    // SuperPick era invisible para la calibración, y por eso el motor seguía
+    // emitiendo mercados que llevaban semanas fallando (3-ago).
+    // La duplicación real se evita deduplicando por partido+mercado+línea, que
+    // es lo que había que hacer desde el principio.
+    const _vistos = new Set();
+    const picks = loadPicks().filter(p => {
+      if (!['W', 'L'].includes(p.resultado) || p.esCombinada) return false;
+      if (p.source === 'alerta_gol') return false;
+      const k = `${p.fixtureId || p.local + p.visitante}|${p.mercado}|${p.linea ?? ''}`;
+      if (_vistos.has(k)) return false;
+      _vistos.add(k);
+      return true;
+    });
     const CARDS_CORNERS = new Set(['OVER_CARDS', 'UNDER_CARDS', 'OVER_CORNERS', 'UNDER_CORNERS']);
     const fam = {};
     for (const p of picks) {
@@ -4407,14 +4423,22 @@ function getMarketCalibration(force = false) {
       if (s.n >= CALIB_MIN_N && avgImplied > 0) {
         factor = Math.max(0.75, Math.min(1.10, hitRate / avgImplied));
       }
-      const disabled = s.nRoi >= CALIB_DISABLE_N && roi !== null && roi < CALIB_DISABLE_ROI;
-
       // ── Racha reciente: últimos N picks liquidados de la familia ─────────────
       const recientes = s.hist.sort((a, b) => a.t - b.t).slice(-CALIB_REC_N);
       const nRec   = recientes.length;
       const wRec   = recientes.filter(x => x.r === 'W').length;
       const hitRec = nRec ? +((wRec / nRec) * 100).toFixed(1) : null;
       const enRacha = nRec >= CALIB_REC_MIN_N && hitRec <= CALIB_REC_HIT;
+
+      // Desactivación: por ROI de vida (lenta, necesita 20 picks) O por racha
+      // reciente clara. La regla vieja sola era demasiado lenta — un mercado con
+      // 8 de sus últimos 10 perdidos seguía emitiéndose porque su ROI histórico
+      // aún no bajaba de -15%. Esta es la que el usuario esperaba que existiera:
+      // el motor deja de dar los mercados donde está fallando, sin necesidad de
+      // que nadie los apague a mano.
+      const porRoiVida  = s.nRoi >= CALIB_DISABLE_N && roi !== null && roi < CALIB_DISABLE_ROI;
+      const porRachaMala = nRec >= CALIB_REC_DISABLE_N && hitRec !== null && hitRec <= CALIB_REC_DISABLE_HIT;
+      const disabled = porRoiVida || porRachaMala;
 
       out[fk] = {
         n: s.n, hitRate: +(hitRate * 100).toFixed(1),
@@ -4424,7 +4448,7 @@ function getMarketCalibration(force = false) {
         clv: s.clvN ? +(s.clvSum / s.clvN).toFixed(2) : null, clvN: s.clvN,
         nRec, hitRec, enRachaMala: enRacha,
       };
-      if (disabled) console.log(`🚫 Mercado ${fk} auto-desactivado: ROI ${roi?.toFixed(1)}% en ${s.nRoi} picks`);
+      if (disabled) console.log(`🚫 Mercado ${fk} AUTO-DESACTIVADO por ${porRachaMala ? `racha: ${wRec}/${nRec} (${hitRec}%) en los últimos` : `ROI de vida ${roi?.toFixed(1)}% en ${s.nRoi} picks`}`);
       if (enRacha)  console.log(`📉 Mercado ${fk} EN RACHA MALA: ${wRec}/${nRec} (${hitRec}%) en los últimos ${nRec} — ROI de vida ${roi?.toFixed(1)}% en ${s.n}. Se penaliza EV y stake.`);
     }
   } catch (e) { console.error('getMarketCalibration:', e.message); }
@@ -4754,7 +4778,8 @@ function buildLiveCandidates(probsLive, cuotasVivo = {}) {
 // 1W-4L (20%) en 72h siendo el 42% de los SuperPicks emitidos. El reparto
 // local/visitante no tiene contexto de partido — ver el comentario del bloque
 // de mercados. Poner en true solo cuando ese reparto sepa quién va a atacar.
-const TEAM_CORNERS_ON = false;
+const TEAM_CORNERS_ON = true;   // reactivado 3-ago: ahora la calibración SÍ ve sus resultados
+                                // (los SuperPicks ya cuentan) y los apaga sola si siguen fallando
 
 function buildPickCandidates(enrichedFixtures) {
   const candidates = [];
@@ -8894,7 +8919,7 @@ const SUPERPICK_MAX_PICKS        = 99;   // SIN tope de cupos (pedido del usuari
                                          // (EV≥8, prob≥60, cuota real), no un cupo arbitrario.
 const SUPERPICK_BUILD_FROM_HOUR  = 6;    // hora Col desde la que se construye el plan
 const SUPERPICK_REFRESH_MIN      = 90;   // re-optimización de picks no bloqueados
-const SUPERPICK_MIN_EV           = 8;    // piso de EV para ENTRAR como SuperPick — no headline picks
+const SUPERPICK_MIN_EV           = 5;    // piso de EV para ENTRAR como SuperPick — no headline picks
                                          // marginales (ej. EV 3.6% en tarjetas). Los frozen que
                                          // caigan por debajo se conservan (estabilidad); los extras
                                          // tienen su propio piso (EXTRAPICK_MIN_EV = 10).
@@ -10263,10 +10288,12 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
           console.log(`🔒 Lista cerrada en vivo (${cands.length}): ${cands.map(c => c.marketLabel).join(' | ')}`);
         } else {
           mandatoVivo =
-            `\n\n⛔ El motor NO encontró ningún mercado con valor en este momento (ver ` +
-            `probabilidadesEnVivo). Escribe el análisis del partido y termina con la línea exacta ` +
-            `"⛔ Sin picks de valor en este momento." SIN proponer ningún pick.`;
-          console.log('⚡ Motor en vivo: 0 candidatos con valor — se instruye no publicar picks');
+            `\n\n⚠️ El motor no encontró mercados con cuota real en este momento (ver ` +
+            `probabilidadesEnVivo, que SÍ trae probabilidades calculadas del estado actual). Puedes ` +
+            `proponer picks apoyándote en esas probabilidades, con cuota marcada como estimada ` +
+            `("est. ~X.XX"), stake máximo 6 y la advertencia de verificar el precio real. ` +
+            `PROHIBIDO inventar mercados que no estén en probabilidadesEnVivo.`;
+          console.log('🔓 Motor en vivo: 0 candidatos con cuota real — el analista puede proponer con estimada (stake ≤6)');
         }
       } else {
         console.log('⚡ Motor en vivo: sin lambdas pre-partido o partido muy avanzado — el LLM analiza sin lista cerrada');
@@ -10438,15 +10465,19 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
     // que el motor no calcula, y hasta el nombre de la temporada (1-ago-2026,
     // Tolima vs DIM: "Clausura 2025, Jornada 3" con el JSON vacío). Aquí se
     // corta. Es la misma regla del canal: si no hay datos, no hay pick.
+    // Antes esto PROHIBÍA emitir picks y el partido salía siempre con "sin picks
+    // de valor". Se retira esa prohibición (pedido del usuario 3-ago): el motor
+    // no encontró nada con cuota real, pero el analista puede proponer con los
+    // datos que sí hay. Lo que se mantiene es la prohibición de INVENTAR, que es
+    // lo que produjo el "Clausura 2025" y los campos internos en pantalla.
     mandatoMotor =
-      `\n\n⛔ EL MOTOR NO ENCONTRÓ NINGÚN MERCADO CON VALOR en este partido (sin estadísticas ` +
-      `suficientes o sin cuota real). PROHIBIDO emitir picks. Escribe solo el contexto del partido con ` +
-      `los datos que SÍ existan en el JSON y termina con la línea exacta:\n` +
-      `"⛔ Sin picks de valor en este partido."\n` +
+      `\n\n⚠️ El motor no encontró mercados con cuota real validada en este partido. Puedes proponer ` +
+      `picks con los datos que SÍ existan en el JSON, pero marca la cuota como estimada ("est. ~X.XX") ` +
+      `y usa stake máximo 6.\n` +
       `PROHIBIDO inventar temporada, jornada, estadísticas, rachas o historial que no estén en el JSON. ` +
       `Si un dato no está, no se menciona. PROHIBIDO nombrar campos internos (statsLocal, JSON, ` +
       `probabilidadesCalculadas): al cliente se le habla en su idioma, no en el del código.`;
-    console.log('🔒 Sin candidatos del motor — se instruye NO publicar picks ni inventar contexto');
+    console.log('🔓 Sin candidatos del motor — el analista puede proponer con cuota estimada (stake ≤6)');
   }
   analysis = await sonnet(
     PARTIDO_DEEP_SYSTEM,
