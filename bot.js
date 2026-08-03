@@ -4156,6 +4156,12 @@ const CALIB_TTL         = 6 * 60 * 60 * 1000;
 const CALIB_MIN_N       = 15;   // mínimo de picks evaluados para ajustar probs
 const CALIB_DISABLE_N   = 20;   // mínimo para auto-desactivar un mercado
 const CALIB_DISABLE_ROI = -15;  // ROI % por debajo del cual se desactiva
+// Racha reciente: el ROI de vida entera no ve un mercado que se acaba de dar
+// vuelta. OVER_CARDS iba +13.6% en 50 picks — ni el ancla ni la desactivación lo
+// tocaban — mientras llevaba una semana sin acertar uno.
+const CALIB_REC_N       = 10;   // tamaño de la ventana reciente por familia
+const CALIB_REC_MIN_N   = 6;    // mínimo para tomarla en serio
+const CALIB_REC_HIT     = 35;   // % de acierto por debajo del cual se penaliza
 
 function getMarketCalibration(force = false) {
   if (!force && _calibCache.data && Date.now() - _calibCache.ts < CALIB_TTL) return _calibCache.data;
@@ -4173,8 +4179,13 @@ function getMarketCalibration(force = false) {
       // representan a las ligas de clubes (contención FIFA hunde las tarjetas) → se
       // excluyen del ROI que ancla el EV, para no castigar a ligas de clubes cargadas.
       if (CARDS_CORNERS.has(fk) && esTorneoSelecciones(p.liga)) continue;
-      if (!fam[fk]) fam[fk] = { n: 0, w: 0, sumImplied: 0, nImplied: 0, roiUnits: 0, nRoi: 0, clvSum: 0, clvN: 0 };
+      if (!fam[fk]) fam[fk] = { n: 0, w: 0, sumImplied: 0, nImplied: 0, roiUnits: 0, nRoi: 0, clvSum: 0, clvN: 0, hist: [] };
       const s = fam[fk];
+      // Historial ordenable para medir la RACHA RECIENTE. El ROI de vida entera
+      // no ve un mercado que se acaba de dar vuelta: OVER_CARDS iba +13.6% en 50
+      // picks y por eso ni el ancla ni la desactivación lo tocaban, mientras
+      // llevaba una semana sin acertar uno (queja del usuario, 3-ago).
+      s.hist.push({ t: new Date(p.fechaPartido || p.emitidoAt || 0).getTime(), r: p.resultado, c: parseFloat(p.cuota) });
       s.n++;
       if (p.resultado === 'W') s.w++;
       const c = parseFloat(p.cuota);
@@ -4193,14 +4204,24 @@ function getMarketCalibration(force = false) {
         factor = Math.max(0.75, Math.min(1.10, hitRate / avgImplied));
       }
       const disabled = s.nRoi >= CALIB_DISABLE_N && roi !== null && roi < CALIB_DISABLE_ROI;
+
+      // ── Racha reciente: últimos N picks liquidados de la familia ─────────────
+      const recientes = s.hist.sort((a, b) => a.t - b.t).slice(-CALIB_REC_N);
+      const nRec   = recientes.length;
+      const wRec   = recientes.filter(x => x.r === 'W').length;
+      const hitRec = nRec ? +((wRec / nRec) * 100).toFixed(1) : null;
+      const enRacha = nRec >= CALIB_REC_MIN_N && hitRec <= CALIB_REC_HIT;
+
       out[fk] = {
         n: s.n, hitRate: +(hitRate * 100).toFixed(1),
         avgImplied: avgImplied != null ? +(avgImplied * 100).toFixed(1) : null,
         roi: roi != null ? +roi.toFixed(1) : null,
         factor: +factor.toFixed(3), disabled,
         clv: s.clvN ? +(s.clvSum / s.clvN).toFixed(2) : null, clvN: s.clvN,
+        nRec, hitRec, enRachaMala: enRacha,
       };
       if (disabled) console.log(`🚫 Mercado ${fk} auto-desactivado: ROI ${roi?.toFixed(1)}% en ${s.nRoi} picks`);
+      if (enRacha)  console.log(`📉 Mercado ${fk} EN RACHA MALA: ${wRec}/${nRec} (${hitRec}%) en los últimos ${nRec} — ROI de vida ${roi?.toFixed(1)}% en ${s.n}. Se penaliza EV y stake.`);
     }
   } catch (e) { console.error('getMarketCalibration:', e.message); }
   _calibCache = { data: out, ts: Date.now() };
@@ -4998,6 +5019,16 @@ function buildPickCandidates(enrichedFixtures) {
       // encoge el EV positivo un 30% (solo encoge): baja el stake derivado y hace que
       // menos picks pasen los filtros de SP/EP/PV. No re-entrena la prob (las standings
       // llegan después del modelo Poisson), pero castiga la confianza del edge estimado.
+      // Familia en racha mala: se recorta el EV un 35% adicional y el stake se
+      // capa a 6. No se apaga el mercado (la muestra reciente es chica y el ROI
+      // de vida puede ser bueno), pero deja de competir de igual a igual por los
+      // cupos del día contra mercados que sí están respondiendo.
+      if (_cal?.enRachaMala && ev > 0) {
+        const evAntes = ev;
+        ev = +(ev * 0.65).toFixed(2);
+        m._rachaMala = true;
+        if (evAntes - ev > 0.5) console.log(`📉 EV recortado por racha ${f.local} vs ${f.visitante} [${_fam}] ${evAntes}%→${ev}% (${_cal.hitRec}% en últimos ${_cal.nRec})`);
+      }
       if (f._torneoNuevo && ev > 0) {
         ev = +(ev * 0.85).toFixed(2);   // suavizado 0.70→0.85 (27-jul): 0.70 ahogaba el volumen
         f._torneoNuevoAplicado = true;  // en la semana en que casi todo arranca de torneo
@@ -5030,6 +5061,8 @@ function buildPickCandidates(enrichedFixtures) {
         stake = ev > 3 ? 6 : ev >= -3 ? 5 : 4;
       }
 
+      // Familia en racha mala: techo de stake 6 aunque el Kelly dé más.
+      if (m._rachaMala && stake > 6) stake = 6;
       // Si el partido tiene stats parciales (solo un equipo), bajar stake 1 nivel por confianza.
       if (partialStats && stake > 4) stake = Math.max(4, stake - 1);
       // Sin datos reales de ningún equipo: lambdas por defecto → EV inflado artificialmente → cap 6
@@ -8333,13 +8366,31 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
   // EV ≥ 8, prob ≥ 60, cuota real ≥ 1.65, sin cuotas sintéticas, orden por EV.
   const rankedHoy = rankSuperPickCandidates(candidates, enriched, new Date(), { minKickoffMin: 5 });
   const vistosFx  = new Set();
+  const vistasFam = new Set();
   const topPicks  = [];
+  // Pasada 1: mejor EV, uno por partido y UNO POR FAMILIA DE MERCADO.
+  // El límite por familia se perdió al cambiar selectDiversePicks por el ranking
+  // por EV, y el 3-ago salieron los 2 picks del día siendo AMBOS de tarjetas —
+  // el mercado con peor racha. Concentrar el día entero en un solo mercado
+  // convierte una mala racha en un día perdido completo.
   for (const c of rankedHoy) {
     if (c.esCombinada) continue;               // la combinada la arma el prompt con los 3 elegidos
     if (vistosFx.has(c.fixtureId)) continue;   // un solo pick por partido
-    vistosFx.add(c.fixtureId);
+    const fam = superPickFamily(c);
+    if (vistasFam.has(fam)) continue;
+    vistosFx.add(c.fixtureId); vistasFam.add(fam);
     topPicks.push(c);
     if (topPicks.length === 3) break;
+  }
+  // Pasada 2: si la diversidad dejó menos de 3, se completa repitiendo familia
+  // (mejor 3 picks con dos de la misma familia que quedarse en 1).
+  if (topPicks.length < 3) {
+    for (const c of rankedHoy) {
+      if (topPicks.length === 3) break;
+      if (c.esCombinada || vistosFx.has(c.fixtureId)) continue;
+      vistosFx.add(c.fixtureId);
+      topPicks.push(c);
+    }
   }
   console.log(`📅 Picks del día — candidatos: ${candidates.length} | pasan filtro SuperPick: ${rankedHoy.length} | elegidos: ${topPicks.length}`);
   if (topPicks.length) {
