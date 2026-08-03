@@ -6905,12 +6905,28 @@ function validateStake(pick, probBlock) {
 async function applyStakeGate(picksText, enriched, matchesCtx, opts = {}) {
   try {
     const extracted = await extractPicksFromText(picksText, matchesCtx);
-    // Sin picks extraídos NO se retorna temprano: el sanitizador de lenguaje
-    // interno de más abajo tiene que correr igual. El retorno temprano fue la
-    // causa de que el 1-ago un análisis sin picks llegara al cliente listando
-    // "statsLocal = null" y "probabilidadesCalculadas = ausente" — los patrones
-    // estaban en LEAK_PATTERNS pero nunca se evaluaron.
-    if (!extracted.length) opts.extractedPicks = [];
+    // Sin picks extraídos: hay que limpiar lenguaje interno igual (por eso ya no
+    // se retorna sin más), PERO por un camino aparte que NO pueda borrar picks.
+    //
+    // El 3-ago esto salió mal: al quitar el retorno temprano, un texto sin picks
+    // extraídos caía en el rewrite general — cuyo prompt termina con "si todos
+    // los picks son inválidos, devuelve solo el contexto con ⛔ Sin picks de
+    // valor". Haiku lo aplicó y publicó los 3 partidos de PICKS DEL DÍA con su
+    // contexto y SIN un solo pick. El extractor no los había leído porque el
+    // formateador diario escribe "🎯 *PICK*" sin número.
+    // Aquí el prompt es estrecho y tiene prohibido tocar bloques de pick.
+    if (!extracted.length) {
+      opts.extractedPicks = [];
+      const leaks0 = LEAK_PATTERNS.filter(re => re.test(picksText)).map(re => re.source);
+      if (!leaks0.length) return picksText;
+      console.log(`🧹 Sanitizador (sin picks extraídos): ${leaks0.length} patrón(es) — limpieza SIN tocar picks`);
+      const limpio = await haiku(
+        `Eres un editor de texto quirúrgico. Devuelve el MISMO texto, palabra por palabra, con un único tipo de cambio: las frases con LENGUAJE INTERNO desaparecen o se reformulan en lenguaje de cliente. Nunca menciones JSON, nombres de campos de datos (statsLocal, probabilidadesCalculadas, cuotasReales…), muestras, umbrales/mínimos/pisos de cuota, descartes ni redirecciones de mercado. "sin datos disponibles en el JSON" → "sin datos disponibles". Si una frase solo narra maquinaria interna, elimínala.\n⛔ PROHIBIDO eliminar, acortar, alterar o renumerar bloques de pick: en este texto NO hay ningún pick inválido. Si hay tablas markdown (líneas con | columnas |), conviértelas a líneas simples con "▸ ". No resumas, no añadas notas.`,
+        `TEXTO:\n${picksText}`,
+        8000
+      ).catch(() => null);
+      return (limpio && limpio.length > picksText.length * 0.5) ? limpio : picksText;
+    }
 
     let correctedText = picksText;
     let highStakeCount = 0;
