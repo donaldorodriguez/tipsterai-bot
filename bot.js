@@ -2364,8 +2364,23 @@ function validateLiveOdds(odds, elapsed = 0, hg = 0, ag = 0) {
     // El empate como resultado MÁS probable solo es real tarde en un partido
     // igualado y de pocos goles. Temprano o con marcador desnivelado = feed roto.
     if (drawEsFavorito && (elapsed < 60 || !marcadorIgualado)) {
-      console.warn(`🚫 Live odds descartadas (1X2 implausible: home=${homeWin} draw=${draw} away=${awayWin} @min${elapsed} ${hg}-${ag}) — se usan estimados`);
-      return null;
+      // Antes se devolvía null y se tiraba TODO el bloque de cuotas. Pero que el
+      // 1X2 venga roto no invalida el resto: caso real 3-ago, Alashkert vs Ararat
+      // al minuto 13 con 0-0 llegó "home=6 draw=1.125 away=21" (empate al 89%,
+      // imposible) y junto a eso "over25=1.875 under25=1.925", perfectamente
+      // normales. Al descartarlo entero el motor se quedó sin una sola cuota y
+      // publicó "sin picks de valor" teniendo un Under 2.5 con valor real.
+      // Ahora se tira SOLO el 1X2 y se conserva lo demás.
+      console.warn(`🚫 1X2 en vivo implausible (home=${homeWin} draw=${draw} away=${awayWin} @min${elapsed} ${hg}-${ag}) — se descarta SOLO el 1X2, el resto de mercados se conserva`);
+      const resto = { ...odds };
+      delete resto.homeWin; delete resto.draw; delete resto.awayWin;
+      const utiles = Object.keys(resto).filter(k => typeof resto[k] === 'number' && resto[k] > 1);
+      if (!utiles.length) {
+        console.warn('🚫 …y no quedaba ningún otro mercado numérico: sin cuotas en vivo');
+        return null;
+      }
+      console.log(`✅ Conservados ${utiles.length} mercados en vivo: ${utiles.join(', ')}`);
+      return resto;
     }
   }
   return odds;
