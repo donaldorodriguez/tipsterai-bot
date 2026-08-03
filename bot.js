@@ -57,7 +57,21 @@ const APIF = process.env.APIFOOTBALL_KEY ? axios.create({
   timeout: 10000,
 }) : null;
 
+// Contador de consumo de Highlightly por día (hora Colombia). Existe porque el
+// plan ya se agotó una vez en julio y ahora subimos el tope de partidos a los
+// que se piden cuotas: sin medida no se sabe si el margen alcanza.
+const _hlUso = { dia: null, total: 0, porRuta: {} };
+function hlUsoHoy() {
+  const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+  if (_hlUso.dia !== hoy) { _hlUso.dia = hoy; _hlUso.total = 0; _hlUso.porRuta = {}; }
+  return _hlUso;
+}
+
 API.interceptors.request.use(req => {
+  const u = hlUsoHoy();
+  u.total++;
+  const ruta = String(req.url || '').split('/').slice(0, 3).join('/');
+  u.porRuta[ruta] = (u.porRuta[ruta] || 0) + 1;
   const params = new URLSearchParams(req.params || {}).toString();
   console.log(`🔍 API: ${req.baseURL}${req.url}${params ? '?' + params : ''}`);
   return req;
@@ -2760,9 +2774,18 @@ function clubEloAdjust(map, homeName, awayName) {
   return { eloHome: Math.round(eH), eloAway: Math.round(eA), diff: Math.round(dr), hMult: 1 + dr * 0.0006, aMult: 1 - dr * 0.0006 };
 }
 
+// Tope REAL de partidos a los que se les piden cuotas. El `pickByTimeBuckets(…,
+// 150)` de arriba solo arma el pool; era ESTE slice el que mandaba. Con 30, el
+// motor solo podía opinar de ~23 partidos al día (3-ago: 81 candidatos de 23
+// fixtures, 3 pasaban el filtro, 2 picks) — no era exigencia del filtro, era
+// falta de precios contra los cuales medir.
+// Cada partido cuesta 1 llamada Highlightly + hasta 1 API-Football, y el caché
+// de cuotas (10 min) hace gratis las repeticiones dentro de la ventana.
+const ODDS_PREFETCH_MAX = 60;   // subido de 30 el 3-ago — medir consumo antes de subir más
+
 async function prefetchOddsApi(fixtures, _date) {
   const map = new Map();
-  const top = fixtures.slice(0, 30);
+  const top = fixtures.slice(0, ODDS_PREFETCH_MAX);
   // Plan APIF Pro (7,500 req/día, 300/min): merge APIF para TODO el pool.
   // En lotes de 8 con pausa — el límite por minuto castiga ráfagas paralelas
   // (429s vistos el 12-jul con 13 llamadas simultáneas en el plan free).
@@ -2775,7 +2798,8 @@ async function prefetchOddsApi(fixtures, _date) {
     }));
     if (i + BATCH < top.length) await new Promise(r => setTimeout(r, 1200));
   }
-  console.log(`📊 Odds (HL+APIF): ${map.size}/${top.length} partidos`);
+  const u = hlUsoHoy();
+  console.log(`📊 Odds (HL+APIF): ${map.size}/${top.length} partidos | 🧮 Highlightly hoy: ${u.total} llamadas (${Object.entries(u.porRuta).sort((a,b)=>b[1]-a[1]).slice(0,4).map(([r,n])=>`${r}:${n}`).join(' ')})`);
   return map;
 }
 async function getLastMatchDate(teamId) { return null; }
@@ -7878,7 +7902,7 @@ async function gatherDailyCandidates(progress = async () => {}) {
   // Ordenar todos los partidos disponibles por prioridad de liga
   // Reparte los 80 a revisar por franja horaria (Col) para que la mañana entre al
   // análisis y no se la coma el ranking de liga (antes: puro top-80 por prioridad).
-  const oddsPool = pickByTimeBuckets(fixtures, 80, f => f); // revisar hasta 80 buscando cuotas
+  const oddsPool = pickByTimeBuckets(fixtures, 150, f => f); // pool; el tope real lo pone ODDS_PREFETCH_MAX
 
   await progress(`📊 ${fixtures.length} partidos en ligas monitoreadas. Consultando cuotas...`);
 
