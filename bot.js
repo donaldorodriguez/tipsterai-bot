@@ -2273,17 +2273,34 @@ async function getLiveOdds(hlFixtureId) {
       } else if (/both teams to score/.test(name)) {
         out.bttsYes = out.bttsYes ?? get(/^yes$/i);
         out.bttsNo  = out.bttsNo  ?? get(/^no$/i);
-      } else if (/corner/.test(name) && !/asian|half|team|home|away/.test(name)) {
-        // Córners totales del partido. Sin esto el motor en vivo tenía 6
-        // mercados de córners que NO PODÍAN dispararse nunca: calculaba la
-        // probabilidad pero jamás encontraba la cuota (2-ago: λ córners
-        // restantes 9.27 y aun así 0 candidatos).
+      } else if (/^(match|total) corners$/.test(name.trim())) {
+        // Córners totales del partido. API-Football los da como mercado de TRES
+        // vías con línea ENTERA: {value:"Over", handicap:"8"}, {value:"Exactly",
+        // handicap:"8"}, {value:"Under", handicap:"8"}. El parser anterior exigía
+        // líneas .5 y las descartaba todas — por eso el motor en vivo calculaba
+        // probabilidades de córners y NUNCA encontraba cuota (2-ago).
+        // Equivalencias con las líneas del modelo:
+        //   Over 8  (gana con ≥9) ≡ Over 8.5   → cornersOver85
+        //   Under 8 (gana con ≤7) ≡ Under 7.5  → cornersUnder75
+        // Se excluyen a propósito: Asian Corners, Corners 1x2, Corners European
+        // Handicap, Race to the Nth corner, Last Corner — no son totales O/U.
         for (const v of vals) {
-          const line = parseFloat(v.handicap ?? String(v.value).match(/([\d.]+)\s*$/)?.[1]);
-          if (!line || Math.abs((line % 1) - 0.5) > 0.01) continue; // solo líneas .5
-          const key = String(line).replace('.', '');
-          if (/^over/i.test(String(v.value)))  out['cornersOver'  + key] = out['cornersOver'  + key] ?? parseFloat(v.odd);
-          if (/^under/i.test(String(v.value))) out['cornersUnder' + key] = out['cornersUnder' + key] ?? parseFloat(v.odd);
+          const hRaw = parseFloat(v.handicap ?? String(v.value).match(/([\d.]+)\s*$/)?.[1]);
+          const odd  = parseFloat(v.odd);
+          if (!Number.isFinite(hRaw) || !Number.isFinite(odd) || odd <= 1) continue;
+          const esEntera = Math.abs(hRaw % 1) < 0.01;
+          const val = String(v.value);
+          if (/^over/i.test(val)) {
+            const linea = esEntera ? hRaw + 0.5 : hRaw;
+            const k = 'cornersOver' + String(linea).replace('.', '');
+            out[k] = out[k] ?? odd;
+          } else if (/^under/i.test(val)) {
+            const linea = esEntera ? hRaw - 0.5 : hRaw;
+            if (linea <= 0) continue;
+            const k = 'cornersUnder' + String(linea).replace('.', '');
+            out[k] = out[k] ?? odd;
+          }
+          // "Exactly" es la tercera vía del mercado: no se usa.
         }
       }
     }
