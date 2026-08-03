@@ -4751,6 +4751,31 @@ function buildPickCandidates(enrichedFixtures) {
 
       if (!m.prob || m.prob < (m.minProb || 0.48)) { _rej.prob++; continue; } // prob insuficiente
 
+      // ── No respaldar al equipo que va PEOR en el torneo actual ──────────────
+      // Caso real 2-ago, Zemun vs Radnicki NIS (jornada 3 de la liga serbia):
+      // el motor emitió Doble Oportunidad 1X para Zemun, que llevaba 1 punto en
+      // 3 partidos y 7 goles encajados. Perdió 0-1 con 7 remates contra 26 y
+      // 34% de posesión. El motor no lo vio porque en torneo recién arrancado
+      // los promedios de "temporada" son del torneo ANTERIOR (antes de fichajes)
+      // y el único descuento era encoger el EV un 15% — insuficiente.
+      // La tabla actual tiene poca muestra, pero es la única evidencia del
+      // equipo de HOY. Si el lado que íbamos a respaldar va claramente peor, no
+      // se emite: no es un edge, es data vieja.
+      if (f._torneoNuevo && f._ppgActual) {
+        const { local: ppgL, visitante: ppgV } = f._ppgActual;
+        const respaldaLocal     = /^(homeWin|dnb_home|dc_1X|ah_home)/.test(m.key);
+        const respaldaVisitante = /^(awayWin|dnb_away|dc_X2|ah_away)/.test(m.key);
+        if (ppgL != null && ppgV != null) {
+          const peorLocal = respaldaLocal     && (ppgV - ppgL) >= 0.5;
+          const peorVisit = respaldaVisitante && (ppgL - ppgV) >= 0.5;
+          if (peorLocal || peorVisit) {
+            _rej.otros++;
+            console.log(`🚫 ${f.local} vs ${f.visitante} [${m.key}]: respalda al peor de la tabla actual (${ppgL.toFixed(2)} vs ${ppgV.toFixed(2)} pts/partido en ${f._ppgActual.jugados} jornadas) — datos de temporada son del torneo anterior`);
+            continue;
+          }
+        }
+      }
+
       // ── Cuota real o cuota justa implícita (abre DC, DNB, HT, team corners) ──
       // Sin cuota real, usamos 1/(prob × 0.93) que refleja breakeven con margen 7%.
       // Estas "implied" odds no tienen valor real sobre el mercado — el stake se limita.
@@ -8092,6 +8117,12 @@ async function gatherDailyCandidates(progress = async () => {}) {
       if (jugadosTabla >= 1 && jugadosTabla <= 4) {
         const nStats = enriched[i].statsLocal?.partidos ?? enriched[i].statsVisitante?.partidos ?? null;
         enriched[i]._torneoNuevo = true;
+        // Puntos por partido del TORNEO ACTUAL. Es poca muestra, pero es la única
+        // evidencia del equipo de HOY: los promedios de "temporada" vienen del
+        // torneo anterior, antes de fichajes. Sirve para no respaldar al equipo
+        // que va peor ahora mismo (ver guardia en buildPickCandidates).
+        const ppg = (s) => (s && s.played > 0 && s.points != null) ? s.points / s.played : null;
+        enriched[i]._ppgActual = { local: ppg(standingLocal), visitante: ppg(standingVisit), jugados: jugadosTabla };
         enriched[i].contextoTemporada =
           `⚠️ TORNEO/TEMPORADA NUEVA: la tabla actual apenas lleva ${jugadosTabla} jornada(s)` +
           (nStats ? `, pero los promedios de "temporada" son de ~${nStats} partidos` : '') +
