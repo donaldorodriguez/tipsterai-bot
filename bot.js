@@ -2068,6 +2068,10 @@ async function getRealOddsHL(fixtureId) {
     return result;
   } catch (e) {
     console.warn(`getRealOdds(${fixtureId}): ${e.message}`);
+    // Un 429 no es "no hay cuotas": es "no me dejaron preguntar". Se marca
+    // para que getRealOdds reintente una vez en lugar de dar el partido por
+    // perdido — sin cuotas el motor no puede medir valor.
+    if (/too many requests|429|rate limit|quota/i.test(String(e.message))) getRealOdds._rateLimitedAt = Date.now();
     return null;
   }
 }
@@ -2165,26 +2169,69 @@ async function getRealOddsAPIF(dateIso, homeName, awayName) {
     return r;
   } catch (e) {
     console.warn(`getRealOddsAPIF: ${e.message}`);
+    // Un 429 no es "no hay cuotas": es "no me dejaron preguntar". Se marca
+    // para que getRealOdds reintente una vez en lugar de dar el partido por
+    // perdido — sin cuotas el motor no puede medir valor.
+    if (/too many requests|429|rate limit|quota/i.test(String(e.message))) getRealOdds._rateLimitedAt = Date.now();
     return null;
   }
 }
 
 // getRealOdds unificado: Highlightly como base + APIF rellena mercados faltantes.
 // fxCtx = { date, homeTeam, awayTeam } — sin contexto solo se usa Highlightly.
+// ─── Cuotas reales: caché + reintento ante rate limit ────────────────────────
+// SIN CUOTAS REALES EL MOTOR NO PUEDE ENCONTRAR VALOR. Es estructural: la cuota
+// pasa a ser la "justa" del propio modelo y el EV sale ≈0 por construcción — el
+// modelo medido contra sí mismo. De ahí salían los "⛔ Sin picks de valor" en
+// cadena (1 y 2-ago). Y el proveedor devuelve "Too many requests" con
+// frecuencia, así que cada fallo de cuota era un partido sin picks.
+// Caché por fixture (los precios no se mueven en 10 min pre-partido) + un
+// reintento cuando el fallo fue por límite de peticiones, no por ausencia real.
+const _realOddsCache = new Map();   // fixtureId → { ts, data }
+const ODDS_TTL_OK    = 10 * 60000;  // con cuotas: 10 min
+const ODDS_TTL_NULL  = 2  * 60000;  // sin cuotas: 2 min (reintentar pronto)
+
 async function getRealOdds(fixtureId, fxCtx = null) {
-  const hl = await getRealOddsHL(fixtureId).catch(() => null);
-  let apif = null;
-  if (fxCtx?.date && fxCtx?.homeTeam && fxCtx?.awayTeam) {
-    apif = await getRealOddsAPIF(fxCtx.date, fxCtx.homeTeam, fxCtx.awayTeam).catch(() => null);
-  }
-  if (!hl && !apif) return null;
-  const result = { ...(hl || {}) };
-  if (apif) {
-    for (const [k, v] of Object.entries(apif)) {
-      if (typeof v === 'number' && v > 1 && result[k] == null) result[k] = v;
+  const hit = _realOddsCache.get(fixtureId);
+  if (hit && Date.now() - hit.ts < (hit.data ? ODDS_TTL_OK : ODDS_TTL_NULL)) return hit.data;
+
+  const intento = async () => {
+    const hl = await getRealOddsHL(fixtureId).catch(() => null);
+    let apif = null;
+    if (fxCtx?.date && fxCtx?.homeTeam && fxCtx?.awayTeam) {
+      apif = await getRealOddsAPIF(fxCtx.date, fxCtx.homeTeam, fxCtx.awayTeam).catch(() => null);
     }
-    result._source = hl ? 'highlightly+apifootball' : 'apifootball';
+    if (!hl && !apif) return null;
+    const result = { ...(hl || {}) };
+    if (apif) {
+      for (const [k, v] of Object.entries(apif)) {
+        if (typeof v === 'number' && v > 1 && result[k] == null) result[k] = v;
+      }
+      result._source = hl ? 'highlightly+apifootball' : 'apifootball';
+    }
+    return result;
+  };
+
+  let result = await intento();
+
+  // Reintento SOLO si el proveedor acaba de limitarnos: ese null no significa
+  // "no hay cuotas", significa "no me dejaron preguntar".
+  if (!result && Date.now() - (getRealOdds._rateLimitedAt || 0) < 8000) {
+    await new Promise(r => setTimeout(r, 1500));
+    result = await intento();
+    console.log(result
+      ? `♻️ Cuotas recuperadas en reintento tras rate limit (fixture ${fixtureId})`
+      : `⏳ Reintento tras rate limit tampoco trajo cuotas (fixture ${fixtureId})`);
   }
+
+  if (!result) {
+    console.log(`💸 Sin cuotas reales para fixture ${fixtureId}${fxCtx?.homeTeam ? ` (${fxCtx.homeTeam} vs ${fxCtx.awayTeam})` : ''} — el motor no podrá medir valor en este partido`);
+  }
+
+  if (_realOddsCache.size > 500) {
+    for (const [k, v] of _realOddsCache) { if (Date.now() - v.ts > ODDS_TTL_OK) _realOddsCache.delete(k); }
+  }
+  _realOddsCache.set(fixtureId, { ts: Date.now(), data: result });
   return result;
 }
 
