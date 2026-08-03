@@ -2193,6 +2193,154 @@ async function getRealOddsAPIF(dateIso, homeName, awayName) {
 
 // getRealOdds unificado: Highlightly como base + APIF rellena mercados faltantes.
 // fxCtx = { date, homeTeam, awayTeam } — sin contexto solo se usa Highlightly.
+// ═══════════════════════════════════════════════════════════════════════════
+// THE ODDS API — cuotas prepartido EN LOTE, una petición por LIGA
+// ═══════════════════════════════════════════════════════════════════════════
+// La clave estaba en .env y en Railway desde siempre y NO se usaba en una sola
+// línea (el comentario del pipeline prometía "The Odds API (bulk)" y nunca se
+// implementó). Highlightly gasta 1 llamada POR PARTIDO; esta trae la liga
+// entera en 1 llamada, con ~27 casas por partido.
+//
+// Reparto de trabajo entre los tres proveedores:
+//   The Odds API  → cuotas prepartido en lote (barato por partido, 500/mes)
+//   Highlightly   → partidos, estadísticas, tablas, H2H, y cuotas de lo que
+//                   The Odds API no cubre (ej. Liga BetPlay: NO está)
+//   API-Football  → cuotas EN VIVO (su fuerte, 7500/día) + respaldo prepartido
+//
+// Presupuesto: 500 peticiones/mes ≈ 16/día. Con TTL de 6h una liga se pide
+// como mucho 4 veces al día, y el tope diario corta antes de agotar el mes.
+const ODDS_API_TTL      = 6 * 60 * 60 * 1000;
+const ODDS_API_MAX_DIA  = 14;
+const _oddsApiCache     = new Map();   // sportKey → { ts, eventos }
+const _oddsApiUso       = { dia: null, n: 0 };
+
+// Ligas donde más opera el usuario + las europeas grandes. Se mapea por el
+// NOMBRE de liga que trae el feed de Highlightly.
+const ODDS_API_LIGAS = [
+  { key: 'soccer_argentina_primera_division', re: /liga argentina|primera divisi[óo]n.*argentina/i },
+  { key: 'soccer_brazil_campeonato',          re: /brasileirao|brasileir[ãa]o|s[ée]rie a\b.*brasil/i },
+  { key: 'soccer_brazil_serie_b',             re: /s[ée]rie b\b.*brasil|brasil.*s[ée]rie b/i },
+  { key: 'soccer_chile_campeonato',           re: /primera divisi[óo]n.*chile|chile.*primera/i },
+  { key: 'soccer_mexico_ligamx',              re: /liga mx/i },
+  { key: 'soccer_usa_mls',                    re: /\bmls\b|major league soccer/i },
+  { key: 'soccer_concacaf_leagues_cup',       re: /leagues cup/i },
+  { key: 'soccer_conmebol_copa_libertadores', re: /libertadores/i },
+  { key: 'soccer_conmebol_copa_sudamericana', re: /sudamericana/i },
+  { key: 'soccer_epl',                        re: /premier league$|^epl$|inglaterra.*premier/i },
+  { key: 'soccer_spain_la_liga',              re: /\blaliga\b|la liga(?!.*2)/i },
+  { key: 'soccer_italy_serie_a',              re: /serie a\b.*ital|ital.*serie a/i },
+  { key: 'soccer_germany_bundesliga',         re: /^bundesliga$|bundesliga.*alemania/i },
+  { key: 'soccer_france_ligue_one',           re: /ligue 1/i },
+  { key: 'soccer_portugal_primeira_liga',     re: /primeira liga/i },
+  { key: 'soccer_netherlands_eredivisie',     re: /eredivisie/i },
+];
+
+function oddsApiKeyForLiga(liga) {
+  const s = String(liga || '');
+  return ODDS_API_LIGAS.find(l => l.re.test(s))?.key || null;
+}
+
+// Normalización específica para cruzar nombres entre proveedores. The Odds API
+// escribe "Velez Sarsfield BA", Highlightly "Vélez Sarsfield" — hace falta algo
+// más tolerante que la igualdad exacta, pero sin caer en el error de "Depor" ↔
+// "Deportivo": se exige que un nombre contenga al otro COMPLETO.
+function _oaNorm(n) {
+  return normalizeTeamName(String(n || '')).replace(/\b(fc|cf|sc|ac|ba|cd|afc|club|deportivo|atletico)\b/g, ' ')
+    .replace(/\s+/g, ' ').trim();
+}
+function _oaMismoEquipo(a, b) {
+  const x = _oaNorm(a), y = _oaNorm(b);
+  if (!x || !y) return false;
+  if (x === y) return true;
+  const [corto, largo] = x.length <= y.length ? [x, y] : [y, x];
+  return corto.length >= 4 && (' ' + largo + ' ').includes(' ' + corto + ' ');
+}
+
+async function fetchOddsApiLeague(sportKey) {
+  const hit = _oddsApiCache.get(sportKey);
+  if (hit && Date.now() - hit.ts < ODDS_API_TTL) return hit.eventos;
+
+  const hoy = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
+  if (_oddsApiUso.dia !== hoy) { _oddsApiUso.dia = hoy; _oddsApiUso.n = 0; }
+  if (_oddsApiUso.n >= ODDS_API_MAX_DIA) {
+    console.log(`⏭️ The Odds API: tope diario alcanzado (${ODDS_API_MAX_DIA}) — se usa Highlightly/APIF`);
+    return hit?.eventos || [];
+  }
+  if (!process.env.THE_ODDS_API_KEY) return [];
+
+  try {
+    const { data, headers } = await axios.get(
+      `https://api.the-odds-api.com/v4/sports/${sportKey}/odds`,
+      { params: { apiKey: process.env.THE_ODDS_API_KEY, regions: 'eu,uk', markets: 'h2h,totals', oddsFormat: 'decimal' }, timeout: 15000 }
+    );
+    _oddsApiUso.n++;
+    _oddsApiCache.set(sportKey, { ts: Date.now(), eventos: data || [] });
+    console.log(`🎰 The Odds API [${sportKey}]: ${data?.length || 0} partidos | usadas hoy ${_oddsApiUso.n}/${ODDS_API_MAX_DIA} | quedan en el mes ${headers['x-requests-remaining'] ?? '?'}`);
+    return data || [];
+  } catch (e) {
+    console.warn(`The Odds API [${sportKey}]: ${e.response?.status || ''} ${e.message}`);
+    _oddsApiCache.set(sportKey, { ts: Date.now(), eventos: [] });   // no reintentar en bucle
+    return [];
+  }
+}
+
+// Devuelve las cuotas de UN partido en el formato interno del motor, o null.
+async function getRealOddsApiBulk(liga, homeName, awayName, fechaIso) {
+  const sportKey = oddsApiKeyForLiga(liga);
+  if (!sportKey) return null;
+  const eventos = await fetchOddsApiLeague(sportKey);
+  if (!eventos.length) return null;
+
+  const t = fechaIso ? new Date(fechaIso).getTime() : null;
+  const candidatos = eventos.filter(e => {
+    if (!_oaMismoEquipo(e.home_team, homeName) || !_oaMismoEquipo(e.away_team, awayName)) return false;
+    if (!t) return true;
+    return Math.abs(new Date(e.commence_time).getTime() - t) < 6 * 3600e3;  // mismo partido, no otra jornada
+  });
+
+  // Ambigüedad = no se adivina. "Independiente" casa con "Independiente
+  // Rivadavia" por contención de palabra completa, y en la liga argentina
+  // existen los dos. Cruzar el partido equivocado mete cuotas de otro encuentro
+  // en el motor, que es peor que quedarse sin cuotas — es la misma clase de
+  // error que hizo analizar Vélez vs Independiente cuando se pidió el Medellín.
+  if (candidatos.length > 1) {
+    console.warn(`⚠️ The Odds API: "${homeName} vs ${awayName}" casa con ${candidatos.length} partidos (${candidatos.map(e => `${e.home_team} vs ${e.away_team}`).join(' | ')}) — ambiguo, no se usan sus cuotas`);
+    return null;
+  }
+  const ev = candidatos[0];
+  if (!ev?.bookmakers?.length) return null;
+
+  // Mediana entre casas: más robusta que la primera casa que aparezca.
+  const mediana = (xs) => { const s = xs.slice().sort((a, b) => a - b); const m = s.length >> 1; return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2; };
+  const acumul = {};
+  const push = (k, v) => { if (v > 1 && v < 30) (acumul[k] = acumul[k] || []).push(v); };
+
+  for (const bk of ev.bookmakers) {
+    for (const mk of bk.markets || []) {
+      if (mk.key === 'h2h') {
+        for (const o of mk.outcomes || []) {
+          if (/^draw$/i.test(o.name)) push('draw', +o.price);
+          else if (_oaMismoEquipo(o.name, ev.home_team)) push('homeWin', +o.price);
+          else if (_oaMismoEquipo(o.name, ev.away_team)) push('awayWin', +o.price);
+        }
+      } else if (mk.key === 'totals') {
+        for (const o of mk.outcomes || []) {
+          const p = parseFloat(o.point);
+          if (!Number.isFinite(p) || Math.abs((p % 1) - 0.5) > 0.01) continue;
+          const suf = String(p).replace('.', '');
+          if (/^over$/i.test(o.name))  push('over'  + suf, +o.price);
+          if (/^under$/i.test(o.name)) push('under' + suf, +o.price);
+        }
+      }
+    }
+  }
+  const out = {};
+  for (const [k, xs] of Object.entries(acumul)) out[k] = +mediana(xs).toFixed(3);
+  if (!Object.keys(out).length) return null;
+  out._source = `the-odds-api (${ev.bookmakers.length} casas)`;
+  return out;
+}
+
 // ─── Cuotas reales: caché + reintento ante rate limit ────────────────────────
 // SIN CUOTAS REALES EL MOTOR NO PUEDE ENCONTRAR VALOR. Es estructural: la cuota
 // pasa a ser la "justa" del propio modelo y el EV sale ≈0 por construcción — el
@@ -2210,19 +2358,36 @@ async function getRealOdds(fixtureId, fxCtx = null) {
   if (hit && Date.now() - hit.ts < (hit.data ? ODDS_TTL_OK : ODDS_TTL_NULL)) return hit.data;
 
   const intento = async () => {
-    const hl = await getRealOddsHL(fixtureId).catch(() => null);
+    // 1º The Odds API: ya viene en lote por liga, así que para el 2º partido de
+    // esa liga en adelante es GRATIS (sale del caché). Se pide primero para no
+    // gastar una llamada de Highlightly por partido en ligas que sí cubre.
+    const bulk = (fxCtx?.homeTeam && fxCtx?.awayTeam)
+      ? await getRealOddsApiBulk(fxCtx.liga, fxCtx.homeTeam, fxCtx.awayTeam, fxCtx.date).catch(() => null)
+      : null;
+
+    // 2º Highlightly (1 llamada por partido) — se salta si el lote ya trajo
+    // los mercados principales, que es donde se iba la cuota del plan.
+    const bulkCompleto = bulk && bulk.homeWin != null && (bulk.over25 != null || bulk.under25 != null);
+    const hl = bulkCompleto ? null : await getRealOddsHL(fixtureId).catch(() => null);
+
+    // 3º API-Football como respaldo, solo si aún faltan mercados.
     let apif = null;
-    if (fxCtx?.date && fxCtx?.homeTeam && fxCtx?.awayTeam) {
+    if (!bulkCompleto && !hl && fxCtx?.date && fxCtx?.homeTeam && fxCtx?.awayTeam) {
       apif = await getRealOddsAPIF(fxCtx.date, fxCtx.homeTeam, fxCtx.awayTeam).catch(() => null);
     }
-    if (!hl && !apif) return null;
+    if (!bulk && !hl && !apif) return null;
+
+    // Prioridad de valor: Highlightly primero (es la fuente histórica del motor
+    // y con la que está calibrado), luego el lote, luego APIF.
     const result = { ...(hl || {}) };
-    if (apif) {
-      for (const [k, v] of Object.entries(apif)) {
+    for (const extra of [bulk, apif]) {
+      if (!extra) continue;
+      for (const [k, v] of Object.entries(extra)) {
         if (typeof v === 'number' && v > 1 && result[k] == null) result[k] = v;
       }
-      result._source = hl ? 'highlightly+apifootball' : 'apifootball';
     }
+    result._source = [hl && 'highlightly', bulk && 'the-odds-api', apif && 'apifootball'].filter(Boolean).join('+');
+    if (bulkCompleto) result._ahorroHL = true;
     return result;
   };
 
@@ -2808,7 +2973,7 @@ async function prefetchOddsApi(fixtures, _date) {
   for (let i = 0; i < top.length; i += BATCH) {
     const batch = top.slice(i, i + BATCH);
     await Promise.allSettled(batch.map(async (f) => {
-      const odds = await getRealOdds(f.fixtureId, { date: f.date, homeTeam: f.homeTeam, awayTeam: f.awayTeam });
+      const odds = await getRealOdds(f.fixtureId, { date: f.date, homeTeam: f.homeTeam, awayTeam: f.awayTeam, liga: f.liga });
       if (odds) map.set(f.fixtureId, odds);
     }));
     if (i + BATCH < top.length) await new Promise(r => setTimeout(r, 1200));
@@ -10135,7 +10300,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
 
   // ── Pre-partido → motor JS selecciona picks de valor, luego análisis profundo ─
   const realOdds = await getRealOdds(nextRaw.fixture.id, {
-    date: nextRaw.fixture.date, homeTeam, awayTeam,
+    date: nextRaw.fixture.date, homeTeam, awayTeam, liga: nextRaw.league?.name,
   }).catch(() => null);
   if (realOdds) analysisData.cuotasReales = realOdds;
 
@@ -10218,6 +10383,33 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   const partidoCandidates = buildPickCandidates([fixtureForEngine]);
   const partidoPicks      = selectDiversePicks(partidoCandidates, 3);
   console.log(`🎯 handlePartido — candidatos JS: ${partidoCandidates.length} | picks: ${partidoPicks.length} | cuotas: ${realOdds ? 'sí' : 'no'} | knockout: ${isKnockout}`);
+
+  // ── Coherencia con lo YA PUBLICADO ───────────────────────────────────────
+  // El plan del SuperPick y este análisis son dos caminos distintos sobre el
+  // mismo partido, con dos búsquedas de cuotas distintas: el plan se arma a las
+  // 6am desde el pipeline diario (que trae cuotas en lote) y esto consulta el
+  // partido suelto. Si una trae la cuota de tarjetas y la otra no, el mismo
+  // motor daba respuestas contrarias — caso real 3-ago, Halmstad vs Sirius:
+  // SuperPick "Tarjetas Over 2.5 @1.65 EV 12%" y aquí "Sin picks de valor".
+  // Lo ya publicado MANDA: si el motor emitió un pick para este partido hoy,
+  // tiene que aparecer aquí sí o sí.
+  try {
+    const _hoyKey = todayDate();
+    const _store  = loadSuperPicks();
+    const _dia    = _store?.[_hoyKey] || {};
+    const _pubs   = [...(_dia.picks || []), ...(_dia.extras || [])]
+      .filter(p => p.fixtureId === nextRaw.fixture.id && p.status !== 'descartado');
+    for (const p of _pubs) {
+      const yaEsta = partidoPicks.some(x => (x.marketLabel || '') === (p.seleccion || ''));
+      if (yaEsta) continue;
+      partidoPicks.unshift({
+        marketLabel: p.seleccion, market: p.mercado, odds: p.cuota,
+        ev: p.ev, prob: p.prob, stake: p.stake, esCombinada: !!p.esCombinada,
+        local: p.local, visitante: p.visitante, _yaPublicado: true,
+      });
+      console.log(`📌 Pick ya publicado hoy para este partido — se incluye: ${p.seleccion} @${p.cuota} (stake ${p.stake})`);
+    }
+  } catch (e) { console.warn('coherencia con SuperPick publicado:', e.message); }
 
   const season = LEAGUE_SEASONS[leagueId] || 2025;
   let analysis;
