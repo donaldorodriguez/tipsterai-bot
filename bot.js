@@ -507,6 +507,20 @@ const LEAGUE_BASE_RATES = {
   2486:  { over25: 61, btts: 63, cards: 3.5, corners: 10.5, name: 'Champions League' },
   3337:  { over25: 58, btts: 59, cards: 3.7, corners: 10.0, name: 'Europa League' },
   722432:{ over25: 57, btts: 58, cards: 3.6, corners:  9.8, name: 'Conference League' },
+  // ── Nórdicas e Islandia — TODO MEDIDO sobre la temporada 2026 en curso ────
+  // (4-ago-2026, vía API-Football). over25/btts/htOver* salen de la muestra
+  // completa de partidos terminados; cards/corners solo donde el proveedor da
+  // estadísticas por partido — en Islandia y la 1ª noruega NO las hay, así que
+  // esos campos se omiten a propósito y el motor cae a su valor por defecto.
+  // Se añaden htOver05/htOver15 porque el 1er tiempo es donde el usuario ve
+  // valor en estas ligas y ahora hay mercados que lo aprovechan.
+  140348:{ over25: 72, btts: 73, htOver05: 81, htOver15: 54, name: 'Úrvalsdeild IS' },      // 99 pj · 3.97 gol/p
+  141199:{ over25: 62, btts: 60, htOver05: 67, htOver15: 44, name: '1. Deild IS' },         // 95 pj · 3.55 gol/p
+  96947: { over25: 56, btts: 59, htOver05: 70, htOver15: 39, cards: 3.3, corners: 10.3, name: 'Allsvenskan' },   // 119 pj · cards/corners sobre 33
+  97798: { over25: 60, btts: 60, htOver05: 70, htOver15: 38, name: 'Superettan' },          // 136 pj · 3.03 gol/p
+  88437: { over25: 61, btts: 55, htOver05: 84, htOver15: 47, cards: 3.8, corners: 10.5, name: 'Eliteserien' },   // 122 pj · cards/corners sobre 31
+  89288: { over25: 73, btts: 61, htOver05: 75, htOver15: 48, name: 'First Division NO' },   // 128 pj · 3.77 gol/p
+
   // ── Otras europeas ─────────────────────────────────────────────────────────
   75672: { over25: 57, btts: 61, cards: 3.4, corners: 10.4, name: 'Eredivisie' },
   80778: { over25: 50, btts: 53, cards: 4.3, corners:  9.2, name: 'Primeira Liga' },
@@ -1605,6 +1619,40 @@ async function findTeamWithButtons(chatId, name, countryHint = '', intent = null
 
   if (cachedAll.length === 1 || (empatados.length === 1 && topScore - (cachedAll[1]?.score ?? 0) >= 20)) {
     const c = cachedAll[0];
+    // El caché solo ve equipos que juegan en ±2 días. Si el que pidió el usuario
+    // NO juega pronto pero un homónimo sí, aquí hay un único candidato y se
+    // resuelve en silencio al equipo equivocado — caso real 3-ago: pidió
+    // Recoleta de Paraguay y le salió otro Recoleta. Antes de darlo por bueno se
+    // pregunta a la API si ese nombre existe en más de un país.
+    try {
+      const apiName2 = translateTeamName(name);
+      const { data } = await API.get('/teams', { params: { name: apiName2, limit: 20 } });
+      const q2 = normalizeTeamName(apiName2);
+      const homonimos = (data.data || []).filter(t => {
+        const tn = normalizeTeamName(t.name);
+        return (tn === q2 || coreMatch(teamCore(t.name), teamCore(name)))
+          && !/\b(women|femenin|sub|u\d{2}|ii|reserve)\b/i.test(t.name);
+      });
+      // Highlightly NO devuelve país en /teams (todos vienen vacíos), así que la
+      // desambiguación no puede apoyarse en eso: basta con que existan 2+ equipos
+      // distintos con ese nombre. La liga y la fecha del próximo partido, que sí
+      // tenemos, van en la etiqueta del botón y son lo que permite distinguirlos.
+      if (homonimos.length > 1) {
+        console.log(`🔀 "${name}" casa con ${homonimos.length} equipos distintos — se pregunta en vez de resolver por el caché`);
+        const intentCode2 = (intent?.intencion === 'rachas') ? 'r' : 'p';
+        const btns = [];
+        for (const t of homonimos.slice(0, 4)) {
+          const info = await getTeamPlayingPriority(t.id);
+          btns.push([{ text: `${t.name}${info.label ? ` · ${info.label}` : ' · sin partido próximo'}`, callback_data: `tm_${t.id}_${intentCode2}` }]);
+        }
+        btns.push([{ text: '❌ Cancelar', callback_data: 'tm_cancel' }]);
+        await bot.sendMessage(chatId,
+          `🔍 Hay *${homonimos.length}* equipos con ese nombre. ¿Cuál?`,
+          { parse_mode: 'Markdown', reply_markup: { inline_keyboard: btns } });
+        return 'PENDING';
+      }
+    } catch (e) { console.warn(`chequeo de homónimos para "${name}": ${e.message}`); }
+
     console.log(`🔎 findTeamWithButtons("${name}") resuelto vía caché de fixtures (HL+APIF) → ${c.name} (${c.id})`);
     return { team: { id: c.id, name: c.name, country: '', national: false } };
   }
@@ -7422,9 +7470,32 @@ async function applyStakeGate(picksText, enriched, matchesCtx, opts = {}) {
       return !!ctx && _INTL_SELECCIONES.test(ctx.liga || '');
     };
 
+    // ── Picks que vienen del MOTOR: el gate no los borra ──────────────────────
+    // El gate existe para cazar invenciones del LLM, no para desautorizar al
+    // motor. Si un pick salió de la lista cerrada ya pasó por EV, probabilidad
+    // y CUOTA REAL del bookmaker — borrarlo aquí es segundo-adivinar al propio
+    // motor con una cuota que el extractor pudo leer mal del texto.
+    // Caso real 4-ago: los picks del día traían "Más de 2.5 Goles @1.90" y
+    // "Ambos Marcan @1.70" del plan, y el mensaje salió con el análisis
+    // completo y "⛔ Sin picks de valor en este partido" en los dos partidos.
+    const _norm = (s) => String(s || '').toLowerCase().replace(/[^a-záéíóúñ0-9.]/g, '');
+    const delMotor = new Set((opts.motorPicks || []).map(p => _norm(p.marketLabel || p.seleccion)));
+    const esDelMotor = (x) => {
+      if (!delMotor.size) return false;
+      const s = _norm(x.seleccion);
+      for (const m of delMotor) if (m && (s === m || s.includes(m) || m.includes(s))) return true;
+      return false;
+    };
+
     const invalid = extracted.filter(x => {
       const st = finalStakes.get(x) ?? x.stake;
       const stakeBajo = st != null && st <= 5;
+      if (esDelMotor(x)) {
+        if (stakeBajo || (x.cuota != null && x.cuota > 1 && x.cuota < PUBLISH_MIN_ODDS)) {
+          console.log(`🛡️ Pick del motor conservado pese al gate: ${x.seleccion} (cuota leída ${x.cuota}, stake ${st}) — el motor ya lo validó con cuota real`);
+        }
+        return false;
+      }
       if (ganadorYaGanando(x)) { x._motivo = 'victoria/DNB/DC del equipo que ya va ganando (cuota en vivo ~1.1-1.35, sin valor)'; return true; }
       if (tarjetasEnSelecciones(x)) { x._motivo = 'tarjetas en torneo de selecciones (mercado vetado: 36-40% acierto medido, FIFA instruye contención arbitral)'; return true; }
       if (x.esCombinada) return stakeBajo; // combinada: su cuota es producto de patas — solo gate de stake
@@ -8991,7 +9062,9 @@ async function handlePicksHoy(chatId, forceRefresh = false) {
 
   // Gate pre-publicación: valida y corrige stakes antes de enviar
   const matchesCtxForGate = enriched.map(f => ({ fixtureId: f.fixtureId, local: f.local, visitante: f.visitante, liga: f.liga }));
-  const gateOpts = {};
+  // Los picks del motor van al gate para que NO los borre: ya pasaron por EV,
+  // probabilidad y cuota real. El gate solo debe cazar lo que invente el LLM.
+  const gateOpts = { motorPicks: topPicksFinal };
   picksText = await applyStakeGate(picksText, enriched, matchesCtxForGate, gateOpts);
 
   // Guardar en caché
@@ -10595,7 +10668,7 @@ async function handlePartido(chatId, teamName, countryHint = '', _teamDataOverri
   // "DNB / AH -0.5", locks 0.5) — mismo sanitizador que las rutas en vivo.
   analysis = sanitizeLivePicks(analysis, { mismoPartido: true });
   // Gate duro pre-publicación: valida stakes y elimina picks con cuota < 1.65
-  const gateOptsPartido = { maxPicks: 3 };
+  const gateOptsPartido = { maxPicks: 3, motorPicks: partidoPicks };
   analysis = await applyStakeGate(analysis, [fixtureForEngine], [{
     fixtureId: nextRaw.fixture.id, local: homeTeam, visitante: awayTeam,
     liga: nextRaw.league.name, fechaPartido: nextRaw.fixture.date,
