@@ -3378,6 +3378,7 @@ async function getTeamRealRecentStats(teamId, n = 4) {
     // equipos con 5.0 córners de media, uno con 5-5-5-5-5 y otro con 1-1-1-8-14,
     // no tienen la misma probabilidad de superar el 4.5.
     const serieCorners = [], serieTarjetas = [], serieCornersPartido = [];
+    const serieGolesHT = [], serieResultadoHT = [];   // 1er tiempo, desde los eventos
     let corners = 0, cornersN = 0, cards = 0, cardsN = 0;
     let shots = 0, shotsOn = 0, shotsN = 0, xg = 0, xgN = 0, fouls = 0, foulsN = 0, bigCh = 0;
     let golesTempranos = 0, golesTardios = 0, golesEq = 0;
@@ -3419,6 +3420,21 @@ async function getTeamRealRecentStats(teamId, n = 4) {
         if (min <= 30) golesTempranos++;
         if (min >= 75) golesTardios++;
       }
+
+      // ── 1er tiempo reconstruido desde los eventos ────────────────────────
+      // Ni Highlightly ni APIF exponen el marcador al descanso de forma fiable
+      // en este objeto, pero los goles traen minuto: contar los de min ≤ 45 da
+      // el marcador del 1T. Habilita las rachas de "Over 0.5/1.5 goles 1T" y
+      // "gana el 1er tiempo", que es donde el usuario ve valor (ligas nórdicas
+      // e islandesas con mucho gol temprano).
+      const golesHT = (m.events || []).filter(ev =>
+        ev.type === 'Goal' && (parseInt(String(ev.time).split('+')[0]) || 99) <= 45);
+      if (golesHT.length || (m.events || []).length) {
+        const propios = golesHT.filter(ev => ev.team?.id === teamId).length;
+        const rivales = golesHT.length - propios;
+        serieGolesHT.push(golesHT.length);
+        serieResultadoHT.push(propios > rivales ? 'W' : propios === rivales ? 'D' : 'L');
+      }
       await new Promise(r => setTimeout(r, 120)); // rate limit Highlightly
     }
 
@@ -3433,6 +3449,8 @@ async function getTeamRealRecentStats(teamId, n = 4) {
       ...(serieCorners.length        && { serieCorners }),
       ...(serieTarjetas.length       && { serieTarjetas }),
       ...(serieCornersPartido.length && { serieCornersPartido }),
+      ...(serieGolesHT.length        && { serieGolesHT }),
+      ...(serieResultadoHT.length    && { serieResultadoHT }),
       ...(golesEq  > 0 && {
         perfilGoles: {
           goles: golesEq,
@@ -5102,6 +5120,27 @@ function buildPickCandidates(enrichedFixtures) {
           const n = Math.min(sL.serieTarjetas.length, sV.serieTarjetas.length);
           const suma = Array.from({ length: n }, (_, i) => sL.serieTarjetas[i] + sV.serieTarjetas[i]);
           tasa = tasaCumplimiento(suma, lineaDe(m.key), 'over'); etq = 'tarjetas del partido';
+        } else if (/^ht_(over|under)/.test(m.key) && sL?.serieGolesHT && sV?.serieGolesHT) {
+          // Goles en el 1er tiempo: se promedian las dos series (cada equipo trae
+          // el total del 1T de SUS partidos, que es la mejor referencia disponible
+          // del ritmo de gol temprano de ambos).
+          const dir = /under/.test(m.key) ? 'under' : 'over';
+          const lin = lineaDe(m.key) ?? (/05$/.test(m.key) ? 0.5 : 1.5);
+          const tL = tasaCumplimiento(sL.serieGolesHT, lin, dir);
+          const tV = tasaCumplimiento(sV.serieGolesHT, lin, dir);
+          if (tL && tV) {
+            tasa = { n: tL.n + tV.n, hits: tL.hits + tV.hits, p: (tL.p + tV.p) / 2 };
+            etq = 'goles 1T';
+          }
+        } else if (/_1T$/.test(m.key) && (sL?.serieResultadoHT || sV?.serieResultadoHT)) {
+          // Ganar el 1er tiempo: tasa directa de victorias al descanso.
+          const esLocal = /^homeWin/.test(m.key);
+          const serie = esLocal ? sL?.serieResultadoHT : sV?.serieResultadoHT;
+          if (Array.isArray(serie) && serie.length >= 4 && /^(home|away)Win/.test(m.key)) {
+            const hits = serie.filter(r => r === 'W').length;
+            tasa = { n: serie.length, hits, p: (hits + 2) / (serie.length + 4) };
+            etq = `${esLocal ? f.local : f.visitante} gana 1T`;
+          }
         }
         if (tasa && m.prob) m.prob = mezclarConSerie(m.prob, tasa, `${etq} ${m.label}`);
       }
