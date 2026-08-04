@@ -1457,7 +1457,14 @@ async function findTeamMatchesInFixtureCache(query) {
   // dejaba dos botones idénticos ("Independiente del Valle · Liga Pro · HOY
   // 01:00 p. m." dos veces, caso real 2-ago). Se deduplica por nombre+liga+día
   // y se prefiere HL, cuyos ids sí funcionan con getTeamStats.
-  const pools = [{ list: liveCache.raw || [], src: 'hl' }];
+  // El pool EN VIVO va marcado: si el usuario pregunta por un equipo y uno de
+  // los candidatos está jugando ahora mismo, ese es casi seguro el que quiere.
+  // Sin esto, un nombre EXACTO de un equipo que no juega (100 pts) le ganaba a
+  // la coincidencia por sufijo del equipo que sí estaba en juego (80 pts) —
+  // caso real 3-ago: el feed llama "Deportivo Recoleta" al de Paraguay, el
+  // usuario escribió "Recoleta" estando ese partido EN VIVO, y el bot resolvió
+  // a otro Recoleta que no jugaba.
+  const pools = [{ list: liveCache.raw || [], src: 'hl', envivo: true }];
   for (let d = -1; d <= 2; d++) {
     const dObj = new Date(Date.now() + d * 86400000);
     const dsCol = dObj.toLocaleDateString('en-CA', { timeZone: 'America/Bogota' });
@@ -1469,7 +1476,7 @@ async function findTeamMatchesInFixtureCache(query) {
     pools.push({ list: hl || [], src: 'hl' }, { list: apif || [], src: 'apif' });
   }
   const porId = new Map();  // clave nombre|liga|día → { id, name, score, liga, fecha, rival, src }
-  for (const { list: pool, src } of pools) {
+  for (const { list: pool, src, envivo } of pools) {
     for (const m of pool) {
       const h = m.homeTeam || m.teams?.home;   // HL o APIF
       const a = m.awayTeam || m.teams?.away;
@@ -1506,6 +1513,10 @@ async function findTeamMatchesInFixtureCache(query) {
         else if (q.length >= 5 && tn.includes(q)) s = 60;
         else if (coreMatch(tCore, qCore)) s = 70;   // afijos: Benfica SL ↔ Benfica, Pafos FC ↔ Pafos
         if (femYouth && s > 0) s -= 45;
+        // Bonus por estar EN JUEGO: pesa más que la diferencia entre nombre
+        // exacto (100) y coincidencia por afijo (80). Preguntar por un equipo
+        // mientras juega es la señal más fuerte de cuál se quiere.
+        if (envivo && s > 0) s += 25;
         if (s < 60) continue;
         // Clave por identidad REAL del equipo+partido, no por id: el mismo club
         // llega con id de HL y con id de APIF y se duplicaba en los botones.
