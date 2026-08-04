@@ -3371,6 +3371,13 @@ async function getTeamRealRecentStats(teamId, n = 4) {
     const fixtures = await getTeamLastFixtures(teamId, n);
     if (fixtures.length < 3) { _teamRealStatsCache.set(teamId, { ts: Date.now(), data: null }); return null; }
 
+    // Series partido a partido, no solo la suma. El promedio pierde justo lo que
+    // el usuario ve a ojo: que Boca lanzó 6 y 7 córners, o que un equipo lleva
+    // 5 de 5 superando una línea. Con la serie se puede medir la TASA DE
+    // CUMPLIMIENTO de una línea concreta, que es distinto del promedio: dos
+    // equipos con 5.0 córners de media, uno con 5-5-5-5-5 y otro con 1-1-1-8-14,
+    // no tienen la misma probabilidad de superar el 4.5.
+    const serieCorners = [], serieTarjetas = [], serieCornersPartido = [];
     let corners = 0, cornersN = 0, cards = 0, cardsN = 0;
     let shots = 0, shotsOn = 0, shotsN = 0, xg = 0, xgN = 0, fouls = 0, foulsN = 0, bigCh = 0;
     let golesTempranos = 0, golesTardios = 0, golesEq = 0;
@@ -3383,9 +3390,16 @@ async function getTeamRealRecentStats(teamId, n = 4) {
       if (mySt?.statistics) {
         const raw = {};
         mySt.statistics.forEach(s => { raw[s.displayName] = s.value; });
-        if (raw['Corners'] != null) { corners += raw['Corners']; cornersN++; }
+        if (raw['Corners'] != null) { corners += raw['Corners']; cornersN++; serieCorners.push(raw['Corners']); }
         if (raw['Yellow cards'] != null || raw['Red cards'] != null) {
-          cards += (raw['Yellow cards'] || 0) + (raw['Red cards'] || 0); cardsN++;
+          const tj = (raw['Yellow cards'] || 0) + (raw['Red cards'] || 0);
+          cards += tj; cardsN++; serieTarjetas.push(tj);
+        }
+        // Total del PARTIDO (ambos equipos) para las líneas de córners totales
+        const rivalSt = stArr.find(x => x.team?.id !== teamId);
+        if (rivalSt?.statistics && raw['Corners'] != null) {
+          const rr = {}; rivalSt.statistics.forEach(x => { rr[x.displayName] = x.value; });
+          if (rr['Corners'] != null) serieCornersPartido.push(raw['Corners'] + rr['Corners']);
         }
         if (raw['Shots on target'] != null) {
           shotsOn += raw['Shots on target'];
@@ -3416,6 +3430,9 @@ async function getTeamRealRecentStats(teamId, n = 4) {
       ...(xgN      > 0 && { xgPerGame: +(xg / xgN).toFixed(2) }),
       ...(foulsN   > 0 && { faltasPerGame: +(fouls / foulsN).toFixed(2) }),
       ...(bigCh    > 0 && { ocasionesClarasEnMuestra: bigCh }),
+      ...(serieCorners.length        && { serieCorners }),
+      ...(serieTarjetas.length       && { serieTarjetas }),
+      ...(serieCornersPartido.length && { serieCornersPartido }),
       ...(golesEq  > 0 && {
         perfilGoles: {
           goles: golesEq,
@@ -3428,7 +3445,7 @@ async function getTeamRealRecentStats(teamId, n = 4) {
     };
     const data = Object.keys(out).length > 1 ? out : null;
     _teamRealStatsCache.set(teamId, { ts: Date.now(), data });
-    if (data) console.log(`📐 Stats reales equipo ${teamId}: corners ${data.cornersPerGame ?? '—'}/p, tarjetas ${data.tarjetasPerGame ?? '—'}/p, xG ${data.xgPerGame ?? '—'}/p (${fixtures.length} partidos)`);
+    if (data) console.log(`📐 Stats reales equipo ${teamId}: corners ${data.cornersPerGame ?? '—'}/p [${(data.serieCorners || []).join(',')}], tarjetas ${data.tarjetasPerGame ?? '—'}/p [${(data.serieTarjetas || []).join(',')}], xG ${data.xgPerGame ?? '—'}/p (${fixtures.length} partidos)`);
     return data;
   } catch (e) {
     console.warn(`getTeamRealRecentStats(${teamId}): ${e.message}`);
@@ -4781,6 +4798,31 @@ function buildLiveCandidates(probsLive, cuotasVivo = {}) {
 const TEAM_CORNERS_ON = true;   // reactivado 3-ago: ahora la calibración SÍ ve sus resultados
                                 // (los SuperPicks ya cuentan) y los apaga sola si siguen fallando
 
+// ── Tasa de cumplimiento de una línea en los últimos partidos ────────────────
+// Responde a lo que el usuario ve a ojo y el Poisson no: "este equipo lleva 5 de
+// 5 pasando el Over 4.5 córners". El promedio no distingue entre 5-5-5-5-5 y
+// 1-1-1-8-14, y para superar una línea eso es justamente lo que importa.
+// Se encoge hacia el 50% con un prior débil (Laplace +2/+4) porque 5 partidos
+// son poca muestra: 5/5 no es 100%, es 78%.
+function tasaCumplimiento(serie, linea, direccion = 'over') {
+  if (!Array.isArray(serie) || serie.length < 4) return null;
+  const hits = serie.filter(v => direccion === 'over' ? v > linea : v < linea).length;
+  return { n: serie.length, hits, p: (hits + 2) / (serie.length + 4) };
+}
+
+// Mezcla la probabilidad del modelo con la tasa observada. El peso de lo
+// observado crece con la muestra pero nunca pasa de 0.45: la serie informa,
+// no manda — 5 partidos no derriban un modelo, pero sí lo corrigen.
+function mezclarConSerie(probModelo, tasa, log) {
+  if (!tasa) return probModelo;
+  const w = Math.min(0.45, tasa.n / 12);
+  const p = w * tasa.p + (1 - w) * probModelo;
+  if (log && Math.abs(p - probModelo) > 0.04) {
+    console.log(`📈 ${log}: modelo ${(probModelo * 100).toFixed(1)}% + racha ${tasa.hits}/${tasa.n} → ${(p * 100).toFixed(1)}%`);
+  }
+  return p;
+}
+
 function buildPickCandidates(enrichedFixtures) {
   const candidates = [];
   const calib = getMarketCalibration();
@@ -5037,6 +5079,32 @@ function buildPickCandidates(enrichedFixtures) {
         console.log(`♻️ ${_fam} rehabilitado en ${f.liga} (tasa base ${/CARDS/.test(_fam) ? baseRates.cards + ' tarj' : baseRates.corners + ' corners'}/p — apagado global no aplica)`);
       }
       if (_cal && _cal.factor !== 1 && m.prob) m.prob = Math.min(0.97, m.prob * _cal.factor);
+
+      // ── Corrección por racha real del equipo ────────────────────────────────
+      // Antes de filtrar por probabilidad, se mezcla la del modelo con la tasa
+      // de cumplimiento observada en los últimos partidos. Es lo que hacía falta
+      // para que el motor "vea" lo que se ve a ojo: un equipo que lleva 5 de 5
+      // pasando el Over 4.5 córners, o uno que nunca llega a esa línea.
+      // Solo aplica a córners y tarjetas, donde hay serie medida por partido.
+      {
+        const sL = f.statsLocal, sV = f.statsVisitante;
+        const lineaDe = (k) => { const mm = String(k).match(/(\d)(\d)$/); return mm ? +(`${mm[1]}.${mm[2]}`) : null; };
+        let tasa = null, etq = null;
+        if (/^homeCorners_over/.test(m.key) && sL?.serieCorners) {
+          tasa = tasaCumplimiento(sL.serieCorners, lineaDe(m.key), 'over');  etq = `${f.local} córners`;
+        } else if (/^awayCorners_over/.test(m.key) && sV?.serieCorners) {
+          tasa = tasaCumplimiento(sV.serieCorners, lineaDe(m.key), 'over');  etq = `${f.visitante} córners`;
+        } else if (/^cornersOver/.test(m.key) && sL?.serieCornersPartido) {
+          tasa = tasaCumplimiento(sL.serieCornersPartido, lineaDe(m.key), 'over'); etq = `${f.local} córners totales`;
+        } else if (/^cornersUnder/.test(m.key) && sL?.serieCornersPartido) {
+          tasa = tasaCumplimiento(sL.serieCornersPartido, lineaDe(m.key), 'under'); etq = `${f.local} córners totales`;
+        } else if (/^cardsOver/.test(m.key) && sL?.serieTarjetas && sV?.serieTarjetas) {
+          const n = Math.min(sL.serieTarjetas.length, sV.serieTarjetas.length);
+          const suma = Array.from({ length: n }, (_, i) => sL.serieTarjetas[i] + sV.serieTarjetas[i]);
+          tasa = tasaCumplimiento(suma, lineaDe(m.key), 'over'); etq = 'tarjetas del partido';
+        }
+        if (tasa && m.prob) m.prob = mezclarConSerie(m.prob, tasa, `${etq} ${m.label}`);
+      }
 
       if (!m.prob || m.prob < (m.minProb || 0.48)) { _rej.prob++; continue; } // prob insuficiente
 
